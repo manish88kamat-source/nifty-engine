@@ -219,26 +219,43 @@ class UnifiedSMCBacktester:
 # 4. DATA GENERATION & SIMULATION RUN
 # ==========================================
 
+# ==========================================
+# 4. REAL MARKET DATA FETCH & SIMULATION RUN
+# ==========================================
+
 if __name__ == "__main__":
-    np.random.seed(101)
-    dates = pd.date_range("2026-01-01", periods=1200, freq="5min")
-    price_series = 24000 + np.cumsum(np.random.randn(1200) * 12)
-    
-    df_5m = pd.DataFrame({
-        'Open': price_series,
-        'High': price_series + np.random.uniform(2, 15, 1200),
-        'Low': price_series - np.random.uniform(2, 15, 1200),
-        'Close': price_series + np.random.randn(1200) * 4,
-        'Volume': np.random.randint(2000, 40000, 1200)
-    }, index=dates)
+    import yfinance as yf
 
-    df_daily = df_5m.resample('D').agg({
-        'Open': 'first', 'High': 'max', 'Low': 'min', 'Close': 'last', 'Volume': 'sum'
-    }).dropna()
+    print("Fetching live market data for Nifty 50 from Yahoo Finance...")
 
-    df_vix = pd.Series(np.random.uniform(12.0, 18.0, len(df_daily)), index=df_daily.index)
+    # Fetch last 1 month of 5-minute interval data for Nifty 50 (^NSEI)
+    df_5m = yf.download(tickers="^NSEI", period="1mo", interval="5m")
 
-    # Initialize Engine
-    tester = UnifiedSMCBacktester(df_5m, df_daily, df_vix)
-    tester.run()
-    tester.display_results()
+    # Fix multi-index columns if yfinance returns nested headers
+    if isinstance(df_5m.columns, pd.MultiIndex):
+        df_5m.columns = df_5m.columns.get_level_values(0)
+
+    # Clean data (drop missing rows)
+    df_5m = df_5m.dropna()
+
+    if df_5m.empty:
+        print("Error: Market data fetch fail ho gaya. Check internet or ticker symbol.")
+    else:
+        print(f"Data successfully loaded! Total 5-Min Candles: {len(df_5m)}")
+
+        # Resample 5-minute data to create Daily bars for Macro Regime calculation
+        df_daily = df_5m.resample('D').agg({
+            'Open': 'first', 
+            'High': 'max', 
+            'Low': 'min', 
+            'Close': 'last', 
+            'Volume': 'sum'
+        }).dropna()
+
+        # Real-time VIX baseline mapping (14.0 normal market baseline)
+        df_vix = pd.Series(14.0, index=df_daily.index)
+
+        # Initialize Engine & Run Real Backtest
+        tester = UnifiedSMCBacktester(df_5m, df_daily, df_vix)
+        tester.run()
+        tester.display_results()
