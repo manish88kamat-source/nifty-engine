@@ -9,9 +9,9 @@ import os
 # -------------------------------------------------------------------
 # PAGE CONFIG
 # -------------------------------------------------------------------
-st.set_page_config(page_title="Adaptive Engine v12.2", layout="wide", initial_sidebar_state="expanded")
-st.title("🛡️ Adaptive Engine v12.2 (ValueError Fixed + Backtest)")
-st.caption("Intraday 5-min & Swing Backtester | Value Error Resolved | Smart Exits | Auto Logger")
+st.set_page_config(page_title="Institutional Engine v15.0", layout="wide", initial_sidebar_state="expanded")
+st.title("🏛️ Institutional Engine v15.0 (Expert Multi-Indicator Correlation)")
+st.caption("Opening Price Context + Multi-Indicator Correlation Matrix + High Win-Rate Filters")
 
 JOURNAL_FILE = "paper_trade_journal.csv"
 
@@ -78,16 +78,13 @@ def fetch_heavyweights():
         return 5, 5
 
 # -------------------------------------------------------------------
-# INDICATOR STACK (BUG FIXED HERE)
+# EXPERT MULTI-INDICATOR CORRELATION PIPELINE
 # -------------------------------------------------------------------
-def compute_dynamic_indicators(df_spot, df_fut):
+def build_expert_correlation_engine(df_spot, df_fut):
     df = df_spot.copy()
+    df['Date'] = df.index.date
     
-    df["Day_High"] = df["High"].cummax()
-    df["Day_Low"] = df["Low"].cummin()
-    df["Drop_From_High"] = df["Day_High"] - df["Close"]
-    df["Rally_From_Low"] = df["Close"] - df["Day_Low"]
-    
+    # 1. EMAs & VWAP Stack
     df["EMA_fast"] = df["Close"].ewm(span=9, adjust=False).mean()
     df["EMA_slow"] = df["Close"].ewm(span=21, adjust=False).mean()
     
@@ -97,10 +94,9 @@ def compute_dynamic_indicators(df_spot, df_fut):
     else:
         df["VWAP"] = (df["High"] + df["Low"] + df["Close"]) / 3
 
+    # 2. ADX & Directional Indicators
     tr = pd.concat([df["High"]-df["Low"], (df["High"]-df["Close"].shift()).abs(), (df["Low"]-df["Close"].shift()).abs()], axis=1).max(axis=1)
     df["ATR"] = tr.rolling(14).mean()
-    df["ATR_Avg"] = df["ATR"].rolling(50).mean()
-    df["ATR_Expansion"] = df["ATR"] / (df["ATR_Avg"] + 1e-9)
     
     up = df["High"] - df["High"].shift(1)
     dn = df["Low"].shift(1) - df["Low"]
@@ -112,75 +108,141 @@ def compute_dynamic_indicators(df_spot, df_fut):
     df["ADX"] = dx.rolling(14).mean()
     df["Plus_DI"] = pos_di
     df["Minus_DI"] = neg_di
-    
-    # FIXED: PANDAS ELEMENT-WISE MIN/MAX FOR CANDLE WICKS
+
+    # 3. Hilega-Milega Logic (RSI + WMA Correlation)
+    delta = df["Close"].diff()
+    gain = (delta.where(delta > 0, 0)).rolling(9).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(9).mean()
+    rs = gain / (loss + 1e-9)
+    df["RSI_9"] = 100 - (100 / (1 + rs))
+    df["HM_Fast"] = df["RSI_9"].ewm(span=3, adjust=False).mean()
+    df["HM_Slow"] = df["RSI_9"].rolling(window=21).mean()
+    df["HM_Bullish"] = df["HM_Fast"] > df["HM_Slow"]
+
+    # 4. Candlesticks
     o, h, l, c = df["Open"], df["High"], df["Low"], df["Close"]
     body = (c - o).abs()
     min_oc = np.minimum(o, c)
     max_oc = np.maximum(o, c)
     lower_wick = min_oc - l
     upper_wick = h - max_oc
+    df["Is_Bear_Pinbar"] = (upper_wick > 2 * body) & (lower_wick < 0.2 * body)
+    df["Is_Bull_Pinbar"] = (lower_wick > 2 * body) & (upper_wick < 0.2 * body)
+
+    # 5. Context & Opening Ranges
+    daily_groups = df.groupby('Date')
+    df["Gap_Pct"] = 0.0
+    df["Day_Bias"] = "NEUTRAL"
+    df["OR_High"] = np.nan
+    df["OR_Low"] = np.nan
+    prev_close = None
     
-    df["Bull_Pinbar"] = (lower_wick > 2 * body) & (upper_wick < 0.2 * body)
-    df["Bear_Pinbar"] = (upper_wick > 2 * body) & (lower_wick < 0.2 * body)
-    
+    for date, group in daily_groups:
+        if len(group) == 0: continue
+        first_open = group.iloc[0]["Open"]
+        gap = ((first_open - prev_close) / prev_close) * 100 if prev_close is not None else 0.0
+        f_open, f_close = group.iloc[0]["Open"], group.iloc[0]["Close"]
+        
+        or_high = group.iloc[0:6]["High"].max() if len(group) >= 6 else group["High"].max()
+        or_low = group.iloc[0:6]["Low"].min() if len(group) >= 6 else group["Low"].min()
+        
+        bias = "NEUTRAL"
+        if gap <= -0.15 and f_close < f_open: bias = "BEARISH"
+        elif gap >= 0.15 and f_close > f_open: bias = "BULLISH"
+        elif gap > 0.25 and f_close < f_open: bias = "BEARISH (Fade Gap Up)"
+        elif gap < -0.25 and f_close > f_open: bias = "BULLISH (Fade Gap Down)"
+        
+        df.loc[group.index, "Gap_Pct"] = gap
+        df.loc[group.index, "Day_Bias"] = bias
+        df.loc[group.index, "OR_High"] = or_high
+        df.loc[group.index, "OR_Low"] = or_low
+        prev_close = group.iloc[-1]["Close"]
+        
     return df.dropna()
 
 # -------------------------------------------------------------------
-# HISTORICAL BACKTEST ENGINE
+# CORRELATION BACKTEST ENGINE
 # -------------------------------------------------------------------
-def run_dynamic_backtest(df, mode):
+def run_correlation_backtest(df):
     if len(df) < 50: return None
     trades = []
     i = 30
     
     while i < len(df) - 10:
         row = df.iloc[i]
+        if row.name.time() < time(9, 45):
+            i += 1; continue
+            
         close_p = row["Close"]
+        vwap_p = row["VWAP"]
         ema_f = row["EMA_fast"]
+        ema_s = row["EMA_slow"]
         atr = row["ATR"]
-        drop_pts = row["Drop_From_High"]
-        rally_pts = row["Rally_From_Low"]
-        trigger_threshold = max(10.0, atr * 1.0)
+        bias = row["Day_Bias"]
+        or_high = row["OR_High"]
+        or_low = row["OR_Low"]
         
-        signal_type = None
-        if drop_pts >= trigger_threshold and close_p <= ema_f:
-            signal_type = "PUT"
-        elif rally_pts >= trigger_threshold and close_p >= ema_f:
-            signal_type = "CALL"
-            
-        if signal_type:
-            entry_idx = df.index[i+1]
-            entry_price = df.iloc[i+1]["Open"]
-            sl_dist = 0.85 * atr
-            sl = entry_price - sl_dist if signal_type == "CALL" else entry_price + sl_dist
-            t1 = entry_price + 1.5 * sl_dist if signal_type == "CALL" else entry_price - 1.5 * sl_dist
-            t2 = entry_price + 2.5 * sl_dist if signal_type == "CALL" else entry_price - 2.5 * sl_dist
-            
-            exited = False
-            for j in range(i+2, min(i+35, len(df))):
-                curr_bar = df.iloc[j]
-                if signal_type == "CALL":
-                    if curr_bar["Low"] <= sl:
-                        trades.append({"Entry Date": entry_idx.strftime("%Y-%m-%d %H:%M"), "Exit Date": df.index[j].strftime("%Y-%m-%d %H:%M"), "Action": "CALL", "Entry": round(entry_price,1), "Exit": round(sl,1), "PnL": round(sl-entry_price,1), "Result": "Loss"})
-                        i = j; exited = True; break
-                    elif curr_bar["High"] >= t2:
-                        trades.append({"Entry Date": entry_idx.strftime("%Y-%m-%d %H:%M"), "Exit Date": df.index[j].strftime("%Y-%m-%d %H:%M"), "Action": "CALL", "Entry": round(entry_price,1), "Exit": round(t2,1), "PnL": round(t2-entry_price,1), "Result": "Win"})
-                        i = j; exited = True; break
-                elif signal_type == "PUT":
-                    if curr_bar["High"] >= sl:
-                        trades.append({"Entry Date": entry_idx.strftime("%Y-%m-%d %H:%M"), "Exit Date": df.index[j].strftime("%Y-%m-%d %H:%M"), "Action": "PUT", "Entry": round(entry_price,1), "Exit": round(sl,1), "PnL": round(entry_price-sl,1), "Result": "Loss"})
-                        i = j; exited = True; break
-                    elif curr_bar["Low"] <= t2:
-                        trades.append({"Entry Date": entry_idx.strftime("%Y-%m-%d %H:%M"), "Exit Date": df.index[j].strftime("%Y-%m-%d %H:%M"), "Action": "PUT", "Entry": round(entry_price,1), "Exit": round(t2,1), "PnL": round(entry_price-t2,1), "Result": "Win"})
-                        i = j; exited = True; break
-            
-            if not exited:
-                exit_idx = min(i+30, len(df)-1)
-                exit_p = df.iloc[exit_idx]["Close"]
-                pnl = exit_p - entry_price if signal_type == "CALL" else entry_price - exit_p
-                trades.append({"Entry Date": entry_idx.strftime("%Y-%m-%d %H:%M"), "Exit Date": df.index[exit_idx].strftime("%Y-%m-%d %H:%M"), "Action": signal_type, "Entry": round(entry_price,1), "Exit": round(exit_p,1), "PnL": round(pnl,1), "Result": "Win" if pnl > 0 else "Loss"})
-                i += 10
+        # Primary Price Action Trigger
+        primary_trigger = None
+        if close_p < or_low: primary_trigger = "PUT"
+        elif close_p > or_high: primary_trigger = "CALL"
+        elif row["Is_Bear_Pinbar"] and close_p < vwap_p: primary_trigger = "PUT"
+        elif row["Is_Bull_Pinbar"] and close_p > vwap_p: primary_trigger = "CALL"
+
+        # Multi-Indicator Correlation Score Calculation
+        if primary_trigger:
+            corr_score = 0
+            if primary_trigger == "CALL":
+                if close_p > vwap_p: corr_score += 25
+                if ema_f > ema_s: corr_score += 25
+                if row["Plus_DI"] > row["Minus_DI"]: corr_score += 25
+                if row["HM_Bullish"]: corr_score += 25
+            elif primary_trigger == "PUT":
+                if close_p < vwap_p: corr_score += 25
+                if ema_f < ema_s: corr_score += 25
+                if row["Minus_DI"] > row["Plus_DI"]: corr_score += 25
+                if not row["HM_Bullish"]: corr_score += 25
+                
+            # EXECUTE ONLY IF CORRELATION SCORE >= 75%
+            if corr_score >= 75:
+                entry_idx = df.index[i+1]
+                entry_price = df.iloc[i+1]["Open"]
+                sl_dist = 0.9 * atr
+                sl = entry_price - sl_dist if primary_trigger == "CALL" else entry_price + sl_dist
+                t1 = entry_price + 1.8 * sl_dist if primary_trigger == "CALL" else entry_price - 1.8 * sl_dist
+                
+                exited = False
+                for j in range(i+2, min(i+40, len(df))):
+                    curr_bar = df.iloc[j]
+                    if curr_bar.name.time() >= time(15, 15):
+                        exit_p = curr_bar["Close"]
+                        pnl = exit_p - entry_price if primary_trigger == "CALL" else entry_price - exit_p
+                        trades.append({"Entry Date": entry_idx.strftime("%Y-%m-%d %H:%M"), "Exit Date": df.index[j].strftime("%Y-%m-%d %H:%M"), "Action": primary_trigger, "Entry": round(entry_price,1), "Exit": round(exit_p,1), "PnL": round(pnl,1), "Result": "Win" if pnl > 0 else "Loss", "Correlation": f"{corr_score}%"})
+                        i = j + 1; exited = True; break
+                        
+                    if primary_trigger == "CALL":
+                        if curr_bar["Low"] <= sl:
+                            trades.append({"Entry Date": entry_idx.strftime("%Y-%m-%d %H:%M"), "Exit Date": df.index[j].strftime("%Y-%m-%d %H:%M"), "Action": "CALL", "Entry": round(entry_price,1), "Exit": round(sl,1), "PnL": round(sl-entry_price,1), "Result": "Loss", "Correlation": f"{corr_score}%"})
+                            i = j + 4; exited = True; break
+                        elif curr_bar["High"] >= t1:
+                            trades.append({"Entry Date": entry_idx.strftime("%Y-%m-%d %H:%M"), "Exit Date": df.index[j].strftime("%Y-%m-%d %H:%M"), "Action": "CALL", "Entry": round(entry_price,1), "Exit": round(t1,1), "PnL": round(t1-entry_price,1), "Result": "Win", "Correlation": f"{corr_score}%"})
+                            i = j + 4; exited = True; break
+                    elif primary_trigger == "PUT":
+                        if curr_bar["High"] >= sl:
+                            trades.append({"Entry Date": entry_idx.strftime("%Y-%m-%d %H:%M"), "Exit Date": df.index[j].strftime("%Y-%m-%d %H:%M"), "Action": "PUT", "Entry": round(entry_price,1), "Exit": round(sl,1), "PnL": round(entry_price-sl,1), "Result": "Loss", "Correlation": f"{corr_score}%"})
+                            i = j + 4; exited = True; break
+                        elif curr_bar["Low"] <= t1:
+                            trades.append({"Entry Date": entry_idx.strftime("%Y-%m-%d %H:%M"), "Exit Date": df.index[j].strftime("%Y-%m-%d %H:%M"), "Action": "PUT", "Entry": round(entry_price,1), "Exit": round(t1,1), "PnL": round(entry_price-t1,1), "Result": "Win", "Correlation": f"{corr_score}%"})
+                            i = j + 4; exited = True; break
+                
+                if not exited:
+                    exit_idx = min(i+35, len(df)-1)
+                    exit_p = df.iloc[exit_idx]["Close"]
+                    pnl = exit_p - entry_price if primary_trigger == "CALL" else entry_price - exit_p
+                    trades.append({"Entry Date": entry_idx.strftime("%Y-%m-%d %H:%M"), "Exit Date": df.index[exit_idx].strftime("%Y-%m-%d %H:%M"), "Action": primary_trigger, "Entry": round(entry_price,1), "Exit": round(exit_p,1), "PnL": round(pnl,1), "Result": "Win" if pnl > 0 else "Loss", "Correlation": f"{corr_score}%"})
+                    i += 6
+            else:
+                i += 1
         else:
             i += 1
             
@@ -193,96 +255,16 @@ def run_dynamic_backtest(df, mode):
     }
 
 # -------------------------------------------------------------------
-# AUTO-LOGGER FOR PAPER TRADES
-# -------------------------------------------------------------------
-def process_smart_exits_and_logger(signal, action, latest, index_choice, confidence_score, qty, notes):
-    cols = ["Date", "Index", "Confidence", "Signal", "Action", "Qty", "Entry", "Current_SL", "T1", "T2", "Status", "Exit_Price", "PnL", "Notes"]
-    if not os.path.exists(JOURNAL_FILE):
-        pd.DataFrame(columns=cols).to_csv(JOURNAL_FILE, index=False)
-    
-    journal = pd.read_csv(JOURNAL_FILE)
-    if "Status" not in journal.columns: return journal, []
-
-    latest_date_str = latest.name.strftime("%Y-%m-%d %H:%M")
-    latest_close = round(float(latest["Close"]), 1)
-    latest_high = float(latest["High"])
-    latest_low = float(latest["Low"])
-    atr = float(latest["ATR"])
-    sl_dist = 0.85 * atr
-
-    exit_alerts = []
-    updated = False
-
-    for idx, row in journal.iterrows():
-        status = str(row["Status"])
-        if status in ["Open", "Partial_Booked"]:
-            entry, curr_sl, t1, t2, act = float(row["Entry"]), float(row["Current_SL"]), float(row["T1"]), float(row["T2"]), str(row["Action"])
-            
-            if act == "CALL":
-                new_trail_sl = round(latest_close - sl_dist, 1)
-                if new_trail_sl > curr_sl:
-                    journal.at[idx, "Current_SL"] = new_trail_sl; updated = True
-
-                if latest_low <= curr_sl:
-                    journal.at[idx, "Status"] = "Closed_Loss" if status == "Open" else "Closed_Partial_Win"
-                    journal.at[idx, "Exit_Price"] = curr_sl; journal.at[idx, "PnL"] = round(curr_sl - entry, 1)
-                    exit_alerts.append(f"🛑 CALL SL Hit / Trailing SL Executed at ₹{curr_sl:.1f}"); updated = True
-                elif latest_high >= t1 and status == "Open":
-                    journal.at[idx, "Status"] = "Partial_Booked"; journal.at[idx, "Current_SL"] = entry
-                    exit_alerts.append(f"🎯 CALL T1 HIT! 50% Profit Booked at ₹{t1:.1f}"); updated = True
-                elif latest_high >= t2:
-                    journal.at[idx, "Status"] = "Closed_Full_Win"; journal.at[idx, "Exit_Price"] = t2; journal.at[idx, "PnL"] = round(t2 - entry, 1)
-                    exit_alerts.append(f"🚀 CALL T2 FULL TARGET HIT at ₹{t2:.1f}"); updated = True
-
-            elif act == "PUT":
-                new_trail_sl = round(latest_close + sl_dist, 1)
-                if new_trail_sl < curr_sl:
-                    journal.at[idx, "Current_SL"] = new_trail_sl; updated = True
-
-                if latest_high >= curr_sl:
-                    journal.at[idx, "Status"] = "Closed_Loss" if status == "Open" else "Closed_Partial_Win"
-                    journal.at[idx, "Exit_Price"] = curr_sl; journal.at[idx, "PnL"] = round(entry - curr_sl, 1)
-                    exit_alerts.append(f"🛑 PUT SL Hit / Trailing SL Executed at ₹{curr_sl:.1f}"); updated = True
-                elif latest_low <= t1 and status == "Open":
-                    journal.at[idx, "Status"] = "Partial_Booked"; journal.at[idx, "Current_SL"] = entry
-                    exit_alerts.append(f"🎯 PUT T1 HIT! 50% Profit Booked at ₹{t1:.1f}"); updated = True
-                elif latest_low <= t2:
-                    journal.at[idx, "Status"] = "Closed_Full_Win"; journal.at[idx, "Exit_Price"] = t2; journal.at[idx, "PnL"] = round(entry - t2, 1)
-                    exit_alerts.append(f"🚀 PUT T2 FULL TARGET HIT at ₹{t2:.1f}"); updated = True
-
-    if signal != "NO TRADE":
-        already_logged = False
-        if not journal.empty:
-            already_logged = ((journal["Date"] == latest_date_str) & (journal["Index"] == index_choice)).any()
-        
-        if not already_logged:
-            sl_val = round(latest_close - sl_dist, 1) if action == "CALL" else round(latest_close + sl_dist, 1)
-            t1_val = round(latest_close + 1.5 * sl_dist, 1) if action == "CALL" else round(latest_close - 1.5 * sl_dist, 1)
-            t2_val = round(latest_close + 2.5 * sl_dist, 1) if action == "CALL" else round(latest_close - 2.5 * sl_dist, 1)
-            
-            new_entry = {
-                "Date": latest_date_str, "Index": index_choice, "Confidence": f"{confidence_score:.0f}%",
-                "Signal": signal, "Action": action, "Qty": qty, "Entry": latest_close, "Current_SL": sl_val, 
-                "T1": t1_val, "T2": t2_val, "Status": "Open", "Exit_Price": "", "PnL": "", "Notes": notes
-            }
-            journal = pd.concat([journal, pd.DataFrame([new_entry])], ignore_index=True)
-            updated = True
-
-    if updated: journal.to_csv(JOURNAL_FILE, index=False)
-    return journal, exit_alerts
-
-# -------------------------------------------------------------------
 # MAIN EXECUTION PIPELINE
 # -------------------------------------------------------------------
-is_intraday = (mode == "Intraday (5-min)")
-df_spot = fetch_market_data(spot_ticker, "5d" if is_intraday else "1y", "5m" if is_intraday else "1d")
-df_fut = fetch_market_data(fut_ticker, "5d" if is_intraday else "1y", "5m" if is_intraday else "1d")
+df_spot = fetch_market_data(spot_ticker, "5d", "5m")
+df_fut = fetch_market_data(fut_ticker, "5d", "5m")
 
 if df_spot.empty or len(df_spot) < 30:
     st.error("Data loading. Please refresh in a moment.")
     st.stop()
 
-df = compute_dynamic_indicators(df_spot, df_fut)
+df = build_expert_correlation_engine(df_spot, df_fut)
 vix_val, vix_chg = fetch_realtime_vix()
 bull_hw, bear_hw = fetch_heavyweights()
 
@@ -291,90 +273,64 @@ close_p = float(latest["Close"])
 vwap_p = float(latest["VWAP"])
 ema_f = float(latest["EMA_fast"])
 ema_s = float(latest["EMA_slow"])
-drop_pts = float(latest["Drop_From_High"])
-rally_pts = float(latest["Rally_From_Low"])
-adx_val = float(latest["ADX"])
-plus_di = float(latest["Plus_DI"])
-minus_di = float(latest["Minus_DI"])
 atr = float(latest["ATR"])
-atr_expansion = float(latest["ATR_Expansion"])
+bias = str(latest["Day_Bias"])
+gap = float(latest["Gap_Pct"])
+or_high = float(latest["OR_High"])
+or_low = float(latest["OR_Low"])
 
-dynamic_multiplier = 1.3 if atr_expansion > 1.2 else (1.0 if atr_expansion >= 0.8 else 0.8)
-dynamic_trigger_pts = max(10.0, atr * dynamic_multiplier)
+# -------------------------------------------------------------------
+# REAL-TIME CORRELATION SCORING
+# -------------------------------------------------------------------
+primary_action = "WAIT"
+if close_p < or_low or (latest["Is_Bear_Pinbar"] and close_p < vwap_p):
+    primary_action = "PUT"
+elif close_p > or_high or (latest["Is_Bull_Pinbar"] and close_p > vwap_p):
+    primary_action = "CALL"
 
-signal, action = "NO TRADE", "WAIT"
-primary_direction = "NEUTRAL"
+corr_score = 0
+if primary_action == "CALL":
+    if close_p > vwap_p: corr_score += 25
+    if ema_f > ema_s: corr_score += 25
+    if latest["Plus_DI"] > latest["Minus_DI"]: corr_score += 25
+    if latest["HM_Bullish"]: corr_score += 25
+elif primary_action == "PUT":
+    if close_p < vwap_p: corr_score += 25
+    if ema_f < ema_s: corr_score += 25
+    if latest["Minus_DI"] > latest["Plus_DI"]: corr_score += 25
+    if not latest["HM_Bullish"]: corr_score += 25
 
-if drop_pts >= dynamic_trigger_pts and close_p <= ema_f:
-    signal = "BEARISH MOMENTUM DROP"; action = "PUT"; primary_direction = "BEARISH"
-elif rally_pts >= dynamic_trigger_pts and close_p >= ema_f:
-    signal = "BULLISH MOMENTUM RALLY"; action = "CALL"; primary_direction = "BULLISH"
-elif ema_f < ema_s and close_p < vwap_p:
-    signal = "EMA BEARISH CROSSOVER"; action = "PUT"; primary_direction = "BEARISH"
-elif ema_f > ema_s and close_p > vwap_p:
-    signal = "EMA BULLISH CROSSOVER"; action = "CALL"; primary_direction = "BULLISH"
+signal = "NO TRADE"
+if primary_action != "WAIT" and corr_score >= 75:
+    signal = f"HIGH CONVICTION {primary_action}"
 
-confidence_score = 45.0
-supporter_notes = [f"Dynamic Trigger: {dynamic_trigger_pts:.1f} pts"]
-
-if primary_direction != "NEUTRAL":
-    if primary_direction == "BEARISH":
-        if close_p < vwap_p: confidence_score += 15.0; supporter_notes.append("Below VWAP")
-        if minus_di > plus_di: confidence_score += 15.0; supporter_notes.append("-DI Dominant")
-        if adx_val >= 20: confidence_score += 15.0; supporter_notes.append(f"ADX ({adx_val:.1f})")
-        if bear_hw > bull_hw: confidence_score += 10.0; supporter_notes.append("Heavyweights Red")
-    elif primary_direction == "BULLISH":
-        if close_p > vwap_p: confidence_score += 15.0; supporter_notes.append("Above VWAP")
-        if plus_di > minus_di: confidence_score += 15.0; supporter_notes.append("+DI Dominant")
-        if adx_val >= 20: confidence_score += 15.0; supporter_notes.append(f"ADX ({adx_val:.1f})")
-        if bull_hw > bear_hw: confidence_score += 10.0; supporter_notes.append("Heavyweights Green")
-
-confidence_score = min(98.0, confidence_score)
-
-vix_multiplier = 1.15 if vix_chg > 3.0 else 1.0
-sl_dist = 0.85 * atr * vix_multiplier
-
-if confidence_score >= 80: conviction_grade = "HIGH CONVICTION"; qty_multiplier = 1.0
-elif confidence_score >= 60: conviction_grade = "MODERATE CONVICTION"; qty_multiplier = 0.7
-else: conviction_grade = "SCALP CONVICTION"; qty_multiplier = 0.4
-
+sl_dist = 0.9 * atr
 base_qty = max(1, int(capital * base_risk_pct / (sl_dist + 1e-9)))
-final_qty = max(1, int(base_qty * qty_multiplier)) if action != "WAIT" else 0
-
-note_summary = " + ".join(supporter_notes)
-journal, exit_alerts = process_smart_exits_and_logger(signal, action, latest, index_choice, confidence_score, final_qty, note_summary)
 
 # -------------------------------------------------------------------
 # DASHBOARD DISPLAY & BACKTEST RESULTS
 # -------------------------------------------------------------------
-for alert in exit_alerts:
-    st.toast(alert, icon="🔔")
+st.subheader(f"🏛️ {index_choice} | Day Context: `{bias}` | VIX: `{vix_val:.1f}`")
 
-st.subheader(f"⚡ {index_choice} | Mode: `{mode}` | Live ATR: `{atr:.1f}`")
+c1, c2, c3, c4 = st.columns(4)
+c1.metric("Spot Price", f"₹{close_p:.1f}", f"VWAP: ₹{vwap_p:.1f}")
+c2.metric("Pre-Market Gap", f"{gap:+.2f}%")
+c3.metric("Opening Range", f"H: ₹{or_high:.1f} | L: ₹{or_low:.1f}")
+c4.metric("Indicator Correlation", f"{corr_score}%", "High Sync" if corr_score >= 75 else "Low Correlation")
 
-c1, c2, c3, c4, c5 = st.columns(5)
-c1.metric("Spot Price", f"₹{close_p:.1f}")
-c2.metric("VWAP Level", f"₹{vwap_p:.1f}", f"{close_p - vwap_p:+.1f} pts")
-c3.metric("Drop / Rally", f"-{drop_pts:.1f} / +{rally_pts:.1f}")
-c4.metric("Conviction Grade", conviction_grade if signal != "NO TRADE" else "Neutral")
-c5.metric("Supporter Score", f"{confidence_score:.0f}%")
-
-st.info(f"**Live Engine Intelligence:** {note_summary} | India VIX: {vix_val:.2f} ({vix_chg:+.1f}%)")
+st.info(f"**Expert Engine Status:** Primary Action: `{primary_action}` | Indicator Sync Score: `{corr_score}%`. Threshold for trade entry is 75%+ sync.")
 
 if signal != "NO TRADE":
-    st.success(f"🚨 **ENTRY SIGNAL: {signal} ({conviction_grade})** | **ACTION: {action}** | Qty: **{final_qty} Units**")
-    st.write(f"**Entry:** ₹{close_p:.1f} | **Initial SL:** ₹{close_p+(sl_dist if action=='PUT' else -sl_dist):.1f} | **Target 1:** ₹{close_p+(-1.5*sl_dist if action=='PUT' else 1.5*sl_dist):.1f} | **Target 2:** ₹{close_p+(-2.5*sl_dist if action=='PUT' else 2.5*sl_dist):.1f}")
+    st.success(f"🚨 **CORRELATION SIGNAL TRIGGERED: {signal}** | Qty: **{base_qty} Units**")
+    st.write(f"**Entry:** ₹{close_p:.1f} | **SL:** ₹{close_p+(sl_dist if primary_action=='PUT' else -sl_dist):.1f} | **Target:** ₹{close_p+(-1.8*sl_dist if primary_action=='PUT' else 1.8*sl_dist):.1f}")
 else:
-    st.warning(f"**NO TRADE** | Price Action is consolidating within dynamic noise range ({dynamic_trigger_pts:.1f} pts).")
+    st.warning("**NO TRADE** | Awaiting Price Action + Multi-Indicator Matrix Correlation Sync (>= 75%).")
 
-# -------------------------------------------------------------------
-# HISTORICAL BACKTEST ENGINE (WIN RATE & PnL TABLE)
-# -------------------------------------------------------------------
 st.markdown("---")
-st.subheader(f"📊 Historical Backtest Engine – Mode: `{mode}`")
-st.caption("Available dataset par real-time strategy backtesting output.")
+st.subheader("📊 High Win-Rate Correlation Backtest Engine (Last 5 Days)")
+st.caption("Testing Price Action Trigger + 75%+ Multi-Indicator Correlation Matrix.")
 
-bt = run_dynamic_backtest(df, mode)
+bt = run_correlation_backtest(df)
 if bt:
     b1, b2, b3, b4 = st.columns(4)
     b1.metric("Total Trades", bt["trades"])
@@ -382,12 +338,7 @@ if bt:
     b3.metric("Win Rate", f"{bt['winrate']:.1f}%")
     b4.metric("Total Net PnL", f"{bt['total_pnl']:+.1f} pts")
     
-    st.markdown("#### 🔍 Historical Trade Details Table")
+    st.markdown("#### 🔍 Historical High-Conviction Trades Table")
     st.dataframe(bt["details_df"], use_container_width=True)
 else:
-    st.info("Insufficient historical bars for backtest calculation.")
-
-st.markdown("---")
-st.subheader("📝 Live Auto-Logged Paper Journal & Positions")
-if not journal.empty:
-    st.dataframe(journal.tail(15), use_container_width=True)
+    st.info("No high-correlation trades in recent history (Filter Protected).")
