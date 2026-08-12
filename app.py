@@ -10,9 +10,9 @@ import matplotlib.pyplot as plt
 # -------------------------------------------------------------------
 # PAGE CONFIG
 # -------------------------------------------------------------------
-st.set_page_config(page_title="Adaptive Engine v5.4", layout="wide", initial_sidebar_state="expanded")
-st.title("🛡️ Adaptive Engine v5.4 (Bi-Directional CALL & PUT Fixed)")
-st.caption("E6 Gate | Both Long & Short Signals | Volume Traps | Auto Signal Logging | Auto SL/TP Tracking")
+st.set_page_config(page_title="Adaptive Engine v5.5", layout="wide", initial_sidebar_state="expanded")
+st.title("🛡️ Adaptive Engine v5.5 (Market-Adaptive Intraday Logic)")
+st.caption("E6 Gate | Dynamic Fall Detection | Intraday PUT Override | Auto Signal Logging")
 
 # -------------------------------------------------------------------
 # CONSTANTS & WEIGHTS
@@ -32,18 +32,18 @@ SWING_WEIGHTS = {
     "Transition":   {"E1":0.15,"E2":0.15,"E3":0.15,"E4":0.15,"E5":0.20,"E6":0.20,"threshold":82},
 }
 INTRADAY_WEIGHTS = {
-    "Strong Trend": {"E1":0.15,"E2":0.08,"E3":0.18,"E4":0.15,"E5":0.24,"E6":0.20,"threshold":67},
-    "Mild Trend":   {"E1":0.13,"E2":0.10,"E3":0.20,"E4":0.18,"E5":0.19,"E6":0.20,"threshold":71},
-    "Range":        {"E1":0.10,"E2":0.10,"E3":0.20,"E4":0.25,"E5":0.15,"E6":0.20,"threshold":74},
-    "High Volatility":{"E1":0.18,"E2":0.10,"E3":0.17,"E4":0.20,"E5":0.15,"E6":0.20,"threshold":77},
-    "Transition":   {"E1":0.15,"E2":0.10,"E3":0.18,"E4":0.17,"E5":0.20,"E6":0.20,"threshold":79},
+    "Strong Trend": {"E1":0.15,"E2":0.08,"E3":0.18,"E4":0.15,"E5":0.24,"E6":0.20,"threshold":65},
+    "Mild Trend":   {"E1":0.13,"E2":0.10,"E3":0.20,"E4":0.18,"E5":0.19,"E6":0.20,"threshold":68},
+    "Range":        {"E1":0.10,"E2":0.10,"E3":0.20,"E4":0.25,"E5":0.15,"E6":0.20,"threshold":70},
+    "High Volatility":{"E1":0.18,"E2":0.10,"E3":0.17,"E4":0.20,"E5":0.15,"E6":0.20,"threshold":72},
+    "Transition":   {"E1":0.15,"E2":0.10,"E3":0.18,"E4":0.17,"E5":0.20,"E6":0.20,"threshold":72},
 }
 
 # -------------------------------------------------------------------
 # SIDEBAR
 # -------------------------------------------------------------------
 st.sidebar.header("🕹️ Control Panel")
-mode = st.sidebar.radio("Mode", ["Swing (Daily)", "Intraday (5-min)"], index=0)
+mode = st.sidebar.radio("Mode", ["Swing (Daily)", "Intraday (5-min)"], index=1)
 index_choice = st.sidebar.radio("Index", ["Nifty 50", "Bank Nifty"], index=0)
 ticker = "^NSEI" if index_choice == "Nifty 50" else "^NSEBANK"
 
@@ -61,20 +61,20 @@ manual_dii = st.sidebar.number_input("DII Net (₹ Cr)", value=0.0)
 use_manual_flow = st.sidebar.checkbox("Use Manual FII/DII", value=False)
 
 st.sidebar.markdown("---")
-avoid_mon_fri = st.sidebar.checkbox("Avoid Mon/Fri (Swing)", value=True)
-vix_spike_limit = st.sidebar.slider("VIX Change Limit %", 2.0, 6.0, 3.5)
+avoid_mon_fri = st.sidebar.checkbox("Avoid Mon/Fri (Swing)", value=False)
+vix_spike_limit = st.sidebar.slider("VIX Change Limit %", 2.0, 8.0, 5.0)
 
 # -------------------------------------------------------------------
 # DATA FUNCTIONS
 # -------------------------------------------------------------------
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=120)
 def get_data(ticker, interval="1d", period="1y"):
     df = yf.download(ticker, period=period, interval=interval, progress=False, auto_adjust=True)
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)
     return df.dropna()
 
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=120)
 def get_vix():
     v = yf.download("^INDIAVIX", period="3mo", interval="1d", progress=False, auto_adjust=True)
     if isinstance(v.columns, pd.MultiIndex):
@@ -152,6 +152,13 @@ def add_indicators(df, mode):
         df["VWAP_Reliable"] = True
 
     df["VWAP_Dist"] = (df["Close"] - df["VWAP"]) / (df["ATR"] + 1e-9)
+    
+    # Session High / Low Tracking for Intraday Fall/Rally Detection
+    df["Day_High"] = df["High"].cummax()
+    df["Day_Low"] = df["Low"].cummin()
+    df["Drop_From_High"] = (df["Day_High"] - df["Close"]) / df["Day_High"] * 100
+    df["Rally_From_Low"] = (df["Close"] - df["Day_Low"]) / df["Day_Low"] * 100
+
     return df.dropna()
 
 def get_weekly_bias(df):
@@ -198,7 +205,7 @@ def get_vix_regime(vix_level, vix_chg):
     return "Normal", 0, "Standard"
 
 # -------------------------------------------------------------------
-# ENGINE 6
+# ENGINE 6 & OTHERS
 # -------------------------------------------------------------------
 def find_swings(df, left=4, right=4):
     swings = []
@@ -295,9 +302,6 @@ def engine6(df_cur, df_htf, regime, mode):
 
     return round(np.clip(loc*mult, 5, 98),1), f"{pattern} | {info}", best_d, best_s
 
-# -------------------------------------------------------------------
-# OTHER ENGINES
-# -------------------------------------------------------------------
 def detect_regime(row, mode):
     if row["ATR_Pct"] > 85 or row.get("VIX_Chg",0) > 4: return "High Volatility"
     th = 22 if mode == "Intraday (5-min)" else 25
@@ -337,7 +341,7 @@ def engine3_swing(net):
 
 def engine4(row, price_change, vix_chg, regime, mode):
     atr, close, cvd = float(row["ATR"]), float(row["Close"]), row["CVD_Proxy"]
-    atr_pct, vol_ok = row["ATR_Pct"], row["Volume"] > 1.3 * row["Vol_Avg"]
+    atr_pct, vol_ok = row["ATR_Pct"], row["Volume"] > 1.2 * row["Vol_Avg"]
 
     if mode == "Swing (Daily)": base_mult, pct, min_pct = 0.90, 0.0045, 0.003
     else:
@@ -345,15 +349,13 @@ def engine4(row, price_change, vix_chg, regime, mode):
         pct, min_pct = 0.0011, 0.0007
 
     threshold = max((base_mult*atr + close*pct)/2, close*min_pct)
-    if regime == "High Volatility": threshold *= 1.15
-    elif regime == "Range": threshold *= 0.88
 
     if price_change <= -threshold:
-        if vix_chg >= 1.8 and cvd < 0 and vol_ok: return 25, "Genuine Breakdown", "PUT"
-        return 88, "Bear Trap", "CALL"
+        if vix_chg >= 1.5 and cvd < 0 and vol_ok: return 20, "Genuine Breakdown", "PUT"
+        return 80, "Bear Trap", "CALL"
     elif price_change >= threshold:
-        if vix_chg <= 1.2 and cvd > 0 and vol_ok: return 82, "Genuine Breakout", "CALL"
-        return 22, "Bull Trap", "PUT"
+        if vix_chg <= 1.2 and cvd > 0 and vol_ok: return 80, "Genuine Breakout", "CALL"
+        return 20, "Bull Trap", "PUT"
     return 50, "Normal", "WAIT"
 
 def engine5(row, regime, mode):
@@ -378,7 +380,7 @@ def engine5(row, regime, mode):
     return min(100, score)
 
 # -------------------------------------------------------------------
-# AUTOMATIC PAPER TRADE LOGGER & SL/TARGET TRACKER
+# AUTOMATIC PAPER LOGGER
 # -------------------------------------------------------------------
 def process_auto_logger(signal, action, latest_row, mode, index_choice, regime, final_score, e6_detail):
     cols = ["Date", "Mode", "Index", "Regime", "Score", "Signal", "Action", "Entry", "SL", "T1", "T2", "Exit", "PnL", "Result", "Notes"]
@@ -396,7 +398,6 @@ def process_auto_logger(signal, action, latest_row, mode, index_choice, regime, 
     atr = float(latest_row["ATR"])
     sl_dist = (1.25 if mode == "Swing (Daily)" else 0.9) * atr
 
-    # 1. Update Open Trades for SL / Target Hits
     updated = False
     for idx, row in journal.iterrows():
         if row["Result"] == "Open":
@@ -428,7 +429,6 @@ def process_auto_logger(signal, action, latest_row, mode, index_choice, regime, 
                     journal.at[idx, "Result"] = "Win"
                     updated = True
 
-    # 2. Auto-Log New Signal
     if signal != "NO TRADE":
         already_logged = False
         if not journal.empty:
@@ -533,33 +533,41 @@ if mode == "Swing (Daily)" and avoid_mon_fri and datetime.now().weekday() in [0,
     filter_pass = False; msgs.append("Mon/Fri")
 if vix_chg > vix_spike_limit:
     filter_pass = False; msgs.append(f"VIX {vix_chg:.1f}%")
-if vix_regime == "Fear":
-    msgs.append("VIX Fear")
 
 # -------------------------------------------------------------------
-# BI-DIRECTIONAL SIGNAL LOGIC (CALL & PUT FIXED)
+# MARKET-ADAPTIVE INTRADAY SIGNAL LOGIC (FIXED)
 # -------------------------------------------------------------------
 signal, action = "NO TRADE", "WAIT"
 
 is_bearish_structure = (latest["Close"] < latest["EMA_fast"]) and (latest["Close"] <= latest["VWAP"])
-bearish_threshold = 100 - threshold
+drop_from_high = float(latest["Drop_From_High"])
+
+# REALISTIC BEARISH THRESHOLD:
+bearish_threshold = 45.0
 
 if filter_pass:
-    # 1. TRAP SIGNALS (Call or Put)
-    if e4_action in ["CALL", "PUT"] and e4 >= 70:
+    # 1. TRAP OVERRIDE (Bull Trap or Genuine Breakdown -> PUT)
+    if e4_action in ["CALL", "PUT"]:
         signal = f"TRAP → {e4_action}"
         action = e4_action
-    # 2. BULLISH SIGNALS (CALL)
+
+    # 2. INTRADAY DYNAMIC FALL OVERRIDE (Day High se 0.4% Drop -> Direct PUT)
+    elif mode == "Intraday (5-min)" and drop_from_high >= 0.35 and is_bearish_structure:
+        signal = "INTRADAY MOMENTUM SHORT"
+        action = "PUT"
+
+    # 3. BULLISH SIGNALS (CALL)
     elif final_score >= threshold:
-        if final_score >= threshold + 6 and e6 >= 60:
+        if final_score >= threshold + 5 and e6 >= 55:
             signal = "HIGH CONVICTION LONG"
             action = "CALL"
         else:
             signal = "MODERATE LONG"
             action = "CALL"
-    # 3. BEARISH SIGNALS (PUT) - FIXED
+
+    # 4. BEARISH SCORE SIGNALS (PUT)
     elif final_score <= bearish_threshold and is_bearish_structure:
-        if final_score <= bearish_threshold - 6 and e6 <= 40:
+        if final_score <= 35:
             signal = "HIGH CONVICTION SHORT"
             action = "PUT"
         else:
@@ -579,11 +587,11 @@ journal = process_auto_logger(signal, action, latest, mode, index_choice, regime
 st.subheader(f"{index_choice} | {mode} | Regime: `{regime}` | VIX: `{vix_regime}` | Weekly: `{weekly_bias}`")
 
 c1,c2,c3,c4,c5 = st.columns(5)
-c1.metric("Final Score", f"{final_score:.1f}", f"Thr {threshold}")
+c1.metric("Final Score", f"{final_score:.1f}", f"Thr {threshold} / Bearish 45")
 c2.metric("Price", f"₹{latest['Close']:.1f}", f"{price_change:+.1f}")
 c3.metric("E6 (PA)", f"{e6:.0f}")
 c4.metric("VIX", f"{vix_level:.1f}", f"{vix_chg:+.1f}%")
-c5.metric("Time Penalty", f"{time_penalty}")
+c5.metric("Drop from High", f"{drop_from_high:.2f}%")
 
 vwap_note = "VWAP Reliable" if latest.get("VWAP_Reliable", True) else "VWAP Fallback (low volume)"
 st.info(f"E6: **{e6_detail}** | Dem:{dem_str:.0f} Sup:{sup_str:.0f} | {vix_msg} | {vwap_note}")
@@ -592,9 +600,9 @@ st.write(f"E1:{e1:.0f} | E2:{e2:.0f} | E3:{e3:.0f} | E4:{e4:.0f} ({e4_status}) |
 
 if signal != "NO TRADE":
     st.success(f"**SIGNAL DETECTED: {signal}** | **{action}** | Qty: **{qty}** (Auto-Logged below)")
-    st.write(f"SL: ₹{latest['Close']-sl_dist:.1f} | T1: ₹{latest['Close']+1.5*sl_dist:.1f} | T2: ₹{latest['Close']+2.3*sl_dist:.1f}")
+    st.write(f"SL: ₹{latest['Close']+(sl_dist if action=='PUT' else -sl_dist):.1f} | T1: ₹{latest['Close']+(-1.6*sl_dist if action=='PUT' else 1.6*sl_dist):.1f}")
 else:
-    st.warning(f"**NO TRADE** | {', '.join(msgs) if msgs else 'Below threshold / E6 gate'}")
+    st.warning(f"**NO TRADE** | {', '.join(msgs) if msgs else 'Below threshold / No momentum override'}")
 
 # -------------------------------------------------------------------
 # AUTOMATIC JOURNAL LOG TABLE
