@@ -7,9 +7,12 @@ from datetime import datetime, time
 import os
 import matplotlib.pyplot as plt
 
-st.set_page_config(page_title="Adaptive Engine v4.1 (Optimized Logic)", layout="wide", initial_sidebar_state="expanded")
-st.title("🛡️ Adaptive Engine v4.1 (Logic Optimized for Win-Rate)")
-st.caption("Enhanced Combination Logic | Strict Engine Confirmation | Smart Zone Cluster | Correct VIX/Weekly Impact")
+# -------------------------------------------------------------------
+# PAGE CONFIG (MUST BE AT TOP)
+# -------------------------------------------------------------------
+st.set_page_config(page_title="Adaptive Engine v5.2", layout="wide", initial_sidebar_state="expanded")
+st.title("🛡️ Adaptive Engine v5.2 (Detailed Backtest Added)")
+st.caption("E6 Gate | Regime VWAP | Volume Confirmed Traps | RSI Regime | Safe Weekly Fetch | Trade Details")
 
 # -------------------------------------------------------------------
 # CONSTANTS & WEIGHTS
@@ -28,7 +31,6 @@ SWING_WEIGHTS = {
     "High Volatility":{"E1":0.15,"E2":0.18,"E3":0.12,"E4":0.18,"E5":0.17,"E6":0.20,"threshold":80},
     "Transition":   {"E1":0.15,"E2":0.15,"E3":0.15,"E4":0.15,"E5":0.20,"E6":0.20,"threshold":82},
 }
-
 INTRADAY_WEIGHTS = {
     "Strong Trend": {"E1":0.15,"E2":0.08,"E3":0.18,"E4":0.15,"E5":0.24,"E6":0.20,"threshold":67},
     "Mild Trend":   {"E1":0.13,"E2":0.10,"E3":0.20,"E4":0.18,"E5":0.19,"E6":0.20,"threshold":71},
@@ -49,7 +51,6 @@ capital = st.sidebar.number_input("Paper Capital (₹)", value=1_000_000, step=1
 risk_pct = st.sidebar.slider("Risk per Trade %", 0.5, 2.0, 1.0) / 100
 
 st.sidebar.markdown("---")
-st.sidebar.subheader("Option Chain / OI Walls")
 max_call_oi = st.sidebar.number_input("Max Call OI", value=24500 if index_choice=="Nifty 50" else 52000)
 max_put_oi  = st.sidebar.number_input("Max Put OI", value=24000 if index_choice=="Nifty 50" else 51000)
 use_oi_filter = st.sidebar.checkbox("Use OI Wall Filter", value=True)
@@ -64,7 +65,7 @@ avoid_mon_fri = st.sidebar.checkbox("Avoid Mon/Fri (Swing)", value=True)
 vix_spike_limit = st.sidebar.slider("VIX Change Limit %", 2.0, 6.0, 3.5)
 
 # -------------------------------------------------------------------
-# DATA & INDICATORS
+# DATA FUNCTIONS
 # -------------------------------------------------------------------
 @st.cache_data(ttl=300)
 def get_data(ticker, interval="1d", period="1y"):
@@ -134,45 +135,47 @@ def add_indicators(df, mode):
     dn = df["Low"].shift(1) - df["Low"]
     pos = np.where((up > dn) & (up > 0), up, 0.0)
     neg = np.where((dn > up) & (dn > 0), dn, 0.0)
-    pdi = 100 * pd.Series(pos, index=df.index).rolling(alen).mean() / df["ATR"]
-    ndi = 100 * pd.Series(neg, index=df.index).rolling(alen).mean() / df["ATR"]
+    pdi = 100 * pd.Series(pos, index=df.index).rolling(alen).mean() / (df["ATR"] + 1e-9)
+    ndi = 100 * pd.Series(neg, index=df.index).rolling(alen).mean() / (df["ATR"] + 1e-9)
     dx = 100 * abs(pdi - ndi) / (pdi + ndi + 1e-9)
     df["ADX"] = dx.rolling(alen).mean()
 
     df["Vol_Delta"] = np.where(df["Close"] >= df["Open"], df["Volume"], -df["Volume"])
     df["CVD_Proxy"] = df["Vol_Delta"].rolling(5 if mode == "Swing (Daily)" else 8).sum()
-    df["VWAP"] = (df["Volume"] * (df["High"] + df["Low"] + df["Close"]) / 3).cumsum() / df["Volume"].cumsum()
+
+    # Safe VWAP
+    if df["Volume"].iloc[-5:].mean() < 10 or df["Volume"].sum() < 1:
+        tp = (df["High"] + df["Low"] + df["Close"]) / 3
+        df["VWAP"] = tp.cumsum() / np.arange(1, len(df)+1)
+        df["VWAP_Reliable"] = False
+    else:
+        df["VWAP"] = (df["Volume"] * (df["High"] + df["Low"] + df["Close"]) / 3).cumsum() / df["Volume"].cumsum()
+        df["VWAP_Reliable"] = True
+
     df["VWAP_Dist"] = (df["Close"] - df["VWAP"]) / (df["ATR"] + 1e-9)
     return df.dropna()
 
 def get_weekly_bias(df):
-    if len(df) < 30:
-        return 0, "Neutral"
+    if df is None or len(df) < 30: return 50, "Neutral"
     weekly = df["Close"].resample("W").last().dropna()
-    if len(weekly) < 5:
-        return 0, "Neutral"
+    if len(weekly) < 5: return 50, "Neutral"
     wema = weekly.ewm(span=5, adjust=False).mean()
     last, prev, ema = weekly.iloc[-1], weekly.iloc[-2], wema.iloc[-1]
-    if last > ema and last > prev:
-        return 4, "Bullish"
-    if last < ema and last < prev:
-        return -4, "Bearish"
-    return 0, "Neutral"
+    if last > ema and last > prev: return 75, "Bullish"
+    if last < ema and last < prev: return 25, "Bearish"
+    return 50, "Neutral"
 
 def calculate_real_breadth(raw):
-    if raw is None or raw.empty:
-        return 50.0, 50.0, 0.0
+    if raw is None or raw.empty: return 50.0, 50.0, 0.0
     try:
         closes = raw["Close"] if isinstance(raw.columns, pd.MultiIndex) else raw
         total_w = sum(TOP_10.values())
         bull = bear = 0.0
         cnt = 0
         for t, w in TOP_10.items():
-            if t not in closes.columns:
-                continue
+            if t not in closes.columns: continue
             s = closes[t].dropna()
-            if len(s) < 21:
-                continue
+            if len(s) < 21: continue
             ema = s.ewm(span=20, adjust=False).mean()
             lc, pc, le = s.iloc[-1], s.iloc[-2], ema.iloc[-1]
             cnt += 1
@@ -182,178 +185,135 @@ def calculate_real_breadth(raw):
             else:
                 bear += w
                 if lc < pc: bear += w * 0.15
-        if cnt < 6:
-            return 50.0, 50.0, 0.0
+        if cnt < 6: return 50.0, 50.0, 0.0
         b = (bull / total_w) * 100
         r = (bear / total_w) * 100
-        return round(b, 1), round(r, 1), round(b - r, 1)
+        return round(b,1), round(r,1), round(b-r,1)
     except:
         return 50.0, 50.0, 0.0
 
 def get_vix_regime(vix_level, vix_chg):
-    if vix_level >= 20 or vix_chg > 4.0:
-        return "Fear", -8, "High caution"
-    if vix_level >= 15 or vix_chg > 2.5:
-        return "Elevated", -4, "Be selective"
-    if vix_level <= 12 and vix_chg < 0:
-        return "Complacent", 3, "Trend favoured"
+    if vix_level >= 20 or vix_chg > 4.0: return "Fear", -15, "High caution"
+    if vix_level >= 15 or vix_chg > 2.5: return "Elevated", -8, "Be selective"
+    if vix_level <= 12 and vix_chg < 0: return "Complacent", 5, "Trend favoured"
     return "Normal", 0, "Standard"
 
 # -------------------------------------------------------------------
-# ENGINE 6 - Dynamic Zone Clustering + Multi-TF
+# ENGINE 6
 # -------------------------------------------------------------------
-def find_swing_points(df, left=4, right=4):
+def find_swings(df, left=4, right=4):
     swings = []
-    highs = df["High"].values
-    lows = df["Low"].values
-    for i in range(left, len(df) - right):
-        if highs[i] == max(highs[i-left:i+right+1]):
-            swings.append((df.index[i], highs[i], "high"))
-        if lows[i] == min(lows[i-left:i+right+1]):
-            swings.append((df.index[i], lows[i], "low"))
+    h, l = df["High"].values, df["Low"].values
+    for i in range(left, len(df)-right):
+        if h[i] == max(h[i-left:i+right+1]): swings.append((df.index[i], h[i], "high"))
+        if l[i] == min(l[i-left:i+right+1]): swings.append((df.index[i], l[i], "low"))
     return swings
 
-def detect_zones(df):
-    if len(df) < 30:
-        return [], []
-    swings = find_swing_points(df, left=4, right=4)
-    atr = df["ATR"].iloc[-1]
-    raw_demands, raw_supplies = [], []
-
-    for idx, price, typ in swings[-12:]:
-        loc = df.index.get_loc(idx)
-        if loc < 3 or loc >= len(df) - 3:
-            continue
-        if typ == "low":
-            future_move = df["Close"].iloc[loc+1:loc+6].max() - price
-            vol_ratio = df["Volume"].iloc[loc] / (df["Vol_Avg"].iloc[loc] + 1e-9)
-            strength = min(100, (future_move / (atr + 1e-9)) * 35 + min(vol_ratio, 2.5) * 15)
-            if strength > 35:
-                raw_demands.append({"price": price, "strength": strength})
+def cluster_zones(zones, atr, thresh=0.5):
+    if not zones: return []
+    zones = sorted(zones, key=lambda x: x["price"])
+    clustered = []
+    current = zones[0].copy()
+    for z in zones[1:]:
+        if abs(z["price"] - current["price"]) <= atr * thresh:
+            current["strength"] = max(current["strength"], z["strength"])
+            current["price"] = (current["price"] + z["price"]) / 2
         else:
-            future_move = price - df["Close"].iloc[loc+1:loc+6].min()
-            vol_ratio = df["Volume"].iloc[loc] / (df["Vol_Avg"].iloc[loc] + 1e-9)
-            strength = min(100, (future_move / (atr + 1e-9)) * 35 + min(vol_ratio, 2.5) * 15)
-            if strength > 35:
-                raw_supplies.append({"price": price, "strength": strength})
+            clustered.append(current)
+            current = z.copy()
+    clustered.append(current)
+    return sorted(clustered, key=lambda x: x["strength"], reverse=True)[:3]
 
-    # OPTIMIZATION: Cluster zones closer than 0.5 * ATR to prevent duplicates
-    def cluster_items(items):
-        if not items: return []
-        items = sorted(items, key=lambda x: x["price"])
-        clustered = []
-        curr = items[0]
-        for next_item in items[1:]:
-            if abs(next_item["price"] - curr["price"]) <= 0.5 * atr:
-                curr = {"price": (curr["price"] + next_item["price"])/2, "strength": max(curr["strength"], next_item["strength"])}
-            else:
-                clustered.append(curr)
-                curr = next_item
-        clustered.append(curr)
-        return clustered
+def detect_zones(df):
+    if len(df) < 30: return [], []
+    swings = find_swings(df)
+    atr = df["ATR"].iloc[-1]
+    demands, supplies = [], []
+    for idx, price, typ in swings[-15:]:
+        loc = df.index.get_loc(idx)
+        if loc < 3 or loc >= len(df)-3: continue
+        vol_ratio = df["Volume"].iloc[loc] / (df["Vol_Avg"].iloc[loc] + 1e-9)
+        if typ == "low":
+            move = df["Close"].iloc[loc+1:loc+6].max() - price
+            strength = min(100, (move/(atr+1e-9))*35 + min(vol_ratio,2.5)*15)
+            if strength > 35: demands.append({"price": price, "strength": strength})
+        else:
+            move = price - df["Close"].iloc[loc+1:loc+6].min()
+            strength = min(100, (move/(atr+1e-9))*35 + min(vol_ratio,2.5)*15)
+            if strength > 35: supplies.append({"price": price, "strength": strength})
+    return cluster_zones(demands, atr), cluster_zones(supplies, atr)
 
-    demands = sorted(cluster_items(raw_demands), key=lambda x: x["strength"], reverse=True)[:3]
-    supplies = sorted(cluster_items(raw_supplies), key=lambda x: x["strength"], reverse=True)[:3]
-    return demands, supplies
-
-def detect_candle_pattern(row, prev1, prev2):
-    o, h, l, c = row["Open"], row["High"], row["Low"], row["Close"]
-    body = abs(c - o)
-    upper = h - max(o, c)
-    lower = min(o, c) - l
-    rng = h - l + 1e-9
-
-    if lower > body * 2.0 and lower > upper * 1.8 and body / rng < 0.35:
-        return "Bullish Pinbar", 75
-    if upper > body * 2.0 and upper > lower * 1.8 and body / rng < 0.35:
-        return "Bearish Pinbar", 75
-    if c > o and prev1["Close"] < prev1["Open"] and c >= prev1["Open"] and o <= prev1["Close"]:
-        return "Bullish Engulfing", 70
-    if c < o and prev1["Close"] > prev1["Open"] and c <= prev1["Open"] and o >= prev1["Close"]:
-        return "Bearish Engulfing", 70
-    if (prev2["Close"] < prev2["Open"] and abs(prev1["Close"] - prev1["Open"]) / (prev1["High"] - prev1["Low"] + 1e-9) < 0.3
-        and c > o and c > (prev2["Open"] + prev2["Close"]) / 2):
+def detect_candle(row, prev1, prev2):
+    o,h,l,c = row["Open"], row["High"], row["Low"], row["Close"]
+    body, upper, lower = abs(c-o), h-max(o,c), min(o,c)-l
+    rng = h-l + 1e-9
+    if lower > body*2 and lower > upper*1.8 and body/rng < 0.35: return "Bullish Pinbar", 75
+    if upper > body*2 and upper > lower*1.8 and body/rng < 0.35: return "Bearish Pinbar", 75
+    if c>o and prev1["Close"]<prev1["Open"] and c>=prev1["Open"] and o<=prev1["Close"]: return "Bullish Engulfing", 70
+    if c<o and prev1["Close"]>prev1["Open"] and c<=prev1["Open"] and o>=prev1["Close"]: return "Bearish Engulfing", 70
+    if (prev2["Close"]<prev2["Open"] and abs(prev1["Close"]-prev1["Open"])/(prev1["High"]-prev1["Low"]+1e-9)<0.3 and c>o and c>(prev2["Open"]+prev2["Close"])/2):
         return "Morning Star-like", 72
-    if (prev2["Close"] > prev2["Open"] and abs(prev1["Close"] - prev1["Open"]) / (prev1["High"] - prev1["Low"] + 1e-9) < 0.3
-        and c < o and c < (prev2["Open"] + prev2["Close"]) / 2):
+    if (prev2["Close"]>prev2["Open"] and abs(prev1["Close"]-prev1["Open"])/(prev1["High"]-prev1["Low"]+1e-9)<0.3 and c<o and c<(prev2["Open"]+prev2["Close"])/2):
         return "Evening Star-like", 72
-    if body / rng < 0.15:
-        return "Doji", 50
+    if body/rng < 0.15: return "Doji", 55
+    return "None", 40
 
-    return "None", 35
+def engine6(df_cur, df_htf, regime, mode):
+    if len(df_cur) < 20: return 50, "No data", 0, 0
+    demands, supplies = detect_zones(df_htf if df_htf is not None and len(df_htf)>30 else df_cur)
+    latest, prev1 = df_cur.iloc[-1], df_cur.iloc[-2]
+    prev2 = df_cur.iloc[-3] if len(df_cur)>3 else prev1
+    atr, close = latest["ATR"], latest["Close"]
+    pattern, pat_score = detect_candle(latest, prev1, prev2)
 
-def engine6_price_action(df_current, df_higher, regime, mode):
-    if len(df_current) < 20:
-        return 50, "Insufficient data", 0, 0
-
-    demands, supplies = detect_zones(df_higher if df_higher is not None and len(df_higher) > 30 else df_current)
-    latest = df_current.iloc[-1]
-    prev1 = df_current.iloc[-2]
-    prev2 = df_current.iloc[-3] if len(df_current) > 3 else prev1
-    atr = latest["ATR"]
-    close = latest["Close"]
-
-    pattern, pat_score = detect_candle_pattern(latest, prev1, prev2)
-
-    near_demand, near_supply = False, False
-    best_dem_str, best_sup_str = 0, 0
-    zone_info = "No clear zone"
-
+    near_dem = near_sup = False
+    best_d = best_s = 0
+    info = "No zone"
     for z in demands:
-        if abs(close - z["price"]) <= atr * 1.1:
-            near_demand = True
-            best_dem_str = max(best_dem_str, z["strength"])
-            zone_info = f"Near Demand ({z['strength']:.0f})"
+        if abs(close - z["price"]) <= atr*1.1:
+            near_dem = True
+            best_d = max(best_d, z["strength"])
+            info = f"Near Demand {z['strength']:.0f}"
     for z in supplies:
-        if abs(close - z["price"]) <= atr * 1.1:
-            near_supply = True
-            best_sup_str = max(best_sup_str, z["strength"])
-            zone_info = f"Near Supply ({z['strength']:.0f})"
+        if abs(close - z["price"]) <= atr*1.1:
+            near_sup = True
+            best_s = max(best_s, z["strength"])
+            info = f"Near Supply {z['strength']:.0f}"
 
-    loc_score = 40
-    if near_demand and pattern in ["Bullish Pinbar", "Bullish Engulfing", "Morning Star-like", "Doji"]:
-        loc_score = min(95, pat_score * 0.65 + best_dem_str * 0.35)
-    elif near_supply and pattern in ["Bearish Pinbar", "Bearish Engulfing", "Evening Star-like", "Doji"]:
-        loc_score = min(95, pat_score * 0.65 + best_sup_str * 0.35)
-    elif near_demand or near_supply:
-        loc_score = 50 + (best_dem_str + best_sup_str) * 0.15
+    if near_dem and pattern in ["Bullish Pinbar","Bullish Engulfing","Morning Star-like","Doji"]:
+        loc = min(95, pat_score*0.7 + best_d*0.35)
+    elif near_sup and pattern in ["Bearish Pinbar","Bearish Engulfing","Evening Star-like","Doji"]:
+        loc = min(95, pat_score*0.7 + best_s*0.35)
+    elif near_dem or near_sup:
+        loc = 55 + (best_d + best_s)*0.15
     else:
-        loc_score = pat_score * 0.40   # Unconfirmed pattern in middle of nowhere = Weak
+        loc = pat_score * 0.45
 
-    regime_mult = 1.0
-    if regime == "Strong Trend":
-        regime_mult = 1.12 if near_demand else (0.88 if near_supply else 1.0)
-    elif regime == "Range":
-        regime_mult = 1.10 if (near_demand or near_supply) else 0.90
+    mult = 1.0
+    if regime == "Strong Trend": mult = 1.15 if near_dem else (0.85 if near_sup else 1.0)
+    elif regime == "Range": mult = 1.10 if (near_dem or near_sup) else 0.95
+    elif regime == "High Volatility": mult = 0.90
 
-    final_e6 = np.clip(loc_score * regime_mult, 5, 98)
-    return round(final_e6, 1), f"{pattern} | {zone_info}", best_dem_str, best_sup_str
+    return round(np.clip(loc*mult, 5, 98),1), f"{pattern} | {info}", best_d, best_s
 
 # -------------------------------------------------------------------
-# ENGINES 1 - 5 (REGIME & LOGIC REFINED)
+# OTHER ENGINES
 # -------------------------------------------------------------------
 def detect_regime(row, mode):
-    adx = row["ADX"]
-    atr_pct = row["ATR_Pct"]
-    close = row["Close"]
-    if atr_pct > 85 or row.get("VIX_Chg", 0) > 4:
-        return "High Volatility"
-    thresh = 22 if mode == "Intraday (5-min)" else 25
-    if adx >= thresh and ((close > row["EMA_mid"] > row["EMA_slow"]) or (close < row["EMA_mid"] < row["EMA_slow"])):
+    if row["ATR_Pct"] > 85 or row.get("VIX_Chg",0) > 4: return "High Volatility"
+    th = 22 if mode == "Intraday (5-min)" else 25
+    if row["ADX"] >= th and ((row["Close"]>row["EMA_mid"]>row["EMA_slow"]) or (row["Close"]<row["EMA_mid"]<row["EMA_slow"])):
         return "Strong Trend"
-    if adx >= 16:
-        return "Mild Trend"
-    if adx < 16:
-        return "Range"
+    if row["ADX"] >= 16: return "Mild Trend"
+    if row["ADX"] < 16: return "Range"
     return "Transition"
 
-def engine1_score(row, regime):
-    base = 55 + min(row["ADX"], 40)
-    if regime in ["Strong Trend", "Range"]:
-        base += 10
+def engine1(row, regime):
+    base = 55 + min(row["ADX"],40)
+    if regime in ["Strong Trend","Range"]: base += 10
     return min(100, base)
 
-def engine2_score(fii, dii, pcr, sentiment):
+def engine2(fii, dii, pcr, sentiment):
     net = fii + dii
     score = 50
     if net > 800: score += 28
@@ -362,129 +322,137 @@ def engine2_score(fii, dii, pcr, sentiment):
     elif net < -300: score -= 10
     if pcr < 0.75: score += 8
     elif pcr > 1.3: score -= 5
-    score += (sentiment - 50) * 0.25
+    score += (sentiment-50)*0.25
     return max(0, min(100, score))
 
 def engine3_intraday(row, regime):
     cvd = row["CVD_Proxy"]
     dist = row["VWAP_Dist"]
-    cvd_score = 50
-    if cvd > 0:
-        cvd_score = min(90, 55 + abs(cvd) / (row["Vol_Avg"] + 1) * 25)
-    else:
-        cvd_score = max(10, 45 - abs(cvd) / (row["Vol_Avg"] + 1) * 25)
-    
-    # OPTIMIZATION: In Range regime, distance from VWAP means Overbought/Oversold (Reversal Bonus)
-    if regime == "Range":
-        dist_score = 50 - np.clip(dist * 12, -30, 30)
-    else:
-        dist_score = 50 + np.clip(dist * 12, -30, 30)
-
-    return max(0, min(100, cvd_score * 0.55 + dist_score * 0.45))
+    cvd_score = 50 + np.clip(cvd / (row["Vol_Avg"]+1)*20, -30, 30)
+    if regime in ["Range", "High Volatility"]: dist_score = 50 + min(abs(dist)*10, 25)
+    else: dist_score = 50 + np.clip(dist*12, -30, 30)
+    return max(0, min(100, cvd_score*0.55 + dist_score*0.45))
 
 def engine3_swing(net):
-    return max(0, min(100, 50 + net * 0.7))
+    return max(0, min(100, 50 + net*0.7))
 
-def engine4_trap(row, price_change, vix_chg, regime, mode):
-    atr = float(row["ATR"])
-    close = float(row["Close"])
-    cvd = row["CVD_Proxy"]
-    vol = row["Volume"]
-    vol_avg = row["Vol_Avg"]
-    atr_pct = row["ATR_Pct"]
+def engine4(row, price_change, vix_chg, regime, mode):
+    atr, close, cvd = float(row["ATR"]), float(row["Close"]), row["CVD_Proxy"]
+    atr_pct, vol_ok = row["ATR_Pct"], row["Volume"] > 1.3 * row["Vol_Avg"]
 
-    if mode == "Swing (Daily)":
-        base_mult, pct, min_pct = 0.90, 0.0045, 0.003
+    if mode == "Swing (Daily)": base_mult, pct, min_pct = 0.90, 0.0045, 0.003
     else:
         base_mult = 0.78 if atr_pct < 30 else (0.55 if atr_pct > 70 else 0.65)
         pct, min_pct = 0.0011, 0.0007
 
-    threshold = max((base_mult * atr + close * pct) / 2, close * min_pct)
+    threshold = max((base_mult*atr + close*pct)/2, close*min_pct)
     if regime == "High Volatility": threshold *= 1.15
     elif regime == "Range": threshold *= 0.88
 
-    # OPTIMIZATION: Genuine Breakdown requires Volume confirmation (> 1.25x Vol_Avg)
     if price_change <= -threshold:
-        if vix_chg >= 1.8 and cvd < 0 and vol > 1.25 * vol_avg:
-            return 25, "Genuine Breakdown", "PUT"
+        if vix_chg >= 1.8 and cvd < 0 and vol_ok: return 25, "Genuine Breakdown", "PUT"
         return 88, "Bear Trap", "CALL"
     elif price_change >= threshold:
-        if vix_chg <= 1.2 and cvd > 0 and vol > 1.25 * vol_avg:
-            return 82, "Genuine Breakout", "CALL"
+        if vix_chg <= 1.2 and cvd > 0 and vol_ok: return 82, "Genuine Breakout", "CALL"
         return 22, "Bull Trap", "PUT"
     return 50, "Normal", "WAIT"
 
-def engine5_technical(row, regime, mode):
+def engine5(row, regime, mode):
     score = 0
-    if row["Close"] > row["EMA_fast"] > row["EMA_mid"] > row["EMA_slow"]:
-        score += 35
-    elif row["Close"] > row["EMA_fast"] > row["EMA_slow"]:
-        score += 25
-    elif row["Close"] > row["EMA_fast"]:
-        score += 12
+    if row["Close"] > row["EMA_fast"] > row["EMA_mid"] > row["EMA_slow"]: score += 35
+    elif row["Close"] > row["EMA_fast"] > row["EMA_slow"]: score += 25
+    elif row["Close"] > row["EMA_fast"]: score += 12
 
-    # OPTIMIZATION: RSI Regime Specific Dynamic Ranges
     rsi = row["RSI"]
     if regime == "Strong Trend":
-        if 55 <= rsi <= 75: score += 25
-        elif 45 <= rsi < 55: score += 12
+        if 60 <= rsi <= 75: score += 25
+        elif 52 <= rsi < 60: score += 15
+    elif regime == "Range":
+        if 48 <= rsi <= 62: score += 25
+        elif 40 <= rsi < 48 or 62 < rsi <= 70: score += 10
     else:
-        if 48 <= rsi <= 65: score += 25
-        elif 42 <= rsi <= 70: score += 12
+        if 52 <= rsi <= 68: score += 25
+        elif 45 <= rsi <= 72: score += 12
 
-    if row["Volume"] > (1.25 if mode == "Swing (Daily)" else 1.4) * row["Vol_Avg"]:
-        score += 20
-    if row["Close"] >= row["VWAP"]:
-        score += 20
+    if row["Volume"] > (1.25 if mode=="Swing (Daily)" else 1.4)*row["Vol_Avg"]: score += 20
+    if row.get("VWAP_Reliable", True) and row["Close"] >= row["VWAP"]: score += 15
     return min(100, score)
 
 # -------------------------------------------------------------------
-# BACKTEST
+# DETAILED BACKTEST (Added Table Output)
 # -------------------------------------------------------------------
-def run_backtest(df, mode):
-    if len(df) < 80:
-        return None
+def run_backtest_detailed(df, mode):
+    if len(df) < 80: return None
     trades = []
     i = 40
-    while i < len(df) - 8:
+    while i < len(df)-8:
         row = df.iloc[i]
         score = 0
         if row["Close"] > row["EMA_fast"] > row["EMA_mid"]: score += 40
-        if 50 <= row["RSI"] <= 68: score += 30
+        if 50 <= row["RSI"] <= 70: score += 30
         if row["Volume"] > 1.2 * row["Vol_Avg"]: score += 30
+        
         if score >= 70:
-            entry = df.iloc[i+1]["Open"]
+            entry_idx = df.index[i+1]
+            entry_price = df.iloc[i+1]["Open"]
             atr = row["ATR"]
-            sl_mult = 1.25 if mode == "Swing (Daily)" else 0.9
-            sl = entry - sl_mult * atr
-            t1 = entry + 1.6 * (entry - sl)
+            sl_dist = (1.25 if mode=="Swing (Daily)" else 0.9) * atr
+            sl = entry_price - sl_dist
+            t1 = entry_price + 1.6 * sl_dist
+            
             exited = False
             for j in range(i+2, min(i+18, len(df))):
                 if df.iloc[j]["Low"] <= sl:
-                    trades.append({"pnl": sl - entry, "win": False})
+                    trades.append({
+                        "Entry Date": entry_idx.strftime("%Y-%m-%d %H:%M"),
+                        "Exit Date": df.index[j].strftime("%Y-%m-%d %H:%M"),
+                        "Entry Price": round(entry_price, 1),
+                        "Exit Price": round(sl, 1),
+                        "PnL": round(sl - entry_price, 1),
+                        "Result": "Loss"
+                    })
                     i = j
                     exited = True
                     break
                 if df.iloc[j]["High"] >= t1:
-                    trades.append({"pnl": t1 - entry, "win": True})
+                    trades.append({
+                        "Entry Date": entry_idx.strftime("%Y-%m-%d %H:%M"),
+                        "Exit Date": df.index[j].strftime("%Y-%m-%d %H:%M"),
+                        "Entry Price": round(entry_price, 1),
+                        "Exit Price": round(t1, 1),
+                        "PnL": round(t1 - entry_price, 1),
+                        "Result": "Win"
+                    })
                     i = j
                     exited = True
                     break
+            
             if not exited:
-                pnl = df.iloc[min(i+15, len(df)-1)]["Close"] - entry
-                trades.append({"pnl": pnl, "win": pnl > 0})
+                exit_idx = min(i+15, len(df)-1)
+                exit_price = df.iloc[exit_idx]["Close"]
+                pnl = exit_price - entry_price
+                trades.append({
+                    "Entry Date": entry_idx.strftime("%Y-%m-%d %H:%M"),
+                    "Exit Date": df.index[exit_idx].strftime("%Y-%m-%d %H:%M"),
+                    "Entry Price": round(entry_price, 1),
+                    "Exit Price": round(exit_price, 1),
+                    "PnL": round(pnl, 1),
+                    "Result": "Win" if pnl > 0 else "Loss"
+                })
                 i += 4
         else:
             i += 1
-    if not trades:
-        return None
+            
+    if not trades: return None
     tdf = pd.DataFrame(trades)
+    wins = len(tdf[tdf["Result"] == "Win"])
     return {
         "trades": len(tdf),
-        "wins": int(tdf["win"].sum()),
-        "winrate": tdf["win"].mean() * 100,
-        "avg_pnl": tdf["pnl"].mean(),
-        "equity": np.cumsum(tdf["pnl"])
+        "wins": wins,
+        "winrate": (wins / len(tdf)) * 100,
+        "avg_pnl": tdf["PnL"].mean(),
+        "equity": np.cumsum(tdf["PnL"]),
+        "details_df": tdf
     }
 
 # -------------------------------------------------------------------
@@ -492,65 +460,59 @@ def run_backtest(df, mode):
 # -------------------------------------------------------------------
 if mode == "Swing (Daily)":
     df = get_data(ticker, "1d", "1y")
-    df_higher = get_data(ticker, "1d", "2y")
+    df_htf = get_data(ticker, "1d", "2y")
+    daily_for_weekly = df
 else:
     df = get_data(ticker, "5m", "5d")
-    df_higher = get_data(ticker, "1d", "6mo")
+    df_htf = get_data(ticker, "1d", "6mo")
+    daily_for_weekly = df_htf
 
 df = add_indicators(df, mode)
-if df_higher is not None and len(df_higher) > 30:
-    df_higher = add_indicators(df_higher, "Swing (Daily)")
+if df_htf is not None and len(df_htf) > 30:
+    df_htf = add_indicators(df_htf, "Swing (Daily)")
 
 vix_df = get_vix()
 vix_level = float(vix_df["Close"].iloc[-1]) if not vix_df.empty else 14.0
-vix_chg = float(vix_df["Close"].pct_change().iloc[-1] * 100) if len(vix_df) > 1 else 0.0
+vix_chg = float(vix_df["Close"].pct_change().iloc[-1]*100) if len(vix_df)>1 else 0.0
 
 latest = df.iloc[-1]
 prev = df.iloc[-2]
 price_change = float(latest["Close"] - prev["Close"])
-
 regime = detect_regime(latest, mode)
 weights = (SWING_WEIGHTS if mode == "Swing (Daily)" else INTRADAY_WEIGHTS).get(regime, SWING_WEIGHTS["Transition"])
 
 api = get_fii_dii()
 fii = manual_fii if use_manual_flow else api["fii_net"]
 dii = manual_dii if use_manual_flow else api["dii_net"]
-pcr = api["pcr"]
-sentiment = api["sentiment"]
 
 if mode == "Swing (Daily)":
     _, _, net_b = calculate_real_breadth(get_heavyweight_data())
     e3 = engine3_swing(net_b)
 else:
-    net_b = 0.0
     e3 = engine3_intraday(latest, regime)
 
-weekly_score, weekly_bias = get_weekly_bias(df if mode == "Swing (Daily)" else get_data(ticker, "1d", "1y"))
+weekly_score, weekly_bias = get_weekly_bias(daily_for_weekly)
 vix_regime, vix_adj, vix_msg = get_vix_regime(vix_level, vix_chg)
 
-e1 = engine1_score(latest, regime)
-e2 = engine2_score(fii, dii, pcr, sentiment)
-e4, e4_status, e4_action = engine4_trap(latest, price_change, vix_chg, regime, mode)
-e5 = engine5_technical(latest, regime, mode)
-e6, e6_detail, dem_str, sup_str = engine6_price_action(df, df_higher, regime, mode)
+e1 = engine1(latest, regime)
+e2 = engine2(fii, dii, api["pcr"], api["sentiment"])
+e4, e4_status, e4_action = engine4(latest, price_change, vix_chg, regime, mode)
+e5 = engine5(latest, regime, mode)
+e6, e6_detail, dem_str, sup_str = engine6(df, df_htf, regime, mode)
 
-# Base Weighted Engines Score
-raw_engine_score = (e1*weights["E1"] + e2*weights["E2"] + e3*weights["E3"] +
-                    e4*weights["E4"] + e5*weights["E5"] + e6*weights["E6"])
+engine_score = (e1*weights["E1"] + e2*weights["E2"] + e3*weights["E3"] +
+                e4*weights["E4"] + e5*weights["E5"] + e6*weights["E6"])
+final_score = engine_score + (weekly_score-50)*0.08 + vix_adj*0.6
 
-# OPTIMIZATION: Direct Additive/Subtractor modifiers instead of Compression Average
-final_score = raw_engine_score + weekly_score + vix_adj
-
-# Soft Time Window Penalty (Intraday)
 now = datetime.now().time()
 time_penalty = 0
-if mode == "Intraday (5-min)" and time(11, 30) <= now <= time(13, 30):
+if mode == "Intraday (5-min)" and time(11,30) <= now <= time(13,30):
     time_penalty = -10 if regime != "Range" else -16
 final_score += time_penalty
 
 oi_bias = 0
 if use_oi_filter:
-    if latest["Close"] > max_call_oi - 40: oi_bias = -10
+    if latest["Close"] > max_call_oi - 40: oi_bias = -12
     elif latest["Close"] < max_put_oi + 40: oi_bias = 8
 final_score += oi_bias
 
@@ -558,33 +520,24 @@ threshold = weights["threshold"]
 
 filter_pass = True
 msgs = []
-if mode == "Swing (Daily)" and avoid_mon_fri and datetime.now().weekday() in [0, 4]:
-    filter_pass = False
-    msgs.append("Mon/Fri")
+if mode == "Swing (Daily)" and avoid_mon_fri and datetime.now().weekday() in [0,4]:
+    filter_pass = False; msgs.append("Mon/Fri")
 if vix_chg > vix_spike_limit:
-    filter_pass = False
-    msgs.append(f"VIX {vix_chg:.1f}%")
+    filter_pass = False; msgs.append(f"VIX {vix_chg:.1f}%")
 if vix_regime == "Fear":
     msgs.append("VIX Fear")
 
-# OPTIMIZATION: Strict Signal Generation Logic
-signal = "NO TRADE"
-action = "WAIT"
-
+signal, action = "NO TRADE", "WAIT"
 if filter_pass and final_score >= threshold:
-    if e4_action in ["CALL", "PUT"] and e4 >= 70:
-        signal = f"TRAP → {e4_action}"
-        action = e4_action
-    elif final_score >= threshold + 6 and e6 >= 60:  # Must have PA Engine approval for High Conviction
-        signal = "HIGH CONVICTION LONG"
-        action = "CALL"
-    else:
-        signal = "MODERATE LONG"
-        action = "CALL"
+    if e4_action in ["CALL","PUT"] and e4 >= 70:
+        signal = f"TRAP → {e4_action}"; action = e4_action
+    elif final_score >= threshold + 6 and e6 >= 60:
+        signal = "HIGH CONVICTION LONG"; action = "CALL"
+    elif final_score >= threshold:
+        signal = "MODERATE LONG"; action = "CALL"
 
 atr = float(latest["ATR"])
-sl_mult = 1.25 if mode == "Swing (Daily)" else 0.9
-sl_dist = sl_mult * atr
+sl_dist = (1.25 if mode == "Swing (Daily)" else 0.9) * atr
 qty = max(1, int(capital * risk_pct / sl_dist)) if sl_dist > 0 else 0
 
 # -------------------------------------------------------------------
@@ -592,40 +545,55 @@ qty = max(1, int(capital * risk_pct / sl_dist)) if sl_dist > 0 else 0
 # -------------------------------------------------------------------
 st.subheader(f"{index_choice} | {mode} | Regime: `{regime}` | VIX: `{vix_regime}` | Weekly: `{weekly_bias}`")
 
-m1, m2, m3, m4, m5 = st.columns(5)
-m1.metric("Final Score", f"{final_score:.1f}", f"Thr {threshold}")
-m2.metric("Price", f"₹{latest['Close']:.1f}", f"{price_change:+.1f}")
-m3.metric("E6 (PA)", f"{e6:.0f}")
-m4.metric("VIX", f"{vix_level:.1f}", f"{vix_chg:+.1f}%")
-m5.metric("Time Penalty", f"{time_penalty}")
+c1,c2,c3,c4,c5 = st.columns(5)
+c1.metric("Final Score", f"{final_score:.1f}", f"Thr {threshold}")
+c2.metric("Price", f"₹{latest['Close']:.1f}", f"{price_change:+.1f}")
+c3.metric("E6 (PA)", f"{e6:.0f}")
+c4.metric("VIX", f"{vix_level:.1f}", f"{vix_chg:+.1f}%")
+c5.metric("Time Penalty", f"{time_penalty}")
 
-st.info(f"Engine6 Detail: **{e6_detail}** | Demand Str: {dem_str:.0f} | Supply Str: {sup_str:.0f} | {vix_msg}")
-st.write(f"Engines → E1:{e1:.0f} | E2:{e2:.0f} | E3:{e3:.0f} | E4:{e4:.0f} ({e4_status}) | E5:{e5:.0f} | **E6:{e6:.0f}**")
+vwap_note = "VWAP Reliable" if latest.get("VWAP_Reliable", True) else "VWAP Fallback (low volume)"
+st.info(f"E6: **{e6_detail}** | Dem:{dem_str:.0f} Sup:{sup_str:.0f} | {vix_msg} | {vwap_note}")
+
+st.write(f"E1:{e1:.0f} | E2:{e2:.0f} | E3:{e3:.0f} | E4:{e4:.0f} ({e4_status}) | E5:{e5:.0f} | **E6:{e6:.0f}**")
 
 if signal != "NO TRADE":
     st.success(f"**{signal}** | **{action}** | Qty: **{qty}**")
     st.write(f"SL: ₹{latest['Close']-sl_dist:.1f} | T1: ₹{latest['Close']+1.5*sl_dist:.1f} | T2: ₹{latest['Close']+2.3*sl_dist:.1f}")
 else:
-    st.warning(f"**NO TRADE** | {', '.join(msgs) if msgs else 'Below threshold / PA Conflict'}")
+    st.warning(f"**NO TRADE** | {', '.join(msgs) if msgs else 'Below threshold / E6 gate'}")
 
-# Backtest Snapshot
+# -------------------------------------------------------------------
+# BACKTEST SNAPSHOT & DETAILED TABLE
+# -------------------------------------------------------------------
 st.markdown("---")
-st.subheader("📊 Backtest Snapshot")
-bt = run_backtest(df, mode)
+st.subheader("📊 Backtest Snapshot (Baseline Setup)")
+st.caption("Simplified Engine Setup testing. Neeche table me saari entries/exits dekhiye.")
+
+bt = run_backtest_detailed(df, mode)
 if bt:
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Trades", bt["trades"])
-    c2.metric("Wins", bt["wins"])
-    c3.metric("Win Rate", f"{bt['winrate']:.1f}%")
-    c4.metric("Avg PnL", f"{bt['avg_pnl']:.1f}")
-    fig, ax = plt.subplots(figsize=(10, 3))
+    b1,b2,b3,b4 = st.columns(4)
+    b1.metric("Trades", bt["trades"])
+    b2.metric("Wins", bt["wins"])
+    b3.metric("Win Rate", f"{bt['winrate']:.1f}%")
+    b4.metric("Avg PnL", f"{bt['avg_pnl']:.1f}")
+    
+    fig, ax = plt.subplots(figsize=(10,3))
     ax.plot(bt["equity"], color="#00aa55", linewidth=1.5)
     ax.set_title(f"Equity Curve – {mode}")
     ax.grid(True, alpha=0.3)
     st.pyplot(fig)
     plt.close()
+    
+    # Detailed Table View Added Here
+    st.markdown("#### 🔍 Trade History Details")
+    st.dataframe(bt["details_df"], use_container_width=True)
+else:
+    st.info("Backtest ke liye sufficient data nahi")
 
-# Journal Log
+# -------------------------------------------------------------------
+# JOURNAL LOGGING
+# -------------------------------------------------------------------
 st.markdown("---")
 st.subheader("📝 Paper Journal")
 if not os.path.exists(JOURNAL_FILE):
@@ -636,11 +604,11 @@ if st.button("📥 Log Paper Entry", use_container_width=True):
     new = {
         "Date": datetime.now().strftime("%Y-%m-%d %H:%M"),
         "Mode": mode, "Index": index_choice, "Regime": regime,
-        "Score": round(final_score, 1), "Signal": signal, "Action": action,
-        "Entry": round(float(latest["Close"]), 1),
-        "SL": round(float(latest["Close"] - sl_dist), 1),
-        "T1": round(float(latest["Close"] + 1.5 * sl_dist), 1),
-        "T2": round(float(latest["Close"] + 2.3 * sl_dist), 1),
+        "Score": round(final_score,1), "Signal": signal, "Action": action,
+        "Entry": round(float(latest["Close"]),1),
+        "SL": round(float(latest["Close"]-sl_dist),1),
+        "T1": round(float(latest["Close"]+1.5*sl_dist),1),
+        "T2": round(float(latest["Close"]+2.3*sl_dist),1),
         "Exit": "", "PnL": "", "Result": "Open",
         "E6": e6, "Notes": e6_detail
     }
