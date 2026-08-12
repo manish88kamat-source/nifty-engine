@@ -3,7 +3,7 @@ import numpy as np
 import yfinance as yf
 
 # ==========================================
-# 1. CORE TECHNICAL, SMC & OPTION ENGINE
+# 1. INDICATORS & SMC ENGINE
 # ==========================================
 
 def calculate_indicators(df):
@@ -24,7 +24,7 @@ def calculate_indicators(df):
     df['BB_Lower'] = df['BB_Mid'] - (std * 2)
     df['BB_BW'] = (df['BB_Upper'] - df['BB_Lower']) / (df['BB_Mid'] + 1e-6)
 
-    # ADX (Directional Index)
+    # ADX
     up_move = df['High'] - df['High'].shift(1)
     down_move = df['Low'].shift(1) - df['Low']
     plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
@@ -34,14 +34,11 @@ def calculate_indicators(df):
     dx = 100 * (abs(plus_di - minus_di) / (plus_di + minus_di + 1e-6))
     df['ADX'] = dx.rolling(14).mean().fillna(15)
 
-    # Dynamic Intraday VWAP
+    # Dynamic VWAP
     tp = (df['High'] + df['Low'] + df['Close']) / 3
-    if 'Date' in df.columns:
-        df['VWAP'] = (tp * df['Volume']).groupby(df['Date']).cumsum() / (df['Volume'].groupby(df['Date']).cumsum() + 1e-6)
-    else:
-        df['VWAP'] = (tp * df['Volume']).cumsum() / (df['Volume'].cumsum() + 1e-6)
+    df['VWAP'] = (tp * df['Volume']).cumsum() / (df['Volume'].cumsum() + 1e-6)
 
-    # Option Chain Derivatives
+    # Option Derivatives Proxy
     volume_ma = df['Volume'].rolling(20).mean().bfill()
     df['Volume_Ratio'] = df['Volume'] / (volume_ma + 1e-6)
     price_change = df['Close'].diff().fillna(0)
@@ -55,40 +52,31 @@ def calculate_indicators(df):
     df['Time'] = df.index.time
     df['Delta_Decay_Zone'] = df['Time'].apply(lambda t: t >= pd.to_datetime('14:30').time() if pd.notnull(t) else False)
 
-    return df
-
-def detect_smc_elements(df):
-    df = df.copy()
-    
+    # SMC Signals
+    df['Bullish_BOS'] = df['Close'] > df['High'].shift(1)
+    df['Bearish_BOS'] = df['Close'] < df['Low'].shift(1)
     df['Bullish_FVG'] = df['Low'] > df['High'].shift(2)
     df['Bearish_FVG'] = df['High'] < df['Low'].shift(2)
 
-    df['Swing_High'] = df['High'].rolling(5).max()
-    df['Swing_Low'] = df['Low'].rolling(5).min()
-    
-    df['Bullish_BOS'] = df['Close'] > df['Swing_High'].shift(1)
-    df['Bearish_BOS'] = df['Close'] < df['Swing_Low'].shift(1)
-
     return df
 
 # ==========================================
-# 2. REGIME IDENTIFIER ENGINE
+# 2. MACRO REGIME IDENTIFIER
 # ==========================================
 
-def map_macro_regimes(df_daily, df_vix=None):
+def map_macro_regimes(df_daily):
     regimes = []
     for i in range(len(df_daily)):
-        atr = df_daily['ATR'].iloc[i]
-        atr_ma = df_daily['ATR_MA'].iloc[i]
-        bw = df_daily['BB_BW'].iloc[i]
-        adx = df_daily['ADX'].iloc[i]
-        vix = df_vix.iloc[i] if (df_vix is not None and i < len(df_vix)) else 14.0
+        atr = float(df_daily['ATR'].iloc[i])
+        atr_ma = float(df_daily['ATR_MA'].iloc[i])
+        bw = float(df_daily['BB_BW'].iloc[i])
+        adx = float(df_daily['ADX'].iloc[i])
 
-        if (atr > 1.3 * atr_ma) or (vix > 20.0):
+        if atr > 1.3 * atr_ma:
             regimes.append(3)
-        elif (adx > 32) and (atr > atr_ma):
+        elif adx > 32 and atr > atr_ma:
             regimes.append(4)
-        elif (adx > 18) or (bw > 0.025):
+        elif adx > 18 or bw > 0.025:
             regimes.append(1)
         else:
             regimes.append(2)
@@ -97,166 +85,162 @@ def map_macro_regimes(df_daily, df_vix=None):
     return df_daily
 
 # ==========================================
-# 3. BACKTEST ENGINE (BUG FIXES INCLUDED)
+# 3. BACKTEST ENGINE (FLOAT VALUE WRAPPER)
 # ==========================================
 
-class UnifiedSMCBacktester:
-    def __init__(self, df_5m, df_daily, df_vix=None):
-        self.df_5m = df_5m.copy()
-        self.df_daily = df_daily.copy()
-        self.df_vix = df_vix.copy() if df_vix is not None else None
-        self.journal = []
-        self.position = None
-        self.entry_price = 0
-        self.sl = 0
-        self.tp = 0
-        self.break_even_activated = False
-
-    def prepare_data(self):
-        self.df_daily = calculate_indicators(self.df_daily)
-        self.df_daily = map_macro_regimes(self.df_daily, self.df_vix)
-        
-        self.df_5m['Date'] = self.df_5m.index.date
-        self.df_daily['Date'] = self.df_daily.index.date
-        regime_dict = dict(zip(self.df_daily['Date'], self.df_daily['Regime']))
-        self.df_5m['Regime'] = self.df_5m['Date'].map(regime_dict).fillna(1)
-
-        self.df_5m = calculate_indicators(self.df_5m)
-        self.df_5m = detect_smc_elements(self.df_5m)
-
-    def run(self):
-        self.prepare_data()
-
-        for i in range(2, len(self.df_5m)):
-            curr = self.df_5m.iloc[i]
-            prev = self.df_5m.iloc[i-1]
-            t_stamp = self.df_5m.index[i]
-            regime = curr['Regime']
-
-            # Position Management (Fixing Target Execution Prices)
-            if self.position == 'LONG':
-                if not self.break_even_activated and curr['High'] >= self.entry_price + curr['ATR']:
-                    self.sl = self.entry_price
-                    self.break_even_activated = True
-
-                if curr['Low'] <= self.sl:
-                    self._close_trade(t_stamp, self.sl, "SL / Break-even Hit", regime)
-                    continue
-                elif curr['High'] >= self.tp:
-                    self._close_trade(t_stamp, self.tp, "Target Hit", regime)
-                    continue
-
-            elif self.position == 'SHORT':
-                if not self.break_even_activated and curr['Low'] <= self.entry_price - curr['ATR']:
-                    self.sl = self.entry_price
-                    self.break_even_activated = True
-
-                if curr['High'] >= self.sl:
-                    self._close_trade(t_stamp, self.sl, "SL / Break-even Hit", regime)
-                    continue
-                elif curr['Low'] <= self.tp:
-                    self._close_trade(t_stamp, self.tp, "Target Hit", regime)
-                    continue
-
-            # ENTRY EXECUTION WITH BUG FIXES
-            if curr['Delta_Decay_Zone']:
-                continue
-
-            # SETUP 0: GAMMA SQUEEZE
-            if curr['Gamma_Squeeze_Long']:
-                self._open_trade('LONG', t_stamp, curr['Close'], 
-                                sl=curr['Close'] - (1.0 * curr['ATR']),
-                                tp=curr['Close'] + (2.5 * curr['ATR']),
-                                setup="Gamma Squeeze Long", regime=regime)
-                continue
-
-            elif curr['Gamma_Squeeze_Short']:
-                self._open_trade('SHORT', t_stamp, curr['Close'], 
-                                sl=curr['Close'] + (1.0 * curr['ATR']),
-                                tp=curr['Close'] - (2.5 * curr['ATR']),
-                                setup="Gamma Squeeze Short", regime=regime)
-                continue
-
-            # SETUP 1: REGIME 1 TRENDING
-            if regime == 1:
-                if (curr['Bullish_BOS'] or curr['Bullish_FVG']) and curr['Close'] > curr['VWAP'] and curr['PCR'] >= 1.02:
-                    self._open_trade('LONG', t_stamp, curr['Close'], 
-                                    sl=curr['Close'] - (1.2 * curr['ATR']),
-                                    tp=curr['Close'] + (2.0 * curr['ATR']),
-                                    setup="Regime 1: Trend Long", regime=regime)
-
-                elif (curr['Bearish_BOS'] or curr['Bearish_FVG']) and curr['Close'] < curr['VWAP'] and curr['PCR'] <= 0.98:
-                    self._open_trade('SHORT', t_stamp, curr['Close'], 
-                                    sl=curr['Close'] + (1.2 * curr['ATR']),
-                                    tp=curr['Close'] - (2.0 * curr['ATR']),
-                                    setup="Regime 1: Trend Short", regime=regime)
-
-            # SETUP 2: REGIME 2 CHOP (Target = VWAP level properly set)
-            elif regime == 2:
-                if curr['Close'] < curr['BB_Lower'] and curr['PCR'] > 0.90:
-                    self._open_trade('LONG', t_stamp, curr['Close'], 
-                                    sl=curr['Close'] - 18, 
-                                    tp=curr['VWAP'], 
-                                    setup="Regime 2: Demand Long", regime=regime)
-
-                elif curr['Close'] > curr['BB_Upper'] and curr['PCR'] < 1.10:
-                    self._open_trade('SHORT', t_stamp, curr['Close'], 
-                                    sl=curr['Close'] + 18, 
-                                    tp=curr['VWAP'], 
-                                    setup="Regime 2: Supply Short", regime=regime)
-
-    def _open_trade(self, side, t_stamp, price, sl, tp, setup, regime):
-        self.position = side
-        self.entry_price = price
-        self.sl = sl
-        self.tp = tp
-        self.break_even_activated = False
-        self.active_trade_log = {
-            'Entry_Time': t_stamp, 'Type': side, 'Regime': regime,
-            'Entry': round(price, 2), 'SL': round(sl, 2), 'TP': round(tp, 2),
-            'Setup': setup
-        }
-
-    def _close_trade(self, t_stamp, exit_price, reason, regime):
-        pnl = (exit_price - self.entry_price) if self.position == 'LONG' else (self.entry_price - exit_price)
-        self.active_trade_log['Exit_Time'] = t_stamp
-        self.active_trade_log['Exit_Price'] = round(exit_price, 2)
-        self.active_trade_log['Reason'] = reason
-        self.active_trade_log['PnL_Points'] = round(pnl, 2)
-        self.journal.append(self.active_trade_log)
-        self.position = None
-
-    def display_results(self):
-        df_j = pd.DataFrame(self.journal)
-        if df_j.empty:
-            print("No trades executed.")
-            return
-        win_trades = len(df_j[df_j['PnL_Points'] > 0])
-        print("\n================ SYSTEM BACKTEST PERFORMANCE JOURNAL ================")
-        print(f"Total Trades Executed : {len(df_j)}")
-        print(f"Win Rate              : {round((win_trades / len(df_j)) * 100, 2)}%")
-        print(f"Total PnL Points      : {round(df_j['PnL_Points'].sum(), 2)} Nifty Points")
-        print("=====================================================================")
-        print("\n--- SAMPLE JOURNAL (Recent 10 Trades) ---")
-        print(df_j[['Entry_Time', 'Setup', 'Type', 'Entry', 'Exit_Price', 'Reason', 'PnL_Points']].tail(10).to_string())
-
-if __name__ == "__main__":
+def run_backtest():
     print("Fetching live market data for Nifty 50 from Yahoo Finance...")
-
     df_5m = yf.download(tickers="^NSEI", period="1mo", interval="5m")
 
     if isinstance(df_5m.columns, pd.MultiIndex):
         df_5m.columns = df_5m.columns.get_level_values(0)
 
     df_5m = df_5m.dropna()
+    
+    df_daily = df_5m.resample('D').agg({
+        'Open': 'first', 'High': 'max', 'Low': 'min', 'Close': 'last', 'Volume': 'sum'
+    }).dropna()
 
-    if df_5m.empty:
-        print("Error fetching data.")
+    df_daily = calculate_indicators(df_daily)
+    df_daily = map_macro_regimes(df_daily)
+
+    df_5m['Date'] = df_5m.index.date
+    df_daily['Date'] = df_daily.index.date
+    regime_dict = dict(zip(df_daily['Date'], df_daily['Regime']))
+    df_5m['Regime'] = df_5m['Date'].map(regime_dict).fillna(1)
+
+    df_5m = calculate_indicators(df_5m)
+
+    journal = []
+    position = None
+    entry_price = 0.0
+    sl = 0.0
+    tp = 0.0
+    break_even_activated = False
+
+    for i in range(2, len(df_5m)):
+        curr_close = float(df_5m['Close'].iloc[i])
+        curr_high = float(df_5m['High'].iloc[i])
+        curr_low = float(df_5m['Low'].iloc[i])
+        curr_atr = float(df_5m['ATR'].iloc[i])
+        curr_vwap = float(df_5m['VWAP'].iloc[i])
+        curr_bb_upper = float(df_5m['BB_Upper'].iloc[i])
+        curr_bb_lower = float(df_5m['BB_Lower'].iloc[i])
+        curr_pcr = float(df_5m['PCR'].iloc[i])
+        
+        prev_low = float(df_5m['Low'].iloc[i-1])
+        prev_bb_lower = float(df_5m['BB_Lower'].iloc[i-1])
+
+        t_stamp = df_5m.index[i]
+        regime = int(df_5m['Regime'].iloc[i])
+
+        # Manage Position
+        if position == 'LONG':
+            if not break_even_activated and curr_high >= entry_price + curr_atr:
+                sl = entry_price
+                break_even_activated = True
+
+            if curr_low <= sl:
+                pnl = sl - entry_price
+                journal.append({'Time': t_stamp, 'Regime': regime, 'Type': 'LONG', 'Entry': round(entry_price, 2), 'Exit': round(sl, 2), 'PnL': round(pnl, 2), 'Reason': 'SL / Break-even'})
+                position = None
+                continue
+            elif curr_high >= tp:
+                pnl = tp - entry_price
+                journal.append({'Time': t_stamp, 'Regime': regime, 'Type': 'LONG', 'Entry': round(entry_price, 2), 'Exit': round(tp, 2), 'PnL': round(pnl, 2), 'Reason': 'Target Hit'})
+                position = None
+                continue
+
+        elif position == 'SHORT':
+            if not break_even_activated and curr_low <= entry_price - curr_atr:
+                sl = entry_price
+                break_even_activated = True
+
+            if curr_high >= sl:
+                pnl = entry_price - sl
+                journal.append({'Time': t_stamp, 'Regime': regime, 'Type': 'SHORT', 'Entry': round(entry_price, 2), 'Exit': round(sl, 2), 'PnL': round(pnl, 2), 'Reason': 'SL / Break-even'})
+                position = None
+                continue
+            elif curr_low <= tp:
+                pnl = entry_price - tp
+                journal.append({'Time': t_stamp, 'Regime': regime, 'Type': 'SHORT', 'Entry': round(entry_price, 2), 'Exit': round(tp, 2), 'PnL': round(pnl, 2), 'Reason': 'Target Hit'})
+                position = None
+                continue
+
+        # ENTRY CONDITIONS
+        if df_5m['Delta_Decay_Zone'].iloc[i]:
+            continue
+
+        # Gamma Squeeze
+        if df_5m['Gamma_Squeeze_Long'].iloc[i]:
+            position = 'LONG'
+            entry_price = curr_close
+            sl = entry_price - (1.0 * curr_atr)
+            tp = entry_price + (2.5 * curr_atr)
+            break_even_activated = False
+            continue
+        elif df_5m['Gamma_Squeeze_Short'].iloc[i]:
+            position = 'SHORT'
+            entry_price = curr_close
+            sl = entry_price + (1.0 * curr_atr)
+            tp = entry_price - (2.5 * curr_atr)
+            break_even_activated = False
+            continue
+
+        # Regime 1: Trend Expansion
+        if regime == 1:
+            if (df_5m['Bullish_BOS'].iloc[i] or df_5m['Bullish_FVG'].iloc[i]) and curr_close > curr_vwap and curr_pcr >= 1.02:
+                position = 'LONG'
+                entry_price = curr_close
+                sl = entry_price - (1.2 * curr_atr)
+                tp = entry_price + (2.0 * curr_atr)
+                break_even_activated = False
+
+            elif (df_5m['Bearish_BOS'].iloc[i] or df_5m['Bearish_FVG'].iloc[i]) and curr_close < curr_vwap and curr_pcr <= 0.98:
+                position = 'SHORT'
+                entry_price = curr_close
+                sl = entry_price + (1.2 * curr_atr)
+                tp = entry_price - (2.0 * curr_atr)
+                break_even_activated = False
+
+        # Regime 2: Chop Reversion (Fixing Exit Price VWAP mapping)
+        elif regime == 2:
+            if curr_close < curr_bb_lower and curr_pcr > 0.90:
+                position = 'LONG'
+                entry_price = curr_close
+                sl = entry_price - 18.0
+                tp = curr_vwap
+                break_even_activated = False
+
+            elif curr_close > curr_bb_upper and curr_pcr < 1.10:
+                position = 'SHORT'
+                entry_price = curr_close
+                sl = entry_price + 18.0
+                tp = curr_vwap
+                break_even_activated = False
+
+        # Regime 4: V-Shape Reversal
+        elif regime == 4:
+            if prev_low < prev_bb_lower and curr_close > curr_bb_lower and df_5m['Bullish_FVG'].iloc[i]:
+                position = 'LONG'
+                entry_price = curr_close
+                sl = prev_low
+                tp = curr_vwap + (1.5 * curr_atr)
+                break_even_activated = False
+
+    # Summary
+    df_j = pd.DataFrame(journal)
+    print("\n================ SYSTEM BACKTEST PERFORMANCE JOURNAL ================")
+    if df_j.empty:
+        print("No trades executed.")
     else:
-        df_daily = df_5m.resample('D').agg({
-            'Open': 'first', 'High': 'max', 'Low': 'min', 'Close': 'last', 'Volume': 'sum'
-        }).dropna()
+        win_trades = len(df_j[df_j['PnL'] > 0])
+        print(f"Total Trades Executed : {len(df_j)}")
+        print(f"Win Rate              : {round((win_trades / len(df_j)) * 100, 2)}%")
+        print(f"Total PnL Points      : {round(df_j['PnL'].sum(), 2)} Nifty Points")
+        print("=====================================================================")
+        print("\n--- SAMPLE JOURNAL (Recent 10 Trades) ---")
+        print(df_j[['Time', 'Regime', 'Type', 'Entry', 'Exit', 'PnL', 'Reason']].tail(10).to_string())
 
-        tester = UnifiedSMCBacktester(df_5m, df_daily)
-        tester.run()
-        tester.display_results()
+if __name__ == "__main__":
+    run_backtest()
