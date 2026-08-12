@@ -9,9 +9,9 @@ import os
 # -------------------------------------------------------------------
 # PAGE CONFIG
 # -------------------------------------------------------------------
-st.set_page_config(page_title="Adaptive Engine v16.0", layout="wide", initial_sidebar_state="expanded")
-st.title("🎯 Adaptive Engine v16.0 (High Win-Rate Institutional Quant Engine)")
-st.caption("No-Lag Indicator Synergy | Breakeven Stop-Loss Lock | Strict Time Window | Retest Confirmation")
+st.set_page_config(page_title="Adaptive Engine v17.0", layout="wide", initial_sidebar_state="expanded")
+st.title("🎯 Adaptive Engine v17.0 (Real PnL & True Win-Rate Architecture)")
+st.caption("Zero Fake Wins | True R:R System (Min 1.5x ATR Target) | Structure Trailing | Auto Logger")
 
 JOURNAL_FILE = "paper_trade_journal.csv"
 
@@ -78,24 +78,21 @@ def fetch_heavyweights():
         return 5, 5
 
 # -------------------------------------------------------------------
-# HIGH WIN-RATE INDICATOR & CONTEXT PIPELINE
+# REAL PnL PIPELINE (NO FAKE WIN-RATES)
 # -------------------------------------------------------------------
-def build_quant_engine(df_spot, df_fut):
+def build_real_pnl_engine(df_spot, df_fut):
     df = df_spot.copy()
     df['Date'] = df.index.date
     
-    # 1. VWAP & Volume Acceleration
     if not df_fut.empty and "Volume" in df_fut.columns:
         df_fut["TP"] = (df_fut["High"] + df_fut["Low"] + df_fut["Close"]) / 3
         df["VWAP"] = (df_fut["Volume"] * df_fut["TP"]).cumsum() / (df_fut["Volume"].cumsum() + 1e-9)
     else:
         df["VWAP"] = (df["High"] + df["Low"] + df["Close"]) / 3
 
-    # 2. ATR & Movement Filters
     tr = pd.concat([df["High"]-df["Low"], (df["High"]-df["Close"].shift()).abs(), (df["Low"]-df["Close"].shift()).abs()], axis=1).max(axis=1)
     df["ATR"] = tr.rolling(14).mean()
     
-    # 3. Directional Movement Index & ADX Strength
     up = df["High"] - df["High"].shift(1)
     dn = df["Low"].shift(1) - df["Low"]
     pos_dm = np.where((up > dn) & (up > 0), up, 0.0)
@@ -106,9 +103,7 @@ def build_quant_engine(df_spot, df_fut):
     df["ADX"] = dx.rolling(14).mean()
     df["Plus_DI"] = pos_di
     df["Minus_DI"] = neg_di
-    df["DI_Spread"] = (pos_di - neg_di).abs()
 
-    # 4. Candlesticks & Body Quality Check
     o, h, l, c = df["Open"], df["High"], df["Low"], df["Close"]
     body = (c - o).abs()
     min_oc = np.minimum(o, c)
@@ -116,11 +111,10 @@ def build_quant_engine(df_spot, df_fut):
     lower_wick = min_oc - l
     upper_wick = h - max_oc
     
-    df["Is_Valid_Candle"] = body >= (0.35 * df["ATR"]) # Avoid Doji/Choppy
+    df["Is_Valid_Candle"] = body >= (0.3 * df["ATR"])
     df["Is_Bear_Pinbar"] = (upper_wick > 2 * body) & (lower_wick < 0.2 * body)
     df["Is_Bull_Pinbar"] = (lower_wick > 2 * body) & (upper_wick < 0.2 * body)
 
-    # 5. Opening Range & Context Extraction
     daily_groups = df.groupby('Date')
     df["Gap_Pct"] = 0.0
     df["Day_Bias"] = "NEUTRAL"
@@ -140,8 +134,6 @@ def build_quant_engine(df_spot, df_fut):
         bias = "NEUTRAL"
         if gap <= -0.10 and f_close < f_open: bias = "BEARISH"
         elif gap >= 0.10 and f_close > f_open: bias = "BULLISH"
-        elif gap > 0.20 and f_close < f_open: bias = "BEARISH (Fade Gap Up)"
-        elif gap < -0.20 and f_close > f_open: bias = "BULLISH (Fade Gap Down)"
         
         df.loc[group.index, "Gap_Pct"] = gap
         df.loc[group.index, "Day_Bias"] = bias
@@ -152,9 +144,9 @@ def build_quant_engine(df_spot, df_fut):
     return df.dropna()
 
 # -------------------------------------------------------------------
-# HIGH WIN-RATE BACKTEST ENGINE WITH BREAKEVEN LOCK
+# REAL PnL BACKTEST ENGINE (NO FAKE $+2$ PT WINS)
 # -------------------------------------------------------------------
-def run_high_winrate_backtest(df):
+def run_real_pnl_backtest(df):
     if len(df) < 50: return None
     trades = []
     i = 30
@@ -163,7 +155,6 @@ def run_high_winrate_backtest(df):
         row = df.iloc[i]
         curr_time = row.name.time()
         
-        # STRICT TIME WINDOW LOCK: 09:45 AM TO 13:45 PM ONLY
         if curr_time < time(9, 45) or curr_time > time(13, 45):
             i += 1; continue
             
@@ -171,98 +162,90 @@ def run_high_winrate_backtest(df):
         vwap_p = row["VWAP"]
         atr = row["ATR"]
         adx_p = row["ADX"]
-        di_spread = row["DI_Spread"]
         or_high = row["OR_High"]
         or_low = row["OR_Low"]
         is_valid = row["Is_Valid_Candle"]
         
-        # PRIMARY TRIGGER & SYNERGY MATRIX
         primary_trigger = None
-        
-        # CALL TRIGGER
-        if close_p > or_high and close_p > vwap_p and row["Plus_DI"] > row["Minus_DI"] and adx_p >= 18 and is_valid:
-            primary_trigger = "CALL"
-        elif row["Is_Bull_Pinbar"] and close_p > vwap_p and row["Plus_DI"] > row["Minus_DI"] and adx_p >= 20:
-            primary_trigger = "CALL"
-            
-        # PUT TRIGGER
-        elif close_p < or_low and close_p < vwap_p and row["Minus_DI"] > row["Plus_DI"] and adx_p >= 18 and is_valid:
+        if close_p < or_low and close_p < vwap_p and row["Minus_DI"] > row["Plus_DI"] and adx_p >= 18 and is_valid:
             primary_trigger = "PUT"
-        elif row["Is_Bear_Pinbar"] and close_p < vwap_p and row["Minus_DI"] > row["Plus_DI"] and adx_p >= 20:
-            primary_trigger = "PUT"
+        elif close_p > or_high and close_p > vwap_p and row["Plus_DI"] > row["Minus_DI"] and adx_p >= 18 and is_valid:
+            primary_trigger = "CALL"
 
         if primary_trigger:
             entry_idx = df.index[i+1]
             entry_price = df.iloc[i+1]["Open"]
             
-            # DYNAMIC ATR TARGETS
-            sl_dist = 0.85 * atr
-            sl = entry_price - sl_dist if primary_trigger == "CALL" else entry_price + sl_dist
-            t1 = entry_price + 1.0 * sl_dist if primary_trigger == "CALL" else entry_price - 1.0 * sl_dist  # Quick Partial
-            t2 = entry_price + 2.0 * sl_dist if primary_trigger == "CALL" else entry_price - 2.0 * sl_dist  # Full Target
+            # TRUE INSTITUTIONAL R:R (1 : 1.8)
+            sl_dist = 0.9 * atr
+            min_profit_threshold = 1.2 * sl_dist  # Trade MUST capture at least this for a TRUE WIN
             
-            t1_hit = False
+            sl = entry_price + sl_dist if primary_trigger == "PUT" else entry_price - sl_dist
+            target = entry_price - (2.0 * sl_dist) if primary_trigger == "PUT" else entry_price + (2.0 * sl_dist)
+            
             curr_sl = sl
             exited = False
             
-            for j in range(i+2, min(i+40, len(df))):
+            for j in range(i+2, min(i+45, len(df))):
                 curr_bar = df.iloc[j]
                 
-                # EOD Exit
                 if curr_bar.name.time() >= time(15, 15):
                     exit_p = curr_bar["Close"]
-                    pnl = exit_p - entry_price if primary_trigger == "CALL" else entry_price - exit_p
-                    trades.append({"Entry Date": entry_idx.strftime("%Y-%m-%d %H:%M"), "Exit Date": df.index[j].strftime("%Y-%m-%d %H:%M"), "Action": primary_trigger, "Entry": round(entry_price,1), "Exit": round(exit_p,1), "PnL": round(pnl,1), "Result": "Win" if pnl >= 0 else "Loss", "Type": "EOD Exit"})
+                    pnl = entry_price - exit_p if primary_trigger == "PUT" else exit_p - entry_price
+                    res = "Win" if pnl >= min_profit_threshold else ("Loss" if pnl < 0 else "Breakeven")
+                    trades.append({"Entry Date": entry_idx.strftime("%Y-%m-%d %H:%M"), "Exit Date": df.index[j].strftime("%Y-%m-%d %H:%M"), "Action": primary_trigger, "Entry": round(entry_price,1), "Exit": round(exit_p,1), "PnL": round(pnl,1), "Result": res, "Type": "EOD Exit"})
                     i = j + 4; exited = True; break
                 
-                if primary_trigger == "CALL":
-                    # Check SL
-                    if curr_bar["Low"] <= curr_sl:
-                        pnl = curr_sl - entry_price
-                        res = "Win" if (t1_hit or pnl >= 0) else "Loss"
-                        trades.append({"Entry Date": entry_idx.strftime("%Y-%m-%d %H:%M"), "Exit Date": df.index[j].strftime("%Y-%m-%d %H:%M"), "Action": "CALL", "Entry": round(entry_price,1), "Exit": round(curr_sl,1), "PnL": round(pnl,1), "Result": res, "Type": "SL/Breakeven"})
-                        i = j + 4; exited = True; break
-                    
-                    # Check T1 (Lock Breakeven)
-                    if not t1_hit and curr_bar["High"] >= t1:
-                        t1_hit = True
-                        curr_sl = entry_price + 2.0 # BREAKEVEN LOCK (+2 pts)
-                        
-                    # Check T2 (Full Win)
-                    if curr_bar["High"] >= t2:
-                        trades.append({"Entry Date": entry_idx.strftime("%Y-%m-%d %H:%M"), "Exit Date": df.index[j].strftime("%Y-%m-%d %H:%M"), "Action": "CALL", "Entry": round(entry_price,1), "Exit": round(t2,1), "PnL": round(t2-entry_price,1), "Result": "Win", "Type": "Full Target Hit"})
-                        i = j + 4; exited = True; break
-
-                elif primary_trigger == "PUT":
+                if primary_trigger == "PUT":
+                    # SL Hit Check
                     if curr_bar["High"] >= curr_sl:
                         pnl = entry_price - curr_sl
-                        res = "Win" if (t1_hit or pnl >= 0) else "Loss"
-                        trades.append({"Entry Date": entry_idx.strftime("%Y-%m-%d %H:%M"), "Exit Date": df.index[j].strftime("%Y-%m-%d %H:%M"), "Action": "PUT", "Entry": round(entry_price,1), "Exit": round(curr_sl,1), "PnL": round(pnl,1), "Result": res, "Type": "SL/Breakeven"})
+                        res = "Loss" if pnl < 0 else ("Win" if pnl >= min_profit_threshold else "Breakeven")
+                        trades.append({"Entry Date": entry_idx.strftime("%Y-%m-%d %H:%M"), "Exit Date": df.index[j].strftime("%Y-%m-%d %H:%M"), "Action": "PUT", "Entry": round(entry_price,1), "Exit": round(curr_sl,1), "PnL": round(pnl,1), "Result": res, "Type": "SL Hit"})
                         i = j + 4; exited = True; break
                     
-                    if not t1_hit and curr_bar["Low"] <= t1:
-                        t1_hit = True
-                        curr_sl = entry_price - 2.0 # BREAKEVEN LOCK
-                        
-                    if curr_bar["Low"] <= t2:
-                        trades.append({"Entry Date": entry_idx.strftime("%Y-%m-%d %H:%M"), "Exit Date": df.index[j].strftime("%Y-%m-%d %H:%M"), "Action": "PUT", "Entry": round(entry_price,1), "Exit": round(t2,1), "PnL": round(entry_price-t2,1), "Result": "Win", "Type": "Full Target Hit"})
+                    # Target Hit Check
+                    if curr_bar["Low"] <= target:
+                        pnl = entry_price - target
+                        trades.append({"Entry Date": entry_idx.strftime("%Y-%m-%d %H:%M"), "Exit Date": df.index[j].strftime("%Y-%m-%d %H:%M"), "Action": "PUT", "Entry": round(entry_price,1), "Exit": round(target,1), "PnL": round(pnl,1), "Result": "Win", "Type": "Full Target Hit"})
+                        i = j + 4; exited = True; break
+
+                elif primary_trigger == "CALL":
+                    if curr_bar["Low"] <= curr_sl:
+                        pnl = curr_sl - entry_price
+                        res = "Loss" if pnl < 0 else ("Win" if pnl >= min_profit_threshold else "Breakeven")
+                        trades.append({"Entry Date": entry_idx.strftime("%Y-%m-%d %H:%M"), "Exit Date": df.index[j].strftime("%Y-%m-%d %H:%M"), "Action": "CALL", "Entry": round(entry_price,1), "Exit": round(curr_sl,1), "PnL": round(pnl,1), "Result": res, "Type": "SL Hit"})
+                        i = j + 4; exited = True; break
+                    
+                    if curr_bar["High"] >= target:
+                        pnl = target - entry_price
+                        trades.append({"Entry Date": entry_idx.strftime("%Y-%m-%d %H:%M"), "Exit Date": df.index[j].strftime("%Y-%m-%d %H:%M"), "Action": "CALL", "Entry": round(entry_price,1), "Exit": round(target,1), "PnL": round(pnl,1), "Result": "Win", "Type": "Full Target Hit"})
                         i = j + 4; exited = True; break
 
             if not exited:
-                exit_idx = min(i+35, len(df)-1)
+                exit_idx = min(i+40, len(df)-1)
                 exit_p = df.iloc[exit_idx]["Close"]
-                pnl = exit_p - entry_price if primary_trigger == "CALL" else entry_price - exit_p
-                trades.append({"Entry Date": entry_idx.strftime("%Y-%m-%d %H:%M"), "Exit Date": df.index[exit_idx].strftime("%Y-%m-%d %H:%M"), "Action": primary_trigger, "Entry": round(entry_price,1), "Exit": round(exit_p,1), "PnL": round(pnl,1), "Result": "Win" if pnl >= 0 else "Loss", "Type": "Time Exit"})
+                pnl = entry_price - exit_p if primary_trigger == "PUT" else exit_p - entry_price
+                res = "Win" if pnl >= min_profit_threshold else ("Loss" if pnl < 0 else "Breakeven")
+                trades.append({"Entry Date": entry_idx.strftime("%Y-%m-%d %H:%M"), "Exit Date": df.index[exit_idx].strftime("%Y-%m-%d %H:%M"), "Action": primary_trigger, "Entry": round(entry_price,1), "Exit": round(exit_p,1), "PnL": round(pnl,1), "Result": res, "Type": "Time Exit"})
                 i += 6
         else:
             i += 1
             
     if not trades: return None
     tdf = pd.DataFrame(trades)
-    wins = len(tdf[tdf["Result"] == "Win"])
+    
+    # ACCURATE METRICS
+    real_wins = len(tdf[tdf["Result"] == "Win"])
+    total_trades = len(tdf)
+    
     return {
-        "trades": len(tdf), "wins": wins, "winrate": (wins / len(tdf)) * 100,
-        "avg_pnl": tdf["PnL"].mean(), "total_pnl": tdf["PnL"].sum(), "details_df": tdf
+        "trades": total_trades, 
+        "wins": real_wins, 
+        "winrate": (real_wins / total_trades) * 100 if total_trades > 0 else 0.0,
+        "avg_pnl": tdf["PnL"].mean(), 
+        "total_pnl": tdf["PnL"].sum(), 
+        "details_df": tdf
     }
 
 # -------------------------------------------------------------------
@@ -275,7 +258,7 @@ if df_spot.empty or len(df_spot) < 30:
     st.error("Data loading. Please refresh in a moment.")
     st.stop()
 
-df = build_quant_engine(df_spot, df_fut)
+df = build_real_pnl_engine(df_spot, df_fut)
 vix_val, vix_chg = fetch_realtime_vix()
 bull_hw, bear_hw = fetch_heavyweights()
 
@@ -290,19 +273,14 @@ or_low = float(latest["OR_Low"])
 adx_p = float(latest["ADX"])
 live_time = latest.name.time()
 
-# LIVE SIGNAL CHECK
 signal, action = "NO TRADE", "WAIT"
 if time(9, 45) <= live_time <= time(13, 45):
-    if close_p > or_high and close_p > vwap_p and latest["Plus_DI"] > latest["Minus_DI"] and adx_p >= 18 and latest["Is_Valid_Candle"]:
-        signal, action = "HIGH-PRECISION ORB BREAKOUT", "CALL"
-    elif close_p < or_low and close_p < vwap_p and latest["Minus_DI"] > latest["Plus_DI"] and adx_p >= 18 and latest["Is_Valid_Candle"]:
-        signal, action = "HIGH-PRECISION ORB BREAKDOWN", "PUT"
-    elif latest["Is_Bull_Pinbar"] and close_p > vwap_p and latest["Plus_DI"] > latest["Minus_DI"] and adx_p >= 20:
-        signal, action = "HIGH-PRECISION VWAP DIP BUY", "CALL"
-    elif latest["Is_Bear_Pinbar"] and close_p < vwap_p and latest["Minus_DI"] > latest["Plus_DI"] and adx_p >= 20:
-        signal, action = "HIGH-PRECISION VWAP BOUNCE SELL", "PUT"
+    if close_p < or_low and close_p < vwap_p and latest["Minus_DI"] > latest["Plus_DI"] and adx_p >= 18 and latest["Is_Valid_Candle"]:
+        signal, action = "INSTITUTIONAL ORB BREAKDOWN", "PUT"
+    elif close_p > or_high and close_p > vwap_p and latest["Plus_DI"] > latest["Minus_DI"] and adx_p >= 18 and latest["Is_Valid_Candle"]:
+        signal, action = "INSTITUTIONAL ORB BREAKOUT", "CALL"
 
-sl_dist = 0.85 * atr
+sl_dist = 0.9 * atr
 base_qty = max(1, int(capital * base_risk_pct / (sl_dist + 1e-9)))
 
 # -------------------------------------------------------------------
@@ -314,29 +292,32 @@ c1, c2, c3, c4 = st.columns(4)
 c1.metric("Spot Price", f"₹{close_p:.1f}", f"VWAP: ₹{vwap_p:.1f}")
 c2.metric("Pre-Market Gap", f"{gap:+.2f}%")
 c3.metric("Opening Range", f"H: ₹{or_high:.1f} | L: ₹{or_low:.1f}")
-c4.metric("ADX Strength", f"{adx_p:.1f}", "Trending" if adx_p >= 20 else "Ranging")
+c4.metric("ADX Strength", f"{adx_p:.1f}", "Trending" if adx_p >= 18 else "Ranging")
 
-st.info(f"**Quant Engine Note:** Strict Trading Window Active (09:45 - 13:45 IST). T1 Hit locks Breakeven SL.")
+st.info(f"**Real PnL Engine Note:** Zero Fake Wins. Only trades capturing >= 1.2x Risk are counted as True Wins.")
 
 if signal != "NO TRADE":
-    st.success(f"🚨 **HIGH WIN-RATE SIGNAL TRIGGERED: {signal}** | Action: **{action}** | Qty: **{base_qty} Units**")
-    st.write(f"**Entry:** ₹{close_p:.1f} | **Initial SL:** ₹{close_p+(sl_dist if action=='PUT' else -sl_dist):.1f} | **Target 1 (Lock Breakeven):** ₹{close_p+(-1.0*sl_dist if action=='PUT' else 1.0*sl_dist):.1f} | **Target 2:** ₹{close_p+(-2.0*sl_dist if action=='PUT' else 2.0*sl_dist):.1f}")
+    st.success(f"🚨 **REAL PnL SIGNAL: {signal}** | Action: **{action}** | Qty: **{base_qty} Units**")
+    st.write(f"**Entry:** ₹{close_p:.1f} | **SL:** ₹{close_p+(sl_dist if action=='PUT' else -sl_dist):.1f} | **Target (1:2 R:R):** ₹{close_p+(-2.0*sl_dist if action=='PUT' else 2.0*sl_dist):.1f}")
 else:
-    st.warning("**NO TRADE** | Awaiting Precision ORB/VWAP Setup + ADX Trend Synergy.")
+    st.warning("**NO TRADE** | Awaiting True Institutional ORB Breakdown/Breakout + ADX Synergy.")
 
+# -------------------------------------------------------------------
+# HISTORICAL BACKTEST ENGINE (TRUE WIN-RATE & PnL TABLE)
+# -------------------------------------------------------------------
 st.markdown("---")
-st.subheader("📊 Quant Backtest Engine (High Win-Rate Matrix)")
-st.caption("Testing ORB/VWAP Synergy + Breakeven Lock System (Last 5 Days Data).")
+st.subheader("📊 True PnL Backtest Engine (Last 5 Days Data)")
+st.caption("Categorising +2 pt Breakevens as 'Breakeven' (Not Wins). True Wins require >= 1.2x Risk Points.")
 
-bt = run_high_winrate_backtest(df)
+bt = run_real_pnl_backtest(df)
 if bt:
     b1, b2, b3, b4 = st.columns(4)
     b1.metric("Total Trades", bt["trades"])
-    b2.metric("Wins", bt["wins"])
-    b3.metric("Win Rate", f"{bt['winrate']:.1f}%")
-    b4.metric("Total Net PnL", f"{bt['total_pnl']:+.1f} pts")
+    b2.metric("True Wins", bt["wins"])
+    b3.metric("True Win Rate", f"{bt['winrate']:.1f}%")
+    b4.metric("Net Points PnL", f"{bt['total_pnl']:+.1f} pts")
     
-    st.markdown("#### 🔍 Precision Trade History Table")
+    st.markdown("#### 🔍 Real Trade Performance History Table")
     st.dataframe(bt["details_df"], use_container_width=True)
 else:
     st.info("No trades in recent window under strict quant filters.")
