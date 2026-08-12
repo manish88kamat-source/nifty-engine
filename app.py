@@ -10,9 +10,9 @@ import matplotlib.pyplot as plt
 # -------------------------------------------------------------------
 # PAGE CONFIG
 # -------------------------------------------------------------------
-st.set_page_config(page_title="Adaptive Engine v5.3 (Auto-Logger)", layout="wide", initial_sidebar_state="expanded")
-st.title("🛡️ Adaptive Engine v5.3 (Automatic Live Paper Logger)")
-st.caption("E6 Gate | Regime VWAP | Volume Traps | Auto Signal Logging | Auto SL/TP Tracking")
+st.set_page_config(page_title="Adaptive Engine v5.4", layout="wide", initial_sidebar_state="expanded")
+st.title("🛡️ Adaptive Engine v5.4 (Bi-Directional CALL & PUT Fixed)")
+st.caption("E6 Gate | Both Long & Short Signals | Volume Traps | Auto Signal Logging | Auto SL/TP Tracking")
 
 # -------------------------------------------------------------------
 # CONSTANTS & WEIGHTS
@@ -430,7 +430,6 @@ def process_auto_logger(signal, action, latest_row, mode, index_choice, regime, 
 
     # 2. Auto-Log New Signal
     if signal != "NO TRADE":
-        # Check if already logged for this timestamp to avoid duplicates
         already_logged = False
         if not journal.empty:
             already_logged = ((journal["Date"] == latest_date_str) & (journal["Mode"] == mode) & (journal["Index"] == index_choice)).any()
@@ -537,14 +536,35 @@ if vix_chg > vix_spike_limit:
 if vix_regime == "Fear":
     msgs.append("VIX Fear")
 
+# -------------------------------------------------------------------
+# BI-DIRECTIONAL SIGNAL LOGIC (CALL & PUT FIXED)
+# -------------------------------------------------------------------
 signal, action = "NO TRADE", "WAIT"
-if filter_pass and final_score >= threshold:
-    if e4_action in ["CALL","PUT"] and e4 >= 70:
-        signal = f"TRAP → {e4_action}"; action = e4_action
-    elif final_score >= threshold + 6 and e6 >= 60:
-        signal = "HIGH CONVICTION LONG"; action = "CALL"
+
+is_bearish_structure = (latest["Close"] < latest["EMA_fast"]) and (latest["Close"] <= latest["VWAP"])
+bearish_threshold = 100 - threshold
+
+if filter_pass:
+    # 1. TRAP SIGNALS (Call or Put)
+    if e4_action in ["CALL", "PUT"] and e4 >= 70:
+        signal = f"TRAP → {e4_action}"
+        action = e4_action
+    # 2. BULLISH SIGNALS (CALL)
     elif final_score >= threshold:
-        signal = "MODERATE LONG"; action = "CALL"
+        if final_score >= threshold + 6 and e6 >= 60:
+            signal = "HIGH CONVICTION LONG"
+            action = "CALL"
+        else:
+            signal = "MODERATE LONG"
+            action = "CALL"
+    # 3. BEARISH SIGNALS (PUT) - FIXED
+    elif final_score <= bearish_threshold and is_bearish_structure:
+        if final_score <= bearish_threshold - 6 and e6 <= 40:
+            signal = "HIGH CONVICTION SHORT"
+            action = "PUT"
+        else:
+            signal = "MODERATE SHORT"
+            action = "PUT"
 
 atr = float(latest["ATR"])
 sl_dist = (1.25 if mode == "Swing (Daily)" else 0.9) * atr
@@ -586,7 +606,6 @@ st.caption("System live market signals ko automatic log karta hai aur unke SL/Ta
 if not journal.empty:
     st.dataframe(journal.tail(15), use_container_width=True)
     
-    # Live Journal Performance
     closed_trades = journal[journal["Result"].isin(["Win", "Loss"])]
     if not closed_trades.empty:
         total_t = len(closed_trades)
