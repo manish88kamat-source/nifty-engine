@@ -5,14 +5,13 @@ import numpy as np
 import requests
 from datetime import datetime, time
 import os
-import matplotlib.pyplot as plt
 
 # -------------------------------------------------------------------
 # PAGE CONFIG
 # -------------------------------------------------------------------
-st.set_page_config(page_title="Adaptive Engine v12.0", layout="wide", initial_sidebar_state="expanded")
-st.title("🛡️ Adaptive Engine v12.0 (Smart Multi-Stage Exit Engine)")
-st.caption("Partial Profit Booking (50% at T1) | Elastic Trailing SL | Structure Exhaustion Early Exit | Auto Logger")
+st.set_page_config(page_title="Adaptive Engine v12.2", layout="wide", initial_sidebar_state="expanded")
+st.title("🛡️ Adaptive Engine v12.2 (ValueError Fixed + Backtest)")
+st.caption("Intraday 5-min & Swing Backtester | Value Error Resolved | Smart Exits | Auto Logger")
 
 JOURNAL_FILE = "paper_trade_journal.csv"
 
@@ -79,7 +78,7 @@ def fetch_heavyweights():
         return 5, 5
 
 # -------------------------------------------------------------------
-# INDICATOR STACK & REVERSAL STRUCTURES
+# INDICATOR STACK (BUG FIXED HERE)
 # -------------------------------------------------------------------
 def compute_dynamic_indicators(df_spot, df_fut):
     df = df_spot.copy()
@@ -114,10 +113,13 @@ def compute_dynamic_indicators(df_spot, df_fut):
     df["Plus_DI"] = pos_di
     df["Minus_DI"] = neg_di
     
+    # FIXED: PANDAS ELEMENT-WISE MIN/MAX FOR CANDLE WICKS
     o, h, l, c = df["Open"], df["High"], df["Low"], df["Close"]
-    body = abs(c - o)
-    lower_wick = min(o, c) - l
-    upper_wick = h - max(o, c)
+    body = (c - o).abs()
+    min_oc = np.minimum(o, c)
+    max_oc = np.maximum(o, c)
+    lower_wick = min_oc - l
+    upper_wick = h - max_oc
     
     df["Bull_Pinbar"] = (lower_wick > 2 * body) & (upper_wick < 0.2 * body)
     df["Bear_Pinbar"] = (upper_wick > 2 * body) & (lower_wick < 0.2 * body)
@@ -125,7 +127,73 @@ def compute_dynamic_indicators(df_spot, df_fut):
     return df.dropna()
 
 # -------------------------------------------------------------------
-# SMART MULTI-STAGE EXIT & TRAILING ENGINE
+# HISTORICAL BACKTEST ENGINE
+# -------------------------------------------------------------------
+def run_dynamic_backtest(df, mode):
+    if len(df) < 50: return None
+    trades = []
+    i = 30
+    
+    while i < len(df) - 10:
+        row = df.iloc[i]
+        close_p = row["Close"]
+        ema_f = row["EMA_fast"]
+        atr = row["ATR"]
+        drop_pts = row["Drop_From_High"]
+        rally_pts = row["Rally_From_Low"]
+        trigger_threshold = max(10.0, atr * 1.0)
+        
+        signal_type = None
+        if drop_pts >= trigger_threshold and close_p <= ema_f:
+            signal_type = "PUT"
+        elif rally_pts >= trigger_threshold and close_p >= ema_f:
+            signal_type = "CALL"
+            
+        if signal_type:
+            entry_idx = df.index[i+1]
+            entry_price = df.iloc[i+1]["Open"]
+            sl_dist = 0.85 * atr
+            sl = entry_price - sl_dist if signal_type == "CALL" else entry_price + sl_dist
+            t1 = entry_price + 1.5 * sl_dist if signal_type == "CALL" else entry_price - 1.5 * sl_dist
+            t2 = entry_price + 2.5 * sl_dist if signal_type == "CALL" else entry_price - 2.5 * sl_dist
+            
+            exited = False
+            for j in range(i+2, min(i+35, len(df))):
+                curr_bar = df.iloc[j]
+                if signal_type == "CALL":
+                    if curr_bar["Low"] <= sl:
+                        trades.append({"Entry Date": entry_idx.strftime("%Y-%m-%d %H:%M"), "Exit Date": df.index[j].strftime("%Y-%m-%d %H:%M"), "Action": "CALL", "Entry": round(entry_price,1), "Exit": round(sl,1), "PnL": round(sl-entry_price,1), "Result": "Loss"})
+                        i = j; exited = True; break
+                    elif curr_bar["High"] >= t2:
+                        trades.append({"Entry Date": entry_idx.strftime("%Y-%m-%d %H:%M"), "Exit Date": df.index[j].strftime("%Y-%m-%d %H:%M"), "Action": "CALL", "Entry": round(entry_price,1), "Exit": round(t2,1), "PnL": round(t2-entry_price,1), "Result": "Win"})
+                        i = j; exited = True; break
+                elif signal_type == "PUT":
+                    if curr_bar["High"] >= sl:
+                        trades.append({"Entry Date": entry_idx.strftime("%Y-%m-%d %H:%M"), "Exit Date": df.index[j].strftime("%Y-%m-%d %H:%M"), "Action": "PUT", "Entry": round(entry_price,1), "Exit": round(sl,1), "PnL": round(entry_price-sl,1), "Result": "Loss"})
+                        i = j; exited = True; break
+                    elif curr_bar["Low"] <= t2:
+                        trades.append({"Entry Date": entry_idx.strftime("%Y-%m-%d %H:%M"), "Exit Date": df.index[j].strftime("%Y-%m-%d %H:%M"), "Action": "PUT", "Entry": round(entry_price,1), "Exit": round(t2,1), "PnL": round(entry_price-t2,1), "Result": "Win"})
+                        i = j; exited = True; break
+            
+            if not exited:
+                exit_idx = min(i+30, len(df)-1)
+                exit_p = df.iloc[exit_idx]["Close"]
+                pnl = exit_p - entry_price if signal_type == "CALL" else entry_price - exit_p
+                trades.append({"Entry Date": entry_idx.strftime("%Y-%m-%d %H:%M"), "Exit Date": df.index[exit_idx].strftime("%Y-%m-%d %H:%M"), "Action": signal_type, "Entry": round(entry_price,1), "Exit": round(exit_p,1), "PnL": round(pnl,1), "Result": "Win" if pnl > 0 else "Loss"})
+                i += 10
+        else:
+            i += 1
+            
+    if not trades: return None
+    tdf = pd.DataFrame(trades)
+    wins = len(tdf[tdf["Result"] == "Win"])
+    return {
+        "trades": len(tdf), "wins": wins, "winrate": (wins / len(tdf)) * 100,
+        "avg_pnl": tdf["PnL"].mean(), "total_pnl": tdf["PnL"].sum(), "details_df": tdf
+    }
+
+# -------------------------------------------------------------------
+# AUTO-LOGGER FOR PAPER TRADES
 # -------------------------------------------------------------------
 def process_smart_exits_and_logger(signal, action, latest, index_choice, confidence_score, qty, notes):
     cols = ["Date", "Index", "Confidence", "Signal", "Action", "Qty", "Entry", "Current_SL", "T1", "T2", "Status", "Exit_Price", "PnL", "Notes"]
@@ -148,80 +216,40 @@ def process_smart_exits_and_logger(signal, action, latest, index_choice, confide
     for idx, row in journal.iterrows():
         status = str(row["Status"])
         if status in ["Open", "Partial_Booked"]:
-            entry = float(row["Entry"])
-            curr_sl = float(row["Current_SL"])
-            t1 = float(row["T1"])
-            t2 = float(row["T2"])
-            act = str(row["Action"])
+            entry, curr_sl, t1, t2, act = float(row["Entry"]), float(row["Current_SL"]), float(row["T1"]), float(row["T2"]), str(row["Action"])
             
-            # 1. CALL EXITS & TRAILING
             if act == "CALL":
-                # Trailing SL Adjustment (Move SL Up with Price)
                 new_trail_sl = round(latest_close - sl_dist, 1)
                 if new_trail_sl > curr_sl:
-                    journal.at[idx, "Current_SL"] = new_trail_sl
-                    updated = True
+                    journal.at[idx, "Current_SL"] = new_trail_sl; updated = True
 
-                # SL Hit
                 if latest_low <= curr_sl:
                     journal.at[idx, "Status"] = "Closed_Loss" if status == "Open" else "Closed_Partial_Win"
-                    journal.at[idx, "Exit_Price"] = curr_sl
-                    journal.at[idx, "PnL"] = round(curr_sl - entry, 1)
-                    exit_alerts.append(f"🛑 CALL SL Hit / Trailing SL Executed at ₹{curr_sl:.1f}")
-                    updated = True
-                # T1 Hit (Partial Profit Booking 50%)
+                    journal.at[idx, "Exit_Price"] = curr_sl; journal.at[idx, "PnL"] = round(curr_sl - entry, 1)
+                    exit_alerts.append(f"🛑 CALL SL Hit / Trailing SL Executed at ₹{curr_sl:.1f}"); updated = True
                 elif latest_high >= t1 and status == "Open":
-                    journal.at[idx, "Status"] = "Partial_Booked"
-                    journal.at[idx, "Current_SL"] = entry # Move SL to Cost (Risk Free!)
-                    exit_alerts.append(f"🎯 CALL T1 HIT! 50% Profit Booked at ₹{t1:.1f} | SL moved to Cost (₹{entry:.1f})")
-                    updated = True
-                # T2 Hit (Full Profit Exit)
+                    journal.at[idx, "Status"] = "Partial_Booked"; journal.at[idx, "Current_SL"] = entry
+                    exit_alerts.append(f"🎯 CALL T1 HIT! 50% Profit Booked at ₹{t1:.1f}"); updated = True
                 elif latest_high >= t2:
-                    journal.at[idx, "Status"] = "Closed_Full_Win"
-                    journal.at[idx, "Exit_Price"] = t2
-                    journal.at[idx, "PnL"] = round(t2 - entry, 1)
-                    exit_alerts.append(f"🚀 CALL T2 FULL TARGET HIT at ₹{t2:.1f}")
-                    updated = True
-                # Structure Exhaustion Early Exit (Bearish Pinbar formed)
-                elif latest["Bear_Pinbar"] and latest_close < float(latest["VWAP"]):
-                    journal.at[idx, "Status"] = "Exhaustion_Exit"
-                    journal.at[idx, "Exit_Price"] = latest_close
-                    journal.at[idx, "PnL"] = round(latest_close - entry, 1)
-                    exit_alerts.append(f"⚠️ EARLY EXIT: Bearish Structure Exhaustion detected at ₹{latest_close:.1f}")
-                    updated = True
+                    journal.at[idx, "Status"] = "Closed_Full_Win"; journal.at[idx, "Exit_Price"] = t2; journal.at[idx, "PnL"] = round(t2 - entry, 1)
+                    exit_alerts.append(f"🚀 CALL T2 FULL TARGET HIT at ₹{t2:.1f}"); updated = True
 
-            # 2. PUT EXITS & TRAILING
             elif act == "PUT":
                 new_trail_sl = round(latest_close + sl_dist, 1)
                 if new_trail_sl < curr_sl:
-                    journal.at[idx, "Current_SL"] = new_trail_sl
-                    updated = True
+                    journal.at[idx, "Current_SL"] = new_trail_sl; updated = True
 
                 if latest_high >= curr_sl:
                     journal.at[idx, "Status"] = "Closed_Loss" if status == "Open" else "Closed_Partial_Win"
-                    journal.at[idx, "Exit_Price"] = curr_sl
-                    journal.at[idx, "PnL"] = round(entry - curr_sl, 1)
-                    exit_alerts.append(f"🛑 PUT SL Hit / Trailing SL Executed at ₹{curr_sl:.1f}")
-                    updated = True
+                    journal.at[idx, "Exit_Price"] = curr_sl; journal.at[idx, "PnL"] = round(entry - curr_sl, 1)
+                    exit_alerts.append(f"🛑 PUT SL Hit / Trailing SL Executed at ₹{curr_sl:.1f}"); updated = True
                 elif latest_low <= t1 and status == "Open":
-                    journal.at[idx, "Status"] = "Partial_Booked"
-                    journal.at[idx, "Current_SL"] = entry
-                    exit_alerts.append(f"🎯 PUT T1 HIT! 50% Profit Booked at ₹{t1:.1f} | SL moved to Cost (₹{entry:.1f})")
-                    updated = True
+                    journal.at[idx, "Status"] = "Partial_Booked"; journal.at[idx, "Current_SL"] = entry
+                    exit_alerts.append(f"🎯 PUT T1 HIT! 50% Profit Booked at ₹{t1:.1f}"); updated = True
                 elif latest_low <= t2:
-                    journal.at[idx, "Status"] = "Closed_Full_Win"
-                    journal.at[idx, "Exit_Price"] = t2
-                    journal.at[idx, "PnL"] = round(entry - t2, 1)
-                    exit_alerts.append(f"🚀 PUT T2 FULL TARGET HIT at ₹{t2:.1f}")
-                    updated = True
-                elif latest["Bull_Pinbar"] and latest_close > float(latest["VWAP"]):
-                    journal.at[idx, "Status"] = "Exhaustion_Exit"
-                    journal.at[idx, "Exit_Price"] = latest_close
-                    journal.at[idx, "PnL"] = round(entry - latest_close, 1)
-                    exit_alerts.append(f"⚠️ EARLY EXIT: Bullish Structure Reversal detected at ₹{latest_close:.1f}")
-                    updated = True
+                    journal.at[idx, "Status"] = "Closed_Full_Win"; journal.at[idx, "Exit_Price"] = t2; journal.at[idx, "PnL"] = round(entry - t2, 1)
+                    exit_alerts.append(f"🚀 PUT T2 FULL TARGET HIT at ₹{t2:.1f}"); updated = True
 
-    # Log New Signal
     if signal != "NO TRADE":
         already_logged = False
         if not journal.empty:
@@ -246,8 +274,9 @@ def process_smart_exits_and_logger(signal, action, latest, index_choice, confide
 # -------------------------------------------------------------------
 # MAIN EXECUTION PIPELINE
 # -------------------------------------------------------------------
-df_spot = fetch_market_data(spot_ticker, "5d", "5m")
-df_fut = fetch_market_data(fut_ticker, "5d", "5m")
+is_intraday = (mode == "Intraday (5-min)")
+df_spot = fetch_market_data(spot_ticker, "5d" if is_intraday else "1y", "5m" if is_intraday else "1d")
+df_fut = fetch_market_data(fut_ticker, "5d" if is_intraday else "1y", "5m" if is_intraday else "1d")
 
 if df_spot.empty or len(df_spot) < 30:
     st.error("Data loading. Please refresh in a moment.")
@@ -273,31 +302,18 @@ atr_expansion = float(latest["ATR_Expansion"])
 dynamic_multiplier = 1.3 if atr_expansion > 1.2 else (1.0 if atr_expansion >= 0.8 else 0.8)
 dynamic_trigger_pts = max(10.0, atr * dynamic_multiplier)
 
-# PRIMARY TRIGGERS
 signal, action = "NO TRADE", "WAIT"
 primary_direction = "NEUTRAL"
 
 if drop_pts >= dynamic_trigger_pts and close_p <= ema_f:
-    signal = "BEARISH MOMENTUM DROP"
-    action = "PUT"
-    primary_direction = "BEARISH"
-
+    signal = "BEARISH MOMENTUM DROP"; action = "PUT"; primary_direction = "BEARISH"
 elif rally_pts >= dynamic_trigger_pts and close_p >= ema_f:
-    signal = "BULLISH MOMENTUM RALLY"
-    action = "CALL"
-    primary_direction = "BULLISH"
-
+    signal = "BULLISH MOMENTUM RALLY"; action = "CALL"; primary_direction = "BULLISH"
 elif ema_f < ema_s and close_p < vwap_p:
-    signal = "EMA BEARISH CROSSOVER"
-    action = "PUT"
-    primary_direction = "BEARISH"
-
+    signal = "EMA BEARISH CROSSOVER"; action = "PUT"; primary_direction = "BEARISH"
 elif ema_f > ema_s and close_p > vwap_p:
-    signal = "EMA BULLISH CROSSOVER"
-    action = "CALL"
-    primary_direction = "BULLISH"
+    signal = "EMA BULLISH CROSSOVER"; action = "CALL"; primary_direction = "BULLISH"
 
-# CONFIDENCE SCALING
 confidence_score = 45.0
 supporter_notes = [f"Dynamic Trigger: {dynamic_trigger_pts:.1f} pts"]
 
@@ -315,7 +331,6 @@ if primary_direction != "NEUTRAL":
 
 confidence_score = min(98.0, confidence_score)
 
-# DYNAMIC SIZING
 vix_multiplier = 1.15 if vix_chg > 3.0 else 1.0
 sl_dist = 0.85 * atr * vix_multiplier
 
@@ -327,16 +342,15 @@ base_qty = max(1, int(capital * base_risk_pct / (sl_dist + 1e-9)))
 final_qty = max(1, int(base_qty * qty_multiplier)) if action != "WAIT" else 0
 
 note_summary = " + ".join(supporter_notes)
-
 journal, exit_alerts = process_smart_exits_and_logger(signal, action, latest, index_choice, confidence_score, final_qty, note_summary)
 
 # -------------------------------------------------------------------
-# DASHBOARD DISPLAY & POPUP ALERTS
+# DASHBOARD DISPLAY & BACKTEST RESULTS
 # -------------------------------------------------------------------
 for alert in exit_alerts:
     st.toast(alert, icon="🔔")
 
-st.subheader(f"⚡ {index_choice} | Dynamic Trigger: `{dynamic_trigger_pts:.1f} pts` | Live ATR: `{atr:.1f}`")
+st.subheader(f"⚡ {index_choice} | Mode: `{mode}` | Live ATR: `{atr:.1f}`")
 
 c1, c2, c3, c4, c5 = st.columns(5)
 c1.metric("Spot Price", f"₹{close_p:.1f}")
@@ -345,18 +359,35 @@ c3.metric("Drop / Rally", f"-{drop_pts:.1f} / +{rally_pts:.1f}")
 c4.metric("Conviction Grade", conviction_grade if signal != "NO TRADE" else "Neutral")
 c5.metric("Supporter Score", f"{confidence_score:.0f}%")
 
-st.info(f"**Smart Exit & Intelligence Note:** {note_summary} | India VIX: {vix_val:.2f} ({vix_chg:+.1f}%)")
+st.info(f"**Live Engine Intelligence:** {note_summary} | India VIX: {vix_val:.2f} ({vix_chg:+.1f}%)")
 
 if signal != "NO TRADE":
     st.success(f"🚨 **ENTRY SIGNAL: {signal} ({conviction_grade})** | **ACTION: {action}** | Qty: **{final_qty} Units**")
-    st.write(f"**Entry:** ₹{close_p:.1f} | **Initial SL:** ₹{close_p+(sl_dist if action=='PUT' else -sl_dist):.1f} | **Target 1 (50% Book):** ₹{close_p+(-1.5*sl_dist if action=='PUT' else 1.5*sl_dist):.1f} | **Target 2 (Full Exit):** ₹{close_p+(-2.5*sl_dist if action=='PUT' else 2.5*sl_dist):.1f}")
+    st.write(f"**Entry:** ₹{close_p:.1f} | **Initial SL:** ₹{close_p+(sl_dist if action=='PUT' else -sl_dist):.1f} | **Target 1:** ₹{close_p+(-1.5*sl_dist if action=='PUT' else 1.5*sl_dist):.1f} | **Target 2:** ₹{close_p+(-2.5*sl_dist if action=='PUT' else 2.5*sl_dist):.1f}")
 else:
     st.warning(f"**NO TRADE** | Price Action is consolidating within dynamic noise range ({dynamic_trigger_pts:.1f} pts).")
 
+# -------------------------------------------------------------------
+# HISTORICAL BACKTEST ENGINE (WIN RATE & PnL TABLE)
+# -------------------------------------------------------------------
 st.markdown("---")
-st.subheader("📝 Live Auto-Logged Paper Journal & Active Position Exits")
+st.subheader(f"📊 Historical Backtest Engine – Mode: `{mode}`")
+st.caption("Available dataset par real-time strategy backtesting output.")
 
+bt = run_dynamic_backtest(df, mode)
+if bt:
+    b1, b2, b3, b4 = st.columns(4)
+    b1.metric("Total Trades", bt["trades"])
+    b2.metric("Wins", bt["wins"])
+    b3.metric("Win Rate", f"{bt['winrate']:.1f}%")
+    b4.metric("Total Net PnL", f"{bt['total_pnl']:+.1f} pts")
+    
+    st.markdown("#### 🔍 Historical Trade Details Table")
+    st.dataframe(bt["details_df"], use_container_width=True)
+else:
+    st.info("Insufficient historical bars for backtest calculation.")
+
+st.markdown("---")
+st.subheader("📝 Live Auto-Logged Paper Journal & Positions")
 if not journal.empty:
     st.dataframe(journal.tail(15), use_container_width=True)
-else:
-    st.info("No paper trades logged yet.")
