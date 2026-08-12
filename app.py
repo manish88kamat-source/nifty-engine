@@ -8,11 +8,11 @@ import os
 import matplotlib.pyplot as plt
 
 # -------------------------------------------------------------------
-# PAGE CONFIG (MUST BE AT TOP)
+# PAGE CONFIG
 # -------------------------------------------------------------------
-st.set_page_config(page_title="Adaptive Engine v5.2", layout="wide", initial_sidebar_state="expanded")
-st.title("🛡️ Adaptive Engine v5.2 (Detailed Backtest Added)")
-st.caption("E6 Gate | Regime VWAP | Volume Confirmed Traps | RSI Regime | Safe Weekly Fetch | Trade Details")
+st.set_page_config(page_title="Adaptive Engine v5.3 (Auto-Logger)", layout="wide", initial_sidebar_state="expanded")
+st.title("🛡️ Adaptive Engine v5.3 (Automatic Live Paper Logger)")
+st.caption("E6 Gate | Regime VWAP | Volume Traps | Auto Signal Logging | Auto SL/TP Tracking")
 
 # -------------------------------------------------------------------
 # CONSTANTS & WEIGHTS
@@ -143,7 +143,6 @@ def add_indicators(df, mode):
     df["Vol_Delta"] = np.where(df["Close"] >= df["Open"], df["Volume"], -df["Volume"])
     df["CVD_Proxy"] = df["Vol_Delta"].rolling(5 if mode == "Swing (Daily)" else 8).sum()
 
-    # Safe VWAP
     if df["Volume"].iloc[-5:].mean() < 10 or df["Volume"].sum() < 1:
         tp = (df["High"] + df["Low"] + df["Close"]) / 3
         df["VWAP"] = tp.cumsum() / np.arange(1, len(df)+1)
@@ -379,81 +378,92 @@ def engine5(row, regime, mode):
     return min(100, score)
 
 # -------------------------------------------------------------------
-# DETAILED BACKTEST (Added Table Output)
+# AUTOMATIC PAPER TRADE LOGGER & SL/TARGET TRACKER
 # -------------------------------------------------------------------
-def run_backtest_detailed(df, mode):
-    if len(df) < 80: return None
-    trades = []
-    i = 40
-    while i < len(df)-8:
-        row = df.iloc[i]
-        score = 0
-        if row["Close"] > row["EMA_fast"] > row["EMA_mid"]: score += 40
-        if 50 <= row["RSI"] <= 70: score += 30
-        if row["Volume"] > 1.2 * row["Vol_Avg"]: score += 30
+def process_auto_logger(signal, action, latest_row, mode, index_choice, regime, final_score, e6_detail):
+    cols = ["Date", "Mode", "Index", "Regime", "Score", "Signal", "Action", "Entry", "SL", "T1", "T2", "Exit", "PnL", "Result", "Notes"]
+    if not os.path.exists(JOURNAL_FILE):
+        pd.DataFrame(columns=cols).to_csv(JOURNAL_FILE, index=False)
+    
+    journal = pd.read_csv(JOURNAL_FILE)
+    if "Result" not in journal.columns:
+        return journal
+
+    latest_date_str = latest_row.name.strftime("%Y-%m-%d %H:%M")
+    latest_close = round(float(latest_row["Close"]), 1)
+    latest_high = float(latest_row["High"])
+    latest_low = float(latest_row["Low"])
+    atr = float(latest_row["ATR"])
+    sl_dist = (1.25 if mode == "Swing (Daily)" else 0.9) * atr
+
+    # 1. Update Open Trades for SL / Target Hits
+    updated = False
+    for idx, row in journal.iterrows():
+        if row["Result"] == "Open":
+            entry = float(row["Entry"])
+            sl = float(row["SL"])
+            t1 = float(row["T1"])
+            act = str(row["Action"])
+            
+            if act == "CALL":
+                if latest_low <= sl:
+                    journal.at[idx, "Exit"] = sl
+                    journal.at[idx, "PnL"] = round(sl - entry, 1)
+                    journal.at[idx, "Result"] = "Loss"
+                    updated = True
+                elif latest_high >= t1:
+                    journal.at[idx, "Exit"] = t1
+                    journal.at[idx, "PnL"] = round(t1 - entry, 1)
+                    journal.at[idx, "Result"] = "Win"
+                    updated = True
+            elif act == "PUT":
+                if latest_high >= sl:
+                    journal.at[idx, "Exit"] = sl
+                    journal.at[idx, "PnL"] = round(entry - sl, 1)
+                    journal.at[idx, "Result"] = "Loss"
+                    updated = True
+                elif latest_low <= t1:
+                    journal.at[idx, "Exit"] = t1
+                    journal.at[idx, "PnL"] = round(entry - t1, 1)
+                    journal.at[idx, "Result"] = "Win"
+                    updated = True
+
+    # 2. Auto-Log New Signal
+    if signal != "NO TRADE":
+        # Check if already logged for this timestamp to avoid duplicates
+        already_logged = False
+        if not journal.empty:
+            already_logged = ((journal["Date"] == latest_date_str) & (journal["Mode"] == mode) & (journal["Index"] == index_choice)).any()
         
-        if score >= 70:
-            entry_idx = df.index[i+1]
-            entry_price = df.iloc[i+1]["Open"]
-            atr = row["ATR"]
-            sl_dist = (1.25 if mode=="Swing (Daily)" else 0.9) * atr
-            sl = entry_price - sl_dist
-            t1 = entry_price + 1.6 * sl_dist
+        if not already_logged:
+            sl_val = round(latest_close - sl_dist, 1) if action == "CALL" else round(latest_close + sl_dist, 1)
+            t1_val = round(latest_close + 1.6 * sl_dist, 1) if action == "CALL" else round(latest_close - 1.6 * sl_dist, 1)
+            t2_val = round(latest_close + 2.3 * sl_dist, 1) if action == "CALL" else round(latest_close - 2.3 * sl_dist, 1)
             
-            exited = False
-            for j in range(i+2, min(i+18, len(df))):
-                if df.iloc[j]["Low"] <= sl:
-                    trades.append({
-                        "Entry Date": entry_idx.strftime("%Y-%m-%d %H:%M"),
-                        "Exit Date": df.index[j].strftime("%Y-%m-%d %H:%M"),
-                        "Entry Price": round(entry_price, 1),
-                        "Exit Price": round(sl, 1),
-                        "PnL": round(sl - entry_price, 1),
-                        "Result": "Loss"
-                    })
-                    i = j
-                    exited = True
-                    break
-                if df.iloc[j]["High"] >= t1:
-                    trades.append({
-                        "Entry Date": entry_idx.strftime("%Y-%m-%d %H:%M"),
-                        "Exit Date": df.index[j].strftime("%Y-%m-%d %H:%M"),
-                        "Entry Price": round(entry_price, 1),
-                        "Exit Price": round(t1, 1),
-                        "PnL": round(t1 - entry_price, 1),
-                        "Result": "Win"
-                    })
-                    i = j
-                    exited = True
-                    break
-            
-            if not exited:
-                exit_idx = min(i+15, len(df)-1)
-                exit_price = df.iloc[exit_idx]["Close"]
-                pnl = exit_price - entry_price
-                trades.append({
-                    "Entry Date": entry_idx.strftime("%Y-%m-%d %H:%M"),
-                    "Exit Date": df.index[exit_idx].strftime("%Y-%m-%d %H:%M"),
-                    "Entry Price": round(entry_price, 1),
-                    "Exit Price": round(exit_price, 1),
-                    "PnL": round(pnl, 1),
-                    "Result": "Win" if pnl > 0 else "Loss"
-                })
-                i += 4
-        else:
-            i += 1
-            
-    if not trades: return None
-    tdf = pd.DataFrame(trades)
-    wins = len(tdf[tdf["Result"] == "Win"])
-    return {
-        "trades": len(tdf),
-        "wins": wins,
-        "winrate": (wins / len(tdf)) * 100,
-        "avg_pnl": tdf["PnL"].mean(),
-        "equity": np.cumsum(tdf["PnL"]),
-        "details_df": tdf
-    }
+            new_entry = {
+                "Date": latest_date_str,
+                "Mode": mode,
+                "Index": index_choice,
+                "Regime": regime,
+                "Score": round(final_score, 1),
+                "Signal": signal,
+                "Action": action,
+                "Entry": latest_close,
+                "SL": sl_val,
+                "T1": t1_val,
+                "T2": t2_val,
+                "Exit": "",
+                "PnL": "",
+                "Result": "Open",
+                "Notes": e6_detail
+            }
+            journal = pd.concat([journal, pd.DataFrame([new_entry])], ignore_index=True)
+            updated = True
+
+    if updated:
+        journal.to_csv(JOURNAL_FILE, index=False)
+        
+    return journal
 
 # -------------------------------------------------------------------
 # MAIN EXECUTION
@@ -540,6 +550,9 @@ atr = float(latest["ATR"])
 sl_dist = (1.25 if mode == "Swing (Daily)" else 0.9) * atr
 qty = max(1, int(capital * risk_pct / sl_dist)) if sl_dist > 0 else 0
 
+# PROCESS AUTOMATIC LIVE LOGGER
+journal = process_auto_logger(signal, action, latest, mode, index_choice, regime, final_score, e6_detail)
+
 # -------------------------------------------------------------------
 # UI DASHBOARD
 # -------------------------------------------------------------------
@@ -558,63 +571,28 @@ st.info(f"E6: **{e6_detail}** | Dem:{dem_str:.0f} Sup:{sup_str:.0f} | {vix_msg} 
 st.write(f"E1:{e1:.0f} | E2:{e2:.0f} | E3:{e3:.0f} | E4:{e4:.0f} ({e4_status}) | E5:{e5:.0f} | **E6:{e6:.0f}**")
 
 if signal != "NO TRADE":
-    st.success(f"**{signal}** | **{action}** | Qty: **{qty}**")
+    st.success(f"**SIGNAL DETECTED: {signal}** | **{action}** | Qty: **{qty}** (Auto-Logged below)")
     st.write(f"SL: ₹{latest['Close']-sl_dist:.1f} | T1: ₹{latest['Close']+1.5*sl_dist:.1f} | T2: ₹{latest['Close']+2.3*sl_dist:.1f}")
 else:
     st.warning(f"**NO TRADE** | {', '.join(msgs) if msgs else 'Below threshold / E6 gate'}")
 
 # -------------------------------------------------------------------
-# BACKTEST SNAPSHOT & DETAILED TABLE
+# AUTOMATIC JOURNAL LOG TABLE
 # -------------------------------------------------------------------
 st.markdown("---")
-st.subheader("📊 Backtest Snapshot (Baseline Setup)")
-st.caption("Simplified Engine Setup testing. Neeche table me saari entries/exits dekhiye.")
+st.subheader("📝 Live Auto-Logged Paper Journal")
+st.caption("System live market signals ko automatic log karta hai aur unke SL/Targets monitor karke Result bharta hai.")
 
-bt = run_backtest_detailed(df, mode)
-if bt:
-    b1,b2,b3,b4 = st.columns(4)
-    b1.metric("Trades", bt["trades"])
-    b2.metric("Wins", bt["wins"])
-    b3.metric("Win Rate", f"{bt['winrate']:.1f}%")
-    b4.metric("Avg PnL", f"{bt['avg_pnl']:.1f}")
+if not journal.empty:
+    st.dataframe(journal.tail(15), use_container_width=True)
     
-    fig, ax = plt.subplots(figsize=(10,3))
-    ax.plot(bt["equity"], color="#00aa55", linewidth=1.5)
-    ax.set_title(f"Equity Curve – {mode}")
-    ax.grid(True, alpha=0.3)
-    st.pyplot(fig)
-    plt.close()
-    
-    # Detailed Table View Added Here
-    st.markdown("#### 🔍 Trade History Details")
-    st.dataframe(bt["details_df"], use_container_width=True)
+    # Live Journal Performance
+    closed_trades = journal[journal["Result"].isin(["Win", "Loss"])]
+    if not closed_trades.empty:
+        total_t = len(closed_trades)
+        win_t = len(closed_trades[closed_trades["Result"] == "Win"])
+        wr = (win_t / total_t) * 100
+        net_pnl = closed_trades["PnL"].sum()
+        st.markdown(f"**Live Paper Performance:** Total Trades: `{total_t}` | Win Rate: `{wr:.1f}%` | Net Points PnL: `{net_pnl:+.1f}`")
 else:
-    st.info("Backtest ke liye sufficient data nahi")
-
-# -------------------------------------------------------------------
-# JOURNAL LOGGING
-# -------------------------------------------------------------------
-st.markdown("---")
-st.subheader("📝 Paper Journal")
-if not os.path.exists(JOURNAL_FILE):
-    pd.DataFrame(columns=["Date","Mode","Index","Regime","Score","Signal","Action","Entry","SL","T1","T2","Exit","PnL","Result","E6","Notes"]).to_csv(JOURNAL_FILE, index=False)
-journal = pd.read_csv(JOURNAL_FILE)
-
-if st.button("📥 Log Paper Entry", use_container_width=True):
-    new = {
-        "Date": datetime.now().strftime("%Y-%m-%d %H:%M"),
-        "Mode": mode, "Index": index_choice, "Regime": regime,
-        "Score": round(final_score,1), "Signal": signal, "Action": action,
-        "Entry": round(float(latest["Close"]),1),
-        "SL": round(float(latest["Close"]-sl_dist),1),
-        "T1": round(float(latest["Close"]+1.5*sl_dist),1),
-        "T2": round(float(latest["Close"]+2.3*sl_dist),1),
-        "Exit": "", "PnL": "", "Result": "Open",
-        "E6": e6, "Notes": e6_detail
-    }
-    journal = pd.concat([journal, pd.DataFrame([new])], ignore_index=True)
-    journal.to_csv(JOURNAL_FILE, index=False)
-    st.success("Logged!")
-    st.rerun()
-
-st.dataframe(journal.tail(10), use_container_width=True)
+    st.info("Abhi tak koi live signal trigger nahi hua hai.")
