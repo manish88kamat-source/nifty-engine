@@ -10,616 +10,353 @@ import matplotlib.pyplot as plt
 # -------------------------------------------------------------------
 # PAGE CONFIG
 # -------------------------------------------------------------------
-st.set_page_config(page_title="Adaptive Engine v5.5", layout="wide", initial_sidebar_state="expanded")
-st.title("🛡️ Adaptive Engine v5.5 (Market-Adaptive Intraday Logic)")
-st.caption("E6 Gate | Dynamic Fall Detection | Intraday PUT Override | Auto Signal Logging")
+st.set_page_config(page_title="Adaptive Engine v12.0", layout="wide", initial_sidebar_state="expanded")
+st.title("🛡️ Adaptive Engine v12.0 (Smart Multi-Stage Exit Engine)")
+st.caption("Partial Profit Booking (50% at T1) | Elastic Trailing SL | Structure Exhaustion Early Exit | Auto Logger")
 
-# -------------------------------------------------------------------
-# CONSTANTS & WEIGHTS
-# -------------------------------------------------------------------
 JOURNAL_FILE = "paper_trade_journal.csv"
-TOP_10 = {
-    "HDFCBANK.NS": 11.2, "RELIANCE.NS": 9.8, "ICICIBANK.NS": 7.8, "INFY.NS": 5.8,
-    "ITC.NS": 4.2, "TCS.NS": 4.0, "LT.NS": 3.8, "AXISBANK.NS": 3.3,
-    "BHARTIARTL.NS": 3.2, "KOTAKBANK.NS": 2.9
-}
 
-SWING_WEIGHTS = {
-    "Strong Trend": {"E1":0.13,"E2":0.13,"E3":0.15,"E4":0.10,"E5":0.29,"E6":0.20,"threshold":71},
-    "Mild Trend":   {"E1":0.13,"E2":0.15,"E3":0.15,"E4":0.13,"E5":0.24,"E6":0.20,"threshold":74},
-    "Range":        {"E1":0.10,"E2":0.18,"E3":0.12,"E4":0.22,"E5":0.18,"E6":0.20,"threshold":78},
-    "High Volatility":{"E1":0.15,"E2":0.18,"E3":0.12,"E4":0.18,"E5":0.17,"E6":0.20,"threshold":80},
-    "Transition":   {"E1":0.15,"E2":0.15,"E3":0.15,"E4":0.15,"E5":0.20,"E6":0.20,"threshold":82},
-}
-INTRADAY_WEIGHTS = {
-    "Strong Trend": {"E1":0.15,"E2":0.08,"E3":0.18,"E4":0.15,"E5":0.24,"E6":0.20,"threshold":65},
-    "Mild Trend":   {"E1":0.13,"E2":0.10,"E3":0.20,"E4":0.18,"E5":0.19,"E6":0.20,"threshold":68},
-    "Range":        {"E1":0.10,"E2":0.10,"E3":0.20,"E4":0.25,"E5":0.15,"E6":0.20,"threshold":70},
-    "High Volatility":{"E1":0.18,"E2":0.10,"E3":0.17,"E4":0.20,"E5":0.15,"E6":0.20,"threshold":72},
-    "Transition":   {"E1":0.15,"E2":0.10,"E3":0.18,"E4":0.17,"E5":0.20,"E6":0.20,"threshold":72},
-}
+TOP_10_TICKERS = [
+    "RELIANCE.NS", "HDFCBANK.NS", "ICICIBANK.NS", "INFY.NS", 
+    "TCS.NS", "ITC.NS", "LT.NS", "AXISBANK.NS", "BHARTIARTL.NS", "KOTAKBANK.NS"
+]
 
 # -------------------------------------------------------------------
-# SIDEBAR
+# SIDEBAR CONTROL PANEL
 # -------------------------------------------------------------------
-st.sidebar.header("🕹️ Control Panel")
-mode = st.sidebar.radio("Mode", ["Swing (Daily)", "Intraday (5-min)"], index=1)
-index_choice = st.sidebar.radio("Index", ["Nifty 50", "Bank Nifty"], index=0)
-ticker = "^NSEI" if index_choice == "Nifty 50" else "^NSEBANK"
+st.sidebar.header("🕹️ Institutional Control Panel")
+mode = st.sidebar.radio("Mode", ["Intraday (5-min)", "Swing (Daily)"], index=0)
+index_choice = st.sidebar.radio("Index Selection", ["Nifty 50", "Bank Nifty"], index=0)
 
-capital = st.sidebar.number_input("Paper Capital (₹)", value=1_000_000, step=100_000)
-risk_pct = st.sidebar.slider("Risk per Trade %", 0.5, 2.0, 1.0) / 100
+spot_ticker = "^NSEI" if index_choice == "Nifty 50" else "^NSEBANK"
+fut_ticker = "NIFTY=F" if index_choice == "Nifty 50" else "BANKNIFTY=F"
 
-st.sidebar.markdown("---")
-max_call_oi = st.sidebar.number_input("Max Call OI", value=24500 if index_choice=="Nifty 50" else 52000)
-max_put_oi  = st.sidebar.number_input("Max Put OI", value=24000 if index_choice=="Nifty 50" else 51000)
-use_oi_filter = st.sidebar.checkbox("Use OI Wall Filter", value=True)
-
-st.sidebar.markdown("---")
-manual_fii = st.sidebar.number_input("FII Net (₹ Cr)", value=0.0)
-manual_dii = st.sidebar.number_input("DII Net (₹ Cr)", value=0.0)
-use_manual_flow = st.sidebar.checkbox("Use Manual FII/DII", value=False)
-
-st.sidebar.markdown("---")
-avoid_mon_fri = st.sidebar.checkbox("Avoid Mon/Fri (Swing)", value=False)
-vix_spike_limit = st.sidebar.slider("VIX Change Limit %", 2.0, 8.0, 5.0)
+capital = st.sidebar.number_input("Capital (₹)", value=1_000_000, step=100_000)
+base_risk_pct = st.sidebar.slider("Base Risk per Trade %", 0.5, 2.0, 1.0) / 100
 
 # -------------------------------------------------------------------
-# DATA FUNCTIONS
+# REAL-TIME DATA FETCHING
 # -------------------------------------------------------------------
-@st.cache_data(ttl=120)
-def get_data(ticker, interval="1d", period="1y"):
-    df = yf.download(ticker, period=period, interval=interval, progress=False, auto_adjust=True)
-    if isinstance(df.columns, pd.MultiIndex):
-        df.columns = df.columns.get_level_values(0)
-    return df.dropna()
-
-@st.cache_data(ttl=120)
-def get_vix():
-    v = yf.download("^INDIAVIX", period="3mo", interval="1d", progress=False, auto_adjust=True)
-    if isinstance(v.columns, pd.MultiIndex):
-        v.columns = v.columns.get_level_values(0)
-    return v
-
-@st.cache_data(ttl=300)
-def get_heavyweight_data():
+@st.cache_data(ttl=60)
+def fetch_market_data(ticker, period="5d", interval="5m"):
     try:
-        return yf.download(list(TOP_10.keys()), period="20d", interval="1d", progress=False, auto_adjust=True, threads=True)
-    except:
-        return None
+        df = yf.download(ticker, period=period, interval=interval, progress=False, auto_adjust=True)
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(0)
+        return df.dropna()
+    except Exception as e:
+        return pd.DataFrame()
 
-@st.cache_data(ttl=600)
-def get_fii_dii():
+@st.cache_data(ttl=60)
+def fetch_realtime_vix():
     try:
-        r = requests.get("https://fii-diidata.mrchartist.com/api/data", timeout=8)
-        if r.status_code == 200:
-            d = r.json()
-            return {
-                "fii_net": float(d.get("fn") or d.get("fii_net") or 0),
-                "dii_net": float(d.get("dn") or d.get("dii_net") or 0),
-                "pcr": float(d.get("pcr") or 1.0),
-                "sentiment": float(d.get("sentiment_score") or 50)
-            }
+        v = yf.download("^INDIAVIX", period="5d", interval="5m", progress=False, auto_adjust=True)
+        if isinstance(v.columns, pd.MultiIndex):
+            v.columns = v.columns.get_level_values(0)
+        v = v.dropna()
+        if not v.empty:
+            current_vix = float(v["Close"].iloc[-1])
+            prev_vix = float(v["Close"].iloc[-2]) if len(v) > 1 else current_vix
+            vix_change_pct = ((current_vix - prev_vix) / (prev_vix + 1e-9)) * 100
+            return current_vix, vix_change_pct
     except:
         pass
-    return {"fii_net": 0.0, "dii_net": 0.0, "pcr": 1.0, "sentiment": 50.0}
+    return 13.5, 0.0
 
-def add_indicators(df, mode):
-    df = df.copy()
-    if mode == "Swing (Daily)":
-        df["EMA_fast"] = df["Close"].ewm(span=20, adjust=False).mean()
-        df["EMA_mid"]  = df["Close"].ewm(span=50, adjust=False).mean()
-        df["EMA_slow"] = df["Close"].ewm(span=200, adjust=False).mean()
-        rlen, alen = 14, 14
-    else:
-        df["EMA_fast"] = df["Close"].ewm(span=9, adjust=False).mean()
-        df["EMA_mid"]  = df["Close"].ewm(span=21, adjust=False).mean()
-        df["EMA_slow"] = df["Close"].ewm(span=50, adjust=False).mean()
-        rlen, alen = 9, 10
+@st.cache_data(ttl=120)
+def fetch_heavyweights():
+    try:
+        df = yf.download(TOP_10_TICKERS, period="2d", interval="5m", progress=False, auto_adjust=True)
+        if isinstance(df.columns, pd.MultiIndex):
+            closes = df["Close"]
+        else:
+            closes = df
+        changes = (closes.iloc[-1] - closes.iloc[0]) / closes.iloc[0] * 100
+        bullish_count = (changes > 0).sum()
+        bearish_count = (changes < 0).sum()
+        return bullish_count, bearish_count
+    except:
+        return 5, 5
 
-    delta = df["Close"].diff()
-    gain = delta.clip(lower=0).rolling(rlen).mean()
-    loss = (-delta.clip(upper=0)).rolling(rlen).mean()
-    df["RSI"] = 100 - (100 / (1 + gain / loss))
-
-    tr = pd.concat([
-        df["High"] - df["Low"],
-        (df["High"] - df["Close"].shift()).abs(),
-        (df["Low"] - df["Close"].shift()).abs()
-    ], axis=1).max(axis=1)
-    df["ATR"] = tr.rolling(alen).mean()
-    df["ATR_Pct"] = df["ATR"].rank(pct=True) * 100
-    df["Vol_Avg"] = df["Volume"].rolling(20).mean()
-
-    up = df["High"] - df["High"].shift(1)
-    dn = df["Low"].shift(1) - df["Low"]
-    pos = np.where((up > dn) & (up > 0), up, 0.0)
-    neg = np.where((dn > up) & (dn > 0), dn, 0.0)
-    pdi = 100 * pd.Series(pos, index=df.index).rolling(alen).mean() / (df["ATR"] + 1e-9)
-    ndi = 100 * pd.Series(neg, index=df.index).rolling(alen).mean() / (df["ATR"] + 1e-9)
-    dx = 100 * abs(pdi - ndi) / (pdi + ndi + 1e-9)
-    df["ADX"] = dx.rolling(alen).mean()
-
-    df["Vol_Delta"] = np.where(df["Close"] >= df["Open"], df["Volume"], -df["Volume"])
-    df["CVD_Proxy"] = df["Vol_Delta"].rolling(5 if mode == "Swing (Daily)" else 8).sum()
-
-    if df["Volume"].iloc[-5:].mean() < 10 or df["Volume"].sum() < 1:
-        tp = (df["High"] + df["Low"] + df["Close"]) / 3
-        df["VWAP"] = tp.cumsum() / np.arange(1, len(df)+1)
-        df["VWAP_Reliable"] = False
-    else:
-        df["VWAP"] = (df["Volume"] * (df["High"] + df["Low"] + df["Close"]) / 3).cumsum() / df["Volume"].cumsum()
-        df["VWAP_Reliable"] = True
-
-    df["VWAP_Dist"] = (df["Close"] - df["VWAP"]) / (df["ATR"] + 1e-9)
+# -------------------------------------------------------------------
+# INDICATOR STACK & REVERSAL STRUCTURES
+# -------------------------------------------------------------------
+def compute_dynamic_indicators(df_spot, df_fut):
+    df = df_spot.copy()
     
-    # Session High / Low Tracking for Intraday Fall/Rally Detection
     df["Day_High"] = df["High"].cummax()
     df["Day_Low"] = df["Low"].cummin()
-    df["Drop_From_High"] = (df["Day_High"] - df["Close"]) / df["Day_High"] * 100
-    df["Rally_From_Low"] = (df["Close"] - df["Day_Low"]) / df["Day_Low"] * 100
+    df["Drop_From_High"] = df["Day_High"] - df["Close"]
+    df["Rally_From_Low"] = df["Close"] - df["Day_Low"]
+    
+    df["EMA_fast"] = df["Close"].ewm(span=9, adjust=False).mean()
+    df["EMA_slow"] = df["Close"].ewm(span=21, adjust=False).mean()
+    
+    if not df_fut.empty and "Volume" in df_fut.columns:
+        df_fut["TP"] = (df_fut["High"] + df_fut["Low"] + df_fut["Close"]) / 3
+        df["VWAP"] = (df_fut["Volume"] * df_fut["TP"]).cumsum() / (df_fut["Volume"].cumsum() + 1e-9)
+    else:
+        df["VWAP"] = (df["High"] + df["Low"] + df["Close"]) / 3
 
+    tr = pd.concat([df["High"]-df["Low"], (df["High"]-df["Close"].shift()).abs(), (df["Low"]-df["Close"].shift()).abs()], axis=1).max(axis=1)
+    df["ATR"] = tr.rolling(14).mean()
+    df["ATR_Avg"] = df["ATR"].rolling(50).mean()
+    df["ATR_Expansion"] = df["ATR"] / (df["ATR_Avg"] + 1e-9)
+    
+    up = df["High"] - df["High"].shift(1)
+    dn = df["Low"].shift(1) - df["Low"]
+    pos_dm = np.where((up > dn) & (up > 0), up, 0.0)
+    neg_dm = np.where((dn > up) & (dn > 0), dn, 0.0)
+    pos_di = 100 * pd.Series(pos_dm, index=df.index).rolling(14).mean() / (df["ATR"] + 1e-9)
+    neg_di = 100 * pd.Series(neg_dm, index=df.index).rolling(14).mean() / (df["ATR"] + 1e-9)
+    dx = 100 * (abs(pos_di - neg_di) / (pos_di + neg_di + 1e-9))
+    df["ADX"] = dx.rolling(14).mean()
+    df["Plus_DI"] = pos_di
+    df["Minus_DI"] = neg_di
+    
+    o, h, l, c = df["Open"], df["High"], df["Low"], df["Close"]
+    body = abs(c - o)
+    lower_wick = min(o, c) - l
+    upper_wick = h - max(o, c)
+    
+    df["Bull_Pinbar"] = (lower_wick > 2 * body) & (upper_wick < 0.2 * body)
+    df["Bear_Pinbar"] = (upper_wick > 2 * body) & (lower_wick < 0.2 * body)
+    
     return df.dropna()
 
-def get_weekly_bias(df):
-    if df is None or len(df) < 30: return 50, "Neutral"
-    weekly = df["Close"].resample("W").last().dropna()
-    if len(weekly) < 5: return 50, "Neutral"
-    wema = weekly.ewm(span=5, adjust=False).mean()
-    last, prev, ema = weekly.iloc[-1], weekly.iloc[-2], wema.iloc[-1]
-    if last > ema and last > prev: return 75, "Bullish"
-    if last < ema and last < prev: return 25, "Bearish"
-    return 50, "Neutral"
-
-def calculate_real_breadth(raw):
-    if raw is None or raw.empty: return 50.0, 50.0, 0.0
-    try:
-        closes = raw["Close"] if isinstance(raw.columns, pd.MultiIndex) else raw
-        total_w = sum(TOP_10.values())
-        bull = bear = 0.0
-        cnt = 0
-        for t, w in TOP_10.items():
-            if t not in closes.columns: continue
-            s = closes[t].dropna()
-            if len(s) < 21: continue
-            ema = s.ewm(span=20, adjust=False).mean()
-            lc, pc, le = s.iloc[-1], s.iloc[-2], ema.iloc[-1]
-            cnt += 1
-            if lc > le:
-                bull += w
-                if lc > pc: bull += w * 0.15
-            else:
-                bear += w
-                if lc < pc: bear += w * 0.15
-        if cnt < 6: return 50.0, 50.0, 0.0
-        b = (bull / total_w) * 100
-        r = (bear / total_w) * 100
-        return round(b,1), round(r,1), round(b-r,1)
-    except:
-        return 50.0, 50.0, 0.0
-
-def get_vix_regime(vix_level, vix_chg):
-    if vix_level >= 20 or vix_chg > 4.0: return "Fear", -15, "High caution"
-    if vix_level >= 15 or vix_chg > 2.5: return "Elevated", -8, "Be selective"
-    if vix_level <= 12 and vix_chg < 0: return "Complacent", 5, "Trend favoured"
-    return "Normal", 0, "Standard"
-
 # -------------------------------------------------------------------
-# ENGINE 6 & OTHERS
+# SMART MULTI-STAGE EXIT & TRAILING ENGINE
 # -------------------------------------------------------------------
-def find_swings(df, left=4, right=4):
-    swings = []
-    h, l = df["High"].values, df["Low"].values
-    for i in range(left, len(df)-right):
-        if h[i] == max(h[i-left:i+right+1]): swings.append((df.index[i], h[i], "high"))
-        if l[i] == min(l[i-left:i+right+1]): swings.append((df.index[i], l[i], "low"))
-    return swings
-
-def cluster_zones(zones, atr, thresh=0.5):
-    if not zones: return []
-    zones = sorted(zones, key=lambda x: x["price"])
-    clustered = []
-    current = zones[0].copy()
-    for z in zones[1:]:
-        if abs(z["price"] - current["price"]) <= atr * thresh:
-            current["strength"] = max(current["strength"], z["strength"])
-            current["price"] = (current["price"] + z["price"]) / 2
-        else:
-            clustered.append(current)
-            current = z.copy()
-    clustered.append(current)
-    return sorted(clustered, key=lambda x: x["strength"], reverse=True)[:3]
-
-def detect_zones(df):
-    if len(df) < 30: return [], []
-    swings = find_swings(df)
-    atr = df["ATR"].iloc[-1]
-    demands, supplies = [], []
-    for idx, price, typ in swings[-15:]:
-        loc = df.index.get_loc(idx)
-        if loc < 3 or loc >= len(df)-3: continue
-        vol_ratio = df["Volume"].iloc[loc] / (df["Vol_Avg"].iloc[loc] + 1e-9)
-        if typ == "low":
-            move = df["Close"].iloc[loc+1:loc+6].max() - price
-            strength = min(100, (move/(atr+1e-9))*35 + min(vol_ratio,2.5)*15)
-            if strength > 35: demands.append({"price": price, "strength": strength})
-        else:
-            move = price - df["Close"].iloc[loc+1:loc+6].min()
-            strength = min(100, (move/(atr+1e-9))*35 + min(vol_ratio,2.5)*15)
-            if strength > 35: supplies.append({"price": price, "strength": strength})
-    return cluster_zones(demands, atr), cluster_zones(supplies, atr)
-
-def detect_candle(row, prev1, prev2):
-    o,h,l,c = row["Open"], row["High"], row["Low"], row["Close"]
-    body, upper, lower = abs(c-o), h-max(o,c), min(o,c)-l
-    rng = h-l + 1e-9
-    if lower > body*2 and lower > upper*1.8 and body/rng < 0.35: return "Bullish Pinbar", 75
-    if upper > body*2 and upper > lower*1.8 and body/rng < 0.35: return "Bearish Pinbar", 75
-    if c>o and prev1["Close"]<prev1["Open"] and c>=prev1["Open"] and o<=prev1["Close"]: return "Bullish Engulfing", 70
-    if c<o and prev1["Close"]>prev1["Open"] and c<=prev1["Open"] and o>=prev1["Close"]: return "Bearish Engulfing", 70
-    if (prev2["Close"]<prev2["Open"] and abs(prev1["Close"]-prev1["Open"])/(prev1["High"]-prev1["Low"]+1e-9)<0.3 and c>o and c>(prev2["Open"]+prev2["Close"])/2):
-        return "Morning Star-like", 72
-    if (prev2["Close"]>prev2["Open"] and abs(prev1["Close"]-prev1["Open"])/(prev1["High"]-prev1["Low"]+1e-9)<0.3 and c<o and c<(prev2["Open"]+prev2["Close"])/2):
-        return "Evening Star-like", 72
-    if body/rng < 0.15: return "Doji", 55
-    return "None", 40
-
-def engine6(df_cur, df_htf, regime, mode):
-    if len(df_cur) < 20: return 50, "No data", 0, 0
-    demands, supplies = detect_zones(df_htf if df_htf is not None and len(df_htf)>30 else df_cur)
-    latest, prev1 = df_cur.iloc[-1], df_cur.iloc[-2]
-    prev2 = df_cur.iloc[-3] if len(df_cur)>3 else prev1
-    atr, close = latest["ATR"], latest["Close"]
-    pattern, pat_score = detect_candle(latest, prev1, prev2)
-
-    near_dem = near_sup = False
-    best_d = best_s = 0
-    info = "No zone"
-    for z in demands:
-        if abs(close - z["price"]) <= atr*1.1:
-            near_dem = True
-            best_d = max(best_d, z["strength"])
-            info = f"Near Demand {z['strength']:.0f}"
-    for z in supplies:
-        if abs(close - z["price"]) <= atr*1.1:
-            near_sup = True
-            best_s = max(best_s, z["strength"])
-            info = f"Near Supply {z['strength']:.0f}"
-
-    if near_dem and pattern in ["Bullish Pinbar","Bullish Engulfing","Morning Star-like","Doji"]:
-        loc = min(95, pat_score*0.7 + best_d*0.35)
-    elif near_sup and pattern in ["Bearish Pinbar","Bearish Engulfing","Evening Star-like","Doji"]:
-        loc = min(95, pat_score*0.7 + best_s*0.35)
-    elif near_dem or near_sup:
-        loc = 55 + (best_d + best_s)*0.15
-    else:
-        loc = pat_score * 0.45
-
-    mult = 1.0
-    if regime == "Strong Trend": mult = 1.15 if near_dem else (0.85 if near_sup else 1.0)
-    elif regime == "Range": mult = 1.10 if (near_dem or near_sup) else 0.95
-    elif regime == "High Volatility": mult = 0.90
-
-    return round(np.clip(loc*mult, 5, 98),1), f"{pattern} | {info}", best_d, best_s
-
-def detect_regime(row, mode):
-    if row["ATR_Pct"] > 85 or row.get("VIX_Chg",0) > 4: return "High Volatility"
-    th = 22 if mode == "Intraday (5-min)" else 25
-    if row["ADX"] >= th and ((row["Close"]>row["EMA_mid"]>row["EMA_slow"]) or (row["Close"]<row["EMA_mid"]<row["EMA_slow"])):
-        return "Strong Trend"
-    if row["ADX"] >= 16: return "Mild Trend"
-    if row["ADX"] < 16: return "Range"
-    return "Transition"
-
-def engine1(row, regime):
-    base = 55 + min(row["ADX"],40)
-    if regime in ["Strong Trend","Range"]: base += 10
-    return min(100, base)
-
-def engine2(fii, dii, pcr, sentiment):
-    net = fii + dii
-    score = 50
-    if net > 800: score += 28
-    elif net > 300: score += 14
-    elif net < -800: score -= 22
-    elif net < -300: score -= 10
-    if pcr < 0.75: score += 8
-    elif pcr > 1.3: score -= 5
-    score += (sentiment-50)*0.25
-    return max(0, min(100, score))
-
-def engine3_intraday(row, regime):
-    cvd = row["CVD_Proxy"]
-    dist = row["VWAP_Dist"]
-    cvd_score = 50 + np.clip(cvd / (row["Vol_Avg"]+1)*20, -30, 30)
-    if regime in ["Range", "High Volatility"]: dist_score = 50 + min(abs(dist)*10, 25)
-    else: dist_score = 50 + np.clip(dist*12, -30, 30)
-    return max(0, min(100, cvd_score*0.55 + dist_score*0.45))
-
-def engine3_swing(net):
-    return max(0, min(100, 50 + net*0.7))
-
-def engine4(row, price_change, vix_chg, regime, mode):
-    atr, close, cvd = float(row["ATR"]), float(row["Close"]), row["CVD_Proxy"]
-    atr_pct, vol_ok = row["ATR_Pct"], row["Volume"] > 1.2 * row["Vol_Avg"]
-
-    if mode == "Swing (Daily)": base_mult, pct, min_pct = 0.90, 0.0045, 0.003
-    else:
-        base_mult = 0.78 if atr_pct < 30 else (0.55 if atr_pct > 70 else 0.65)
-        pct, min_pct = 0.0011, 0.0007
-
-    threshold = max((base_mult*atr + close*pct)/2, close*min_pct)
-
-    if price_change <= -threshold:
-        if vix_chg >= 1.5 and cvd < 0 and vol_ok: return 20, "Genuine Breakdown", "PUT"
-        return 80, "Bear Trap", "CALL"
-    elif price_change >= threshold:
-        if vix_chg <= 1.2 and cvd > 0 and vol_ok: return 80, "Genuine Breakout", "CALL"
-        return 20, "Bull Trap", "PUT"
-    return 50, "Normal", "WAIT"
-
-def engine5(row, regime, mode):
-    score = 0
-    if row["Close"] > row["EMA_fast"] > row["EMA_mid"] > row["EMA_slow"]: score += 35
-    elif row["Close"] > row["EMA_fast"] > row["EMA_slow"]: score += 25
-    elif row["Close"] > row["EMA_fast"]: score += 12
-
-    rsi = row["RSI"]
-    if regime == "Strong Trend":
-        if 60 <= rsi <= 75: score += 25
-        elif 52 <= rsi < 60: score += 15
-    elif regime == "Range":
-        if 48 <= rsi <= 62: score += 25
-        elif 40 <= rsi < 48 or 62 < rsi <= 70: score += 10
-    else:
-        if 52 <= rsi <= 68: score += 25
-        elif 45 <= rsi <= 72: score += 12
-
-    if row["Volume"] > (1.25 if mode=="Swing (Daily)" else 1.4)*row["Vol_Avg"]: score += 20
-    if row.get("VWAP_Reliable", True) and row["Close"] >= row["VWAP"]: score += 15
-    return min(100, score)
-
-# -------------------------------------------------------------------
-# AUTOMATIC PAPER LOGGER
-# -------------------------------------------------------------------
-def process_auto_logger(signal, action, latest_row, mode, index_choice, regime, final_score, e6_detail):
-    cols = ["Date", "Mode", "Index", "Regime", "Score", "Signal", "Action", "Entry", "SL", "T1", "T2", "Exit", "PnL", "Result", "Notes"]
+def process_smart_exits_and_logger(signal, action, latest, index_choice, confidence_score, qty, notes):
+    cols = ["Date", "Index", "Confidence", "Signal", "Action", "Qty", "Entry", "Current_SL", "T1", "T2", "Status", "Exit_Price", "PnL", "Notes"]
     if not os.path.exists(JOURNAL_FILE):
         pd.DataFrame(columns=cols).to_csv(JOURNAL_FILE, index=False)
     
     journal = pd.read_csv(JOURNAL_FILE)
-    if "Result" not in journal.columns:
-        return journal
+    if "Status" not in journal.columns: return journal, []
 
-    latest_date_str = latest_row.name.strftime("%Y-%m-%d %H:%M")
-    latest_close = round(float(latest_row["Close"]), 1)
-    latest_high = float(latest_row["High"])
-    latest_low = float(latest_row["Low"])
-    atr = float(latest_row["ATR"])
-    sl_dist = (1.25 if mode == "Swing (Daily)" else 0.9) * atr
+    latest_date_str = latest.name.strftime("%Y-%m-%d %H:%M")
+    latest_close = round(float(latest["Close"]), 1)
+    latest_high = float(latest["High"])
+    latest_low = float(latest["Low"])
+    atr = float(latest["ATR"])
+    sl_dist = 0.85 * atr
 
+    exit_alerts = []
     updated = False
+
     for idx, row in journal.iterrows():
-        if row["Result"] == "Open":
+        status = str(row["Status"])
+        if status in ["Open", "Partial_Booked"]:
             entry = float(row["Entry"])
-            sl = float(row["SL"])
+            curr_sl = float(row["Current_SL"])
             t1 = float(row["T1"])
+            t2 = float(row["T2"])
             act = str(row["Action"])
             
+            # 1. CALL EXITS & TRAILING
             if act == "CALL":
-                if latest_low <= sl:
-                    journal.at[idx, "Exit"] = sl
-                    journal.at[idx, "PnL"] = round(sl - entry, 1)
-                    journal.at[idx, "Result"] = "Loss"
-                    updated = True
-                elif latest_high >= t1:
-                    journal.at[idx, "Exit"] = t1
-                    journal.at[idx, "PnL"] = round(t1 - entry, 1)
-                    journal.at[idx, "Result"] = "Win"
-                    updated = True
-            elif act == "PUT":
-                if latest_high >= sl:
-                    journal.at[idx, "Exit"] = sl
-                    journal.at[idx, "PnL"] = round(entry - sl, 1)
-                    journal.at[idx, "Result"] = "Loss"
-                    updated = True
-                elif latest_low <= t1:
-                    journal.at[idx, "Exit"] = t1
-                    journal.at[idx, "PnL"] = round(entry - t1, 1)
-                    journal.at[idx, "Result"] = "Win"
+                # Trailing SL Adjustment (Move SL Up with Price)
+                new_trail_sl = round(latest_close - sl_dist, 1)
+                if new_trail_sl > curr_sl:
+                    journal.at[idx, "Current_SL"] = new_trail_sl
                     updated = True
 
+                # SL Hit
+                if latest_low <= curr_sl:
+                    journal.at[idx, "Status"] = "Closed_Loss" if status == "Open" else "Closed_Partial_Win"
+                    journal.at[idx, "Exit_Price"] = curr_sl
+                    journal.at[idx, "PnL"] = round(curr_sl - entry, 1)
+                    exit_alerts.append(f"🛑 CALL SL Hit / Trailing SL Executed at ₹{curr_sl:.1f}")
+                    updated = True
+                # T1 Hit (Partial Profit Booking 50%)
+                elif latest_high >= t1 and status == "Open":
+                    journal.at[idx, "Status"] = "Partial_Booked"
+                    journal.at[idx, "Current_SL"] = entry # Move SL to Cost (Risk Free!)
+                    exit_alerts.append(f"🎯 CALL T1 HIT! 50% Profit Booked at ₹{t1:.1f} | SL moved to Cost (₹{entry:.1f})")
+                    updated = True
+                # T2 Hit (Full Profit Exit)
+                elif latest_high >= t2:
+                    journal.at[idx, "Status"] = "Closed_Full_Win"
+                    journal.at[idx, "Exit_Price"] = t2
+                    journal.at[idx, "PnL"] = round(t2 - entry, 1)
+                    exit_alerts.append(f"🚀 CALL T2 FULL TARGET HIT at ₹{t2:.1f}")
+                    updated = True
+                # Structure Exhaustion Early Exit (Bearish Pinbar formed)
+                elif latest["Bear_Pinbar"] and latest_close < float(latest["VWAP"]):
+                    journal.at[idx, "Status"] = "Exhaustion_Exit"
+                    journal.at[idx, "Exit_Price"] = latest_close
+                    journal.at[idx, "PnL"] = round(latest_close - entry, 1)
+                    exit_alerts.append(f"⚠️ EARLY EXIT: Bearish Structure Exhaustion detected at ₹{latest_close:.1f}")
+                    updated = True
+
+            # 2. PUT EXITS & TRAILING
+            elif act == "PUT":
+                new_trail_sl = round(latest_close + sl_dist, 1)
+                if new_trail_sl < curr_sl:
+                    journal.at[idx, "Current_SL"] = new_trail_sl
+                    updated = True
+
+                if latest_high >= curr_sl:
+                    journal.at[idx, "Status"] = "Closed_Loss" if status == "Open" else "Closed_Partial_Win"
+                    journal.at[idx, "Exit_Price"] = curr_sl
+                    journal.at[idx, "PnL"] = round(entry - curr_sl, 1)
+                    exit_alerts.append(f"🛑 PUT SL Hit / Trailing SL Executed at ₹{curr_sl:.1f}")
+                    updated = True
+                elif latest_low <= t1 and status == "Open":
+                    journal.at[idx, "Status"] = "Partial_Booked"
+                    journal.at[idx, "Current_SL"] = entry
+                    exit_alerts.append(f"🎯 PUT T1 HIT! 50% Profit Booked at ₹{t1:.1f} | SL moved to Cost (₹{entry:.1f})")
+                    updated = True
+                elif latest_low <= t2:
+                    journal.at[idx, "Status"] = "Closed_Full_Win"
+                    journal.at[idx, "Exit_Price"] = t2
+                    journal.at[idx, "PnL"] = round(entry - t2, 1)
+                    exit_alerts.append(f"🚀 PUT T2 FULL TARGET HIT at ₹{t2:.1f}")
+                    updated = True
+                elif latest["Bull_Pinbar"] and latest_close > float(latest["VWAP"]):
+                    journal.at[idx, "Status"] = "Exhaustion_Exit"
+                    journal.at[idx, "Exit_Price"] = latest_close
+                    journal.at[idx, "PnL"] = round(entry - latest_close, 1)
+                    exit_alerts.append(f"⚠️ EARLY EXIT: Bullish Structure Reversal detected at ₹{latest_close:.1f}")
+                    updated = True
+
+    # Log New Signal
     if signal != "NO TRADE":
         already_logged = False
         if not journal.empty:
-            already_logged = ((journal["Date"] == latest_date_str) & (journal["Mode"] == mode) & (journal["Index"] == index_choice)).any()
+            already_logged = ((journal["Date"] == latest_date_str) & (journal["Index"] == index_choice)).any()
         
         if not already_logged:
             sl_val = round(latest_close - sl_dist, 1) if action == "CALL" else round(latest_close + sl_dist, 1)
-            t1_val = round(latest_close + 1.6 * sl_dist, 1) if action == "CALL" else round(latest_close - 1.6 * sl_dist, 1)
-            t2_val = round(latest_close + 2.3 * sl_dist, 1) if action == "CALL" else round(latest_close - 2.3 * sl_dist, 1)
+            t1_val = round(latest_close + 1.5 * sl_dist, 1) if action == "CALL" else round(latest_close - 1.5 * sl_dist, 1)
+            t2_val = round(latest_close + 2.5 * sl_dist, 1) if action == "CALL" else round(latest_close - 2.5 * sl_dist, 1)
             
             new_entry = {
-                "Date": latest_date_str,
-                "Mode": mode,
-                "Index": index_choice,
-                "Regime": regime,
-                "Score": round(final_score, 1),
-                "Signal": signal,
-                "Action": action,
-                "Entry": latest_close,
-                "SL": sl_val,
-                "T1": t1_val,
-                "T2": t2_val,
-                "Exit": "",
-                "PnL": "",
-                "Result": "Open",
-                "Notes": e6_detail
+                "Date": latest_date_str, "Index": index_choice, "Confidence": f"{confidence_score:.0f}%",
+                "Signal": signal, "Action": action, "Qty": qty, "Entry": latest_close, "Current_SL": sl_val, 
+                "T1": t1_val, "T2": t2_val, "Status": "Open", "Exit_Price": "", "PnL": "", "Notes": notes
             }
             journal = pd.concat([journal, pd.DataFrame([new_entry])], ignore_index=True)
             updated = True
 
-    if updated:
-        journal.to_csv(JOURNAL_FILE, index=False)
-        
-    return journal
+    if updated: journal.to_csv(JOURNAL_FILE, index=False)
+    return journal, exit_alerts
 
 # -------------------------------------------------------------------
-# MAIN EXECUTION
+# MAIN EXECUTION PIPELINE
 # -------------------------------------------------------------------
-if mode == "Swing (Daily)":
-    df = get_data(ticker, "1d", "1y")
-    df_htf = get_data(ticker, "1d", "2y")
-    daily_for_weekly = df
-else:
-    df = get_data(ticker, "5m", "5d")
-    df_htf = get_data(ticker, "1d", "6mo")
-    daily_for_weekly = df_htf
+df_spot = fetch_market_data(spot_ticker, "5d", "5m")
+df_fut = fetch_market_data(fut_ticker, "5d", "5m")
 
-df = add_indicators(df, mode)
-if df_htf is not None and len(df_htf) > 30:
-    df_htf = add_indicators(df_htf, "Swing (Daily)")
+if df_spot.empty or len(df_spot) < 30:
+    st.error("Data loading. Please refresh in a moment.")
+    st.stop()
 
-vix_df = get_vix()
-vix_level = float(vix_df["Close"].iloc[-1]) if not vix_df.empty else 14.0
-vix_chg = float(vix_df["Close"].pct_change().iloc[-1]*100) if len(vix_df)>1 else 0.0
+df = compute_dynamic_indicators(df_spot, df_fut)
+vix_val, vix_chg = fetch_realtime_vix()
+bull_hw, bear_hw = fetch_heavyweights()
 
 latest = df.iloc[-1]
-prev = df.iloc[-2]
-price_change = float(latest["Close"] - prev["Close"])
-regime = detect_regime(latest, mode)
-weights = (SWING_WEIGHTS if mode == "Swing (Daily)" else INTRADAY_WEIGHTS).get(regime, SWING_WEIGHTS["Transition"])
-
-api = get_fii_dii()
-fii = manual_fii if use_manual_flow else api["fii_net"]
-dii = manual_dii if use_manual_flow else api["dii_net"]
-
-if mode == "Swing (Daily)":
-    _, _, net_b = calculate_real_breadth(get_heavyweight_data())
-    e3 = engine3_swing(net_b)
-else:
-    e3 = engine3_intraday(latest, regime)
-
-weekly_score, weekly_bias = get_weekly_bias(daily_for_weekly)
-vix_regime, vix_adj, vix_msg = get_vix_regime(vix_level, vix_chg)
-
-e1 = engine1(latest, regime)
-e2 = engine2(fii, dii, api["pcr"], api["sentiment"])
-e4, e4_status, e4_action = engine4(latest, price_change, vix_chg, regime, mode)
-e5 = engine5(latest, regime, mode)
-e6, e6_detail, dem_str, sup_str = engine6(df, df_htf, regime, mode)
-
-engine_score = (e1*weights["E1"] + e2*weights["E2"] + e3*weights["E3"] +
-                e4*weights["E4"] + e5*weights["E5"] + e6*weights["E6"])
-final_score = engine_score + (weekly_score-50)*0.08 + vix_adj*0.6
-
-now = datetime.now().time()
-time_penalty = 0
-if mode == "Intraday (5-min)" and time(11,30) <= now <= time(13,30):
-    time_penalty = -10 if regime != "Range" else -16
-final_score += time_penalty
-
-oi_bias = 0
-if use_oi_filter:
-    if latest["Close"] > max_call_oi - 40: oi_bias = -12
-    elif latest["Close"] < max_put_oi + 40: oi_bias = 8
-final_score += oi_bias
-
-threshold = weights["threshold"]
-
-filter_pass = True
-msgs = []
-if mode == "Swing (Daily)" and avoid_mon_fri and datetime.now().weekday() in [0,4]:
-    filter_pass = False; msgs.append("Mon/Fri")
-if vix_chg > vix_spike_limit:
-    filter_pass = False; msgs.append(f"VIX {vix_chg:.1f}%")
-
-# -------------------------------------------------------------------
-# MARKET-ADAPTIVE INTRADAY SIGNAL LOGIC (FIXED)
-# -------------------------------------------------------------------
-signal, action = "NO TRADE", "WAIT"
-
-is_bearish_structure = (latest["Close"] < latest["EMA_fast"]) and (latest["Close"] <= latest["VWAP"])
-drop_from_high = float(latest["Drop_From_High"])
-
-# REALISTIC BEARISH THRESHOLD:
-bearish_threshold = 45.0
-
-if filter_pass:
-    # 1. TRAP OVERRIDE (Bull Trap or Genuine Breakdown -> PUT)
-    if e4_action in ["CALL", "PUT"]:
-        signal = f"TRAP → {e4_action}"
-        action = e4_action
-
-    # 2. INTRADAY DYNAMIC FALL OVERRIDE (Day High se 0.4% Drop -> Direct PUT)
-    elif mode == "Intraday (5-min)" and drop_from_high >= 0.35 and is_bearish_structure:
-        signal = "INTRADAY MOMENTUM SHORT"
-        action = "PUT"
-
-    # 3. BULLISH SIGNALS (CALL)
-    elif final_score >= threshold:
-        if final_score >= threshold + 5 and e6 >= 55:
-            signal = "HIGH CONVICTION LONG"
-            action = "CALL"
-        else:
-            signal = "MODERATE LONG"
-            action = "CALL"
-
-    # 4. BEARISH SCORE SIGNALS (PUT)
-    elif final_score <= bearish_threshold and is_bearish_structure:
-        if final_score <= 35:
-            signal = "HIGH CONVICTION SHORT"
-            action = "PUT"
-        else:
-            signal = "MODERATE SHORT"
-            action = "PUT"
-
+close_p = float(latest["Close"])
+vwap_p = float(latest["VWAP"])
+ema_f = float(latest["EMA_fast"])
+ema_s = float(latest["EMA_slow"])
+drop_pts = float(latest["Drop_From_High"])
+rally_pts = float(latest["Rally_From_Low"])
+adx_val = float(latest["ADX"])
+plus_di = float(latest["Plus_DI"])
+minus_di = float(latest["Minus_DI"])
 atr = float(latest["ATR"])
-sl_dist = (1.25 if mode == "Swing (Daily)" else 0.9) * atr
-qty = max(1, int(capital * risk_pct / sl_dist)) if sl_dist > 0 else 0
+atr_expansion = float(latest["ATR_Expansion"])
 
-# PROCESS AUTOMATIC LIVE LOGGER
-journal = process_auto_logger(signal, action, latest, mode, index_choice, regime, final_score, e6_detail)
+dynamic_multiplier = 1.3 if atr_expansion > 1.2 else (1.0 if atr_expansion >= 0.8 else 0.8)
+dynamic_trigger_pts = max(10.0, atr * dynamic_multiplier)
+
+# PRIMARY TRIGGERS
+signal, action = "NO TRADE", "WAIT"
+primary_direction = "NEUTRAL"
+
+if drop_pts >= dynamic_trigger_pts and close_p <= ema_f:
+    signal = "BEARISH MOMENTUM DROP"
+    action = "PUT"
+    primary_direction = "BEARISH"
+
+elif rally_pts >= dynamic_trigger_pts and close_p >= ema_f:
+    signal = "BULLISH MOMENTUM RALLY"
+    action = "CALL"
+    primary_direction = "BULLISH"
+
+elif ema_f < ema_s and close_p < vwap_p:
+    signal = "EMA BEARISH CROSSOVER"
+    action = "PUT"
+    primary_direction = "BEARISH"
+
+elif ema_f > ema_s and close_p > vwap_p:
+    signal = "EMA BULLISH CROSSOVER"
+    action = "CALL"
+    primary_direction = "BULLISH"
+
+# CONFIDENCE SCALING
+confidence_score = 45.0
+supporter_notes = [f"Dynamic Trigger: {dynamic_trigger_pts:.1f} pts"]
+
+if primary_direction != "NEUTRAL":
+    if primary_direction == "BEARISH":
+        if close_p < vwap_p: confidence_score += 15.0; supporter_notes.append("Below VWAP")
+        if minus_di > plus_di: confidence_score += 15.0; supporter_notes.append("-DI Dominant")
+        if adx_val >= 20: confidence_score += 15.0; supporter_notes.append(f"ADX ({adx_val:.1f})")
+        if bear_hw > bull_hw: confidence_score += 10.0; supporter_notes.append("Heavyweights Red")
+    elif primary_direction == "BULLISH":
+        if close_p > vwap_p: confidence_score += 15.0; supporter_notes.append("Above VWAP")
+        if plus_di > minus_di: confidence_score += 15.0; supporter_notes.append("+DI Dominant")
+        if adx_val >= 20: confidence_score += 15.0; supporter_notes.append(f"ADX ({adx_val:.1f})")
+        if bull_hw > bear_hw: confidence_score += 10.0; supporter_notes.append("Heavyweights Green")
+
+confidence_score = min(98.0, confidence_score)
+
+# DYNAMIC SIZING
+vix_multiplier = 1.15 if vix_chg > 3.0 else 1.0
+sl_dist = 0.85 * atr * vix_multiplier
+
+if confidence_score >= 80: conviction_grade = "HIGH CONVICTION"; qty_multiplier = 1.0
+elif confidence_score >= 60: conviction_grade = "MODERATE CONVICTION"; qty_multiplier = 0.7
+else: conviction_grade = "SCALP CONVICTION"; qty_multiplier = 0.4
+
+base_qty = max(1, int(capital * base_risk_pct / (sl_dist + 1e-9)))
+final_qty = max(1, int(base_qty * qty_multiplier)) if action != "WAIT" else 0
+
+note_summary = " + ".join(supporter_notes)
+
+journal, exit_alerts = process_smart_exits_and_logger(signal, action, latest, index_choice, confidence_score, final_qty, note_summary)
 
 # -------------------------------------------------------------------
-# UI DASHBOARD
+# DASHBOARD DISPLAY & POPUP ALERTS
 # -------------------------------------------------------------------
-st.subheader(f"{index_choice} | {mode} | Regime: `{regime}` | VIX: `{vix_regime}` | Weekly: `{weekly_bias}`")
+for alert in exit_alerts:
+    st.toast(alert, icon="🔔")
 
-c1,c2,c3,c4,c5 = st.columns(5)
-c1.metric("Final Score", f"{final_score:.1f}", f"Thr {threshold} / Bearish 45")
-c2.metric("Price", f"₹{latest['Close']:.1f}", f"{price_change:+.1f}")
-c3.metric("E6 (PA)", f"{e6:.0f}")
-c4.metric("VIX", f"{vix_level:.1f}", f"{vix_chg:+.1f}%")
-c5.metric("Drop from High", f"{drop_from_high:.2f}%")
+st.subheader(f"⚡ {index_choice} | Dynamic Trigger: `{dynamic_trigger_pts:.1f} pts` | Live ATR: `{atr:.1f}`")
 
-vwap_note = "VWAP Reliable" if latest.get("VWAP_Reliable", True) else "VWAP Fallback (low volume)"
-st.info(f"E6: **{e6_detail}** | Dem:{dem_str:.0f} Sup:{sup_str:.0f} | {vix_msg} | {vwap_note}")
+c1, c2, c3, c4, c5 = st.columns(5)
+c1.metric("Spot Price", f"₹{close_p:.1f}")
+c2.metric("VWAP Level", f"₹{vwap_p:.1f}", f"{close_p - vwap_p:+.1f} pts")
+c3.metric("Drop / Rally", f"-{drop_pts:.1f} / +{rally_pts:.1f}")
+c4.metric("Conviction Grade", conviction_grade if signal != "NO TRADE" else "Neutral")
+c5.metric("Supporter Score", f"{confidence_score:.0f}%")
 
-st.write(f"E1:{e1:.0f} | E2:{e2:.0f} | E3:{e3:.0f} | E4:{e4:.0f} ({e4_status}) | E5:{e5:.0f} | **E6:{e6:.0f}**")
+st.info(f"**Smart Exit & Intelligence Note:** {note_summary} | India VIX: {vix_val:.2f} ({vix_chg:+.1f}%)")
 
 if signal != "NO TRADE":
-    st.success(f"**SIGNAL DETECTED: {signal}** | **{action}** | Qty: **{qty}** (Auto-Logged below)")
-    st.write(f"SL: ₹{latest['Close']+(sl_dist if action=='PUT' else -sl_dist):.1f} | T1: ₹{latest['Close']+(-1.6*sl_dist if action=='PUT' else 1.6*sl_dist):.1f}")
+    st.success(f"🚨 **ENTRY SIGNAL: {signal} ({conviction_grade})** | **ACTION: {action}** | Qty: **{final_qty} Units**")
+    st.write(f"**Entry:** ₹{close_p:.1f} | **Initial SL:** ₹{close_p+(sl_dist if action=='PUT' else -sl_dist):.1f} | **Target 1 (50% Book):** ₹{close_p+(-1.5*sl_dist if action=='PUT' else 1.5*sl_dist):.1f} | **Target 2 (Full Exit):** ₹{close_p+(-2.5*sl_dist if action=='PUT' else 2.5*sl_dist):.1f}")
 else:
-    st.warning(f"**NO TRADE** | {', '.join(msgs) if msgs else 'Below threshold / No momentum override'}")
+    st.warning(f"**NO TRADE** | Price Action is consolidating within dynamic noise range ({dynamic_trigger_pts:.1f} pts).")
 
-# -------------------------------------------------------------------
-# AUTOMATIC JOURNAL LOG TABLE
-# -------------------------------------------------------------------
 st.markdown("---")
-st.subheader("📝 Live Auto-Logged Paper Journal")
-st.caption("System live market signals ko automatic log karta hai aur unke SL/Targets monitor karke Result bharta hai.")
+st.subheader("📝 Live Auto-Logged Paper Journal & Active Position Exits")
 
 if not journal.empty:
     st.dataframe(journal.tail(15), use_container_width=True)
-    
-    closed_trades = journal[journal["Result"].isin(["Win", "Loss"])]
-    if not closed_trades.empty:
-        total_t = len(closed_trades)
-        win_t = len(closed_trades[closed_trades["Result"] == "Win"])
-        wr = (win_t / total_t) * 100
-        net_pnl = closed_trades["PnL"].sum()
-        st.markdown(f"**Live Paper Performance:** Total Trades: `{total_t}` | Win Rate: `{wr:.1f}%` | Net Points PnL: `{net_pnl:+.1f}`")
 else:
-    st.info("Abhi tak koi live signal trigger nahi hua hai.")
+    st.info("No paper trades logged yet.")
