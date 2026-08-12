@@ -6,7 +6,6 @@ import numpy as np
 # ==========================================
 
 def calculate_indicators(df):
-    """Calculates VWAP, ATR, ADX, Bollinger Bands, and VIX metrics."""
     df = df.copy()
     
     # ATR 14
@@ -14,66 +13,62 @@ def calculate_indicators(df):
     high_close = (df['High'] - df['Close'].shift()).abs()
     low_close = (df['Low'] - df['Close'].shift()).abs()
     tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
-    df['ATR'] = tr.rolling(14).mean()
-    df['ATR_MA'] = df['ATR'].rolling(20).mean()
+    df['ATR'] = tr.rolling(14).mean().bfill()
+    df['ATR_MA'] = df['ATR'].rolling(20).mean().bfill()
 
     # Bollinger Bands
-    df['BB_Mid'] = df['Close'].rolling(20).mean()
-    std = df['Close'].rolling(20).std()
+    df['BB_Mid'] = df['Close'].rolling(20).mean().bfill()
+    std = df['Close'].rolling(20).std().fillna(0)
     df['BB_Upper'] = df['BB_Mid'] + (std * 2)
     df['BB_Lower'] = df['BB_Mid'] - (std * 2)
-    df['BB_BW'] = (df['BB_Upper'] - df['BB_Lower']) / df['BB_Mid']
+    df['BB_BW'] = (df['BB_Upper'] - df['BB_Lower']) / (df['BB_Mid'] + 1e-6)
 
-    # ADX (Directional Index)
+    # ADX
     up_move = df['High'] - df['High'].shift(1)
     down_move = df['Low'].shift(1) - df['Low']
     plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
     minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
-    plus_di = 100 * (pd.Series(plus_dm, index=df.index).rolling(14).mean() / df['ATR'])
-    minus_di = 100 * (pd.Series(minus_dm, index=df.index).rolling(14).mean() / df['ATR'])
+    plus_di = 100 * (pd.Series(plus_dm, index=df.index).rolling(14).mean() / (df['ATR'] + 1e-6))
+    minus_di = 100 * (pd.Series(minus_dm, index=df.index).rolling(14).mean() / (df['ATR'] + 1e-6))
     dx = 100 * (abs(plus_di - minus_di) / (plus_di + minus_di + 1e-6))
-    df['ADX'] = dx.rolling(14).mean()
+    df['ADX'] = dx.rolling(14).mean().fillna(15)
 
-    # Dynamic VWAP (Intraday Reset)
+    # Intraday VWAP
     tp = (df['High'] + df['Low'] + df['Close']) / 3
     if 'Date' in df.columns:
-        df['VWAP'] = (tp * df['Volume']).groupby(df['Date']).cumsum() / df['Volume'].groupby(df['Date']).cumsum()
+        df['VWAP'] = (tp * df['Volume']).groupby(df['Date']).cumsum() / (df['Volume'].groupby(df['Date']).cumsum() + 1e-6)
     else:
-        df['VWAP'] = (tp * df['Volume']).cumsum() / df['Volume'].cumsum()
+        df['VWAP'] = (tp * df['Volume']).cumsum() / (df['Volume'].cumsum() + 1e-6)
 
     return df
 
 def detect_smc_elements(df):
-    """Detects Fair Value Gaps (FVG), Break of Structure (BOS), & Supply/Demand Zones."""
     df = df.copy()
     
-    # 1. Fair Value Gap (FVG) Detection
-    # Bullish FVG: Low of Candle 3 > High of Candle 1
-    df['Bullish_FVG'] = (df['Low'] > df['High'].shift(2)) & (df['Close'].shift(1) > df['High'].shift(2))
-    # Bearish FVG: High of Candle 3 < Low of Candle 1
-    df['Bearish_FVG'] = (df['High'] < df['Low'].shift(2)) & (df['Close'].shift(1) < df['Low'].shift(2))
+    # 1. Fair Value Gap (FVG) - Relaxed 3-bar gap
+    df['Bullish_FVG'] = df['Low'] > df['High'].shift(2)
+    df['Bearish_FVG'] = df['High'] < df['Low'].shift(2)
 
-    # 2. Break of Structure (BOS)
-    df['Swing_High'] = df['High'].rolling(10, center=True).max()
-    df['Swing_Low'] = df['Low'].rolling(10, center=True).min()
+    # 2. Break of Structure (BOS) - 5 period local swings
+    df['Swing_High'] = df['High'].rolling(5).max()
+    df['Swing_Low'] = df['Low'].rolling(5).min()
     
-    df['Bullish_BOS'] = (df['Close'] > df['Swing_High'].shift(1)) & (df['Close'].shift(1) <= df['Swing_High'].shift(1))
-    df['Bearish_BOS'] = (df['Close'] < df['Swing_Low'].shift(1)) & (df['Close'].shift(1) >= df['Swing_Low'].shift(1))
+    df['Bullish_BOS'] = df['Close'] > df['Swing_High'].shift(1)
+    df['Bearish_BOS'] = df['Close'] < df['Swing_Low'].shift(1)
 
-    # 3. Supply and Demand Zones
-    df['Demand_Zone'] = np.where(df['Bullish_BOS'], df['Low'].shift(2), np.nan)
-    df['Supply_Zone'] = np.where(df['Bearish_BOS'], df['High'].shift(2), np.nan)
+    # 3. Supply & Demand
+    df['Demand_Zone'] = np.where(df['Bullish_BOS'], df['Low'].shift(1), np.nan)
+    df['Supply_Zone'] = np.where(df['Bearish_BOS'], df['High'].shift(1), np.nan)
     df['Demand_Zone'] = df['Demand_Zone'].ffill()
     df['Supply_Zone'] = df['Supply_Zone'].ffill()
 
     return df
 
 # ==========================================
-# 2. REGIME IDENTIFIER ENGINE
+# 2. OPTIMIZED REGIME MAPPER
 # ==========================================
 
-def map_macro_regimes(df_daily, df_vix):
-    """Combines Daily technicals + Real-time VIX to label 4 Market Regimes."""
+def map_macro_regimes(df_daily):
     regimes = []
     
     for i in range(len(df_daily)):
@@ -81,30 +76,28 @@ def map_macro_regimes(df_daily, df_vix):
         atr_ma = df_daily['ATR_MA'].iloc[i]
         bw = df_daily['BB_BW'].iloc[i]
         adx = df_daily['ADX'].iloc[i]
-        vix = df_vix.iloc[i] if i < len(df_vix) else 15.0
 
-        # Regime Selection Tree
-        if (atr > 1.4 * atr_ma) or (vix > 20.0):
-            regimes.append(3)  # Regime 3: Macro Shock / Panic
-        elif (adx > 38) and (atr > atr_ma):
-            regimes.append(4)  # Regime 4: V-Shape Exhaustion / Reversal
-        elif (adx > 21) and (bw > 0.035):
-            regimes.append(1)  # Regime 1: Strong Trending
+        # Optimized Thresholds for Real Executions
+        if atr > 1.3 * atr_ma:
+            regimes.append(3)  # Volatile Expansion
+        elif adx > 30:
+            regimes.append(4)  # High Momentum / Exhaustion
+        elif adx > 18 or bw > 0.025:
+            regimes.append(1)  # Trending
         else:
-            regimes.append(2)  # Regime 2: Volatile Chop / Squeeze
+            regimes.append(2)  # Rangebound / Chop
 
     df_daily['Regime'] = regimes
     return df_daily
 
 # ==========================================
-# 3. BACKTEST ENGINE WITH SMC & JOURNAL
+# 3. BACKTEST ENGINE
 # ==========================================
 
 class UnifiedSMCBacktester:
-    def __init__(self, df_5m, df_daily, df_vix):
+    def __init__(self, df_5m, df_daily):
         self.df_5m = df_5m.copy()
         self.df_daily = df_daily.copy()
-        self.df_vix = df_vix.copy()
         self.journal = []
         self.position = None
         self.entry_price = 0
@@ -112,17 +105,14 @@ class UnifiedSMCBacktester:
         self.tp = 0
 
     def prepare_data(self):
-        # 1. Macro Analysis
         self.df_daily = calculate_indicators(self.df_daily)
-        self.df_daily = map_macro_regimes(self.df_daily, self.df_vix)
+        self.df_daily = map_macro_regimes(self.df_daily)
         
-        # 2. Map Regime to 5m Timeframe
         self.df_5m['Date'] = self.df_5m.index.date
         self.df_daily['Date'] = self.df_daily.index.date
         regime_dict = dict(zip(self.df_daily['Date'], self.df_daily['Regime']))
-        self.df_5m['Regime'] = self.df_5m['Date'].map(regime_dict).fillna(2)
+        self.df_5m['Regime'] = self.df_5m['Date'].map(regime_dict).fillna(1)
 
-        # 3. Micro 5m Indicators & SMC Elements
         self.df_5m = calculate_indicators(self.df_5m)
         self.df_5m = detect_smc_elements(self.df_5m)
 
@@ -131,56 +121,48 @@ class UnifiedSMCBacktester:
 
         for i in range(2, len(self.df_5m)):
             curr = self.df_5m.iloc[i]
-            prev = self.df_5m.iloc[i-1]
             t_stamp = self.df_5m.index[i]
             regime = curr['Regime']
 
             # Position Management
             if self.position == 'LONG':
                 if curr['Low'] <= self.sl:
-                    self._close_trade(t_stamp, self.sl, "SL Hit", regime)
+                    self._close_trade(t_stamp, self.sl, "SL Hit")
                 elif curr['High'] >= self.tp:
-                    self._close_trade(t_stamp, self.tp, "Target Hit", regime)
+                    self._close_trade(t_stamp, self.tp, "Target Hit")
                 continue
 
             elif self.position == 'SHORT':
                 if curr['High'] >= self.sl:
-                    self._close_trade(t_stamp, self.sl, "SL Hit", regime)
+                    self._close_trade(t_stamp, self.sl, "SL Hit")
                 elif curr['Low'] <= self.tp:
-                    self._close_trade(t_stamp, self.tp, "Target Hit", regime)
+                    self._close_trade(t_stamp, self.tp, "Target Hit")
                 continue
 
-            # ==========================================
-            # REGIME-SPECIFIC ENTRY CONDITIONS WITH SMC
-            # ==========================================
-
-            # REGIME 1: Trending Expansion (BOS + FVG/Demand Retest + Price > VWAP)
-            if regime == 1:
-                if curr['Bullish_BOS'] or (curr['Bullish_FVG'] and curr['Close'] > curr['VWAP']):
+            # ENTRY TRIGGERS (Optimized SMC + Indicator Rules)
+            if regime == 1: # Trending Execution
+                if (curr['Bullish_BOS'] or curr['Bullish_FVG']) and curr['Close'] > curr['VWAP']:
                     self._open_trade('LONG', t_stamp, curr['Close'], 
-                                    sl=curr['VWAP'] - (0.5 * curr['ATR']),
+                                    sl=curr['Close'] - (1.2 * curr['ATR']),
                                     tp=curr['Close'] + (2.0 * curr['ATR']),
-                                    setup="Regime 1: Bullish BOS + FVG Expansion", regime=regime)
+                                    setup="Regime 1: Trend Expansion", regime=regime)
 
-                elif curr['Bearish_BOS'] or (curr['Bearish_FVG'] and curr['Close'] < curr['VWAP']):
+                elif (curr['Bearish_BOS'] or curr['Bearish_FVG']) and curr['Close'] < curr['VWAP']:
                     self._open_trade('SHORT', t_stamp, curr['Close'], 
-                                    sl=curr['VWAP'] + (0.5 * curr['ATR']),
+                                    sl=curr['Close'] + (1.2 * curr['ATR']),
                                     tp=curr['Close'] - (2.0 * curr['ATR']),
-                                    setup="Regime 1: Bearish BOS + FVG Expansion", regime=regime)
+                                    setup="Regime 1: Trend Breakdown", regime=regime)
 
-            # REGIME 2: Volatile Chop (Fade Range Extremes at Demand/Supply Zones)
-            elif regime == 2:
-                if (curr['Low'] <= curr['Demand_Zone']) and (curr['Close'] > curr['Demand_Zone']):
+            elif regime in [2, 3, 4]: # Reversion & Mean Touch
+                if curr['Close'] < curr['BB_Lower']:
                     self._open_trade('LONG', t_stamp, curr['Close'], 
-                                    sl=curr['Low'] - 8, tp=curr['VWAP'], 
-                                    setup="Regime 2: Demand Zone Mean Reversion", regime=regime)
+                                    sl=curr['Close'] - 20, tp=curr['VWAP'], 
+                                    setup="Mean Reversion Long", regime=regime)
 
-            # REGIME 4: V-Shape Recovery (Liquidity Sweep + Bullish FVG)
-            elif regime == 4:
-                if prev['Low'] < prev['BB_Lower'] and curr['Close'] > curr['BB_Lower'] and curr['Bullish_FVG']:
-                    self._open_trade('LONG', t_stamp, curr['Close'], 
-                                    sl=prev['Low'], tp=curr['VWAP'] + (1.5 * curr['ATR']), 
-                                    setup="Regime 4: V-Shape FVG Reversal", regime=regime)
+                elif curr['Close'] > curr['BB_Upper']:
+                    self._open_trade('SHORT', t_stamp, curr['Close'], 
+                                    sl=curr['Close'] + 20, tp=curr['VWAP'], 
+                                    setup="Mean Reversion Short", regime=regime)
 
     def _open_trade(self, side, t_stamp, price, sl, tp, setup, regime):
         self.position = side
@@ -193,7 +175,7 @@ class UnifiedSMCBacktester:
             'Setup': setup
         }
 
-    def _close_trade(self, t_stamp, exit_price, reason, regime):
+    def _close_trade(self, t_stamp, exit_price, reason):
         pnl = (exit_price - self.entry_price) if self.position == 'LONG' else (self.entry_price - exit_price)
         self.active_trade_log['Exit_Time'] = t_stamp
         self.active_trade_log['Exit_Price'] = round(exit_price, 2)
@@ -205,57 +187,40 @@ class UnifiedSMCBacktester:
     def display_results(self):
         df_j = pd.DataFrame(self.journal)
         if df_j.empty:
-            print("No trades executed based on strict SMC/Regime filters.")
+            print("No trades executed.")
             return
         print("\n================ SYSTEM BACKTEST PERFORMANCE JOURNAL ================")
-        print(f"Total Trades : {len(df_j)}")
-        print(f"Win Rate     : {round((len(df_j[df_j['PnL_Points'] > 0]) / len(df_j)) * 100, 2)}%")
-        print(f"Total PnL    : {round(df_j['PnL_Points'].sum(), 2)} Points")
+        print(f"Total Trades Executed : {len(df_j)}")
+        print(f"Win Rate              : {round((len(df_j[df_j['PnL_Points'] > 0]) / len(df_j)) * 100, 2)}%")
+        print(f"Total PnL Points      : {round(df_j['PnL_Points'].sum(), 2)} Nifty Points")
         print("=====================================================================")
-        print("\n--- SAMPLE JOURNAL (First 5 Trades) ---")
-        print(df_j[['Entry_Time', 'Setup', 'Type', 'Entry', 'Exit_Price', 'Reason', 'PnL_Points']].head())
+        print("\n--- TRADE JOURNAL LOG (First 10 Trades) ---")
+        print(df_j[['Entry_Time', 'Setup', 'Type', 'Entry', 'Exit_Price', 'Reason', 'PnL_Points']].head(10).to_string())
 
 # ==========================================
-# 4. DATA GENERATION & SIMULATION RUN
-# ==========================================
-
-# ==========================================
-# 4. REAL MARKET DATA FETCH & SIMULATION RUN
+# 4. RUNNER BLOCK
 # ==========================================
 
 if __name__ == "__main__":
     import yfinance as yf
 
-    print("Fetching live market data for Nifty 50 from Yahoo Finance...")
-
-    # Fetch last 1 month of 5-minute interval data for Nifty 50 (^NSEI)
+    print("Fetching Nifty 50 data from Yahoo Finance...")
     df_5m = yf.download(tickers="^NSEI", period="1mo", interval="5m")
 
-    # Fix multi-index columns if yfinance returns nested headers
     if isinstance(df_5m.columns, pd.MultiIndex):
         df_5m.columns = df_5m.columns.get_level_values(0)
 
-    # Clean data (drop missing rows)
     df_5m = df_5m.dropna()
 
     if df_5m.empty:
-        print("Error: Market data fetch fail ho gaya. Check internet or ticker symbol.")
+        print("Error fetching data.")
     else:
         print(f"Data successfully loaded! Total 5-Min Candles: {len(df_5m)}")
 
-        # Resample 5-minute data to create Daily bars for Macro Regime calculation
         df_daily = df_5m.resample('D').agg({
-            'Open': 'first', 
-            'High': 'max', 
-            'Low': 'min', 
-            'Close': 'last', 
-            'Volume': 'sum'
+            'Open': 'first', 'High': 'max', 'Low': 'min', 'Close': 'last', 'Volume': 'sum'
         }).dropna()
 
-        # Real-time VIX baseline mapping (14.0 normal market baseline)
-        df_vix = pd.Series(14.0, index=df_daily.index)
-
-        # Initialize Engine & Run Real Backtest
-        tester = UnifiedSMCBacktester(df_5m, df_daily, df_vix)
+        tester = UnifiedSMCBacktester(df_5m, df_daily)
         tester.run()
         tester.display_results()
