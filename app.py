@@ -1,4 +1,5 @@
 import streamlit as st
+import streamlit.components.v1 as components
 import pandas as pd
 import numpy as np
 import yfinance as yf
@@ -511,7 +512,7 @@ def main():
         save_to_sqlite(records)
         last = records[-1]
 
-        # IST Timezone Conversion Fix
+        # Timezone Conversion Fix to IST (Asia/Kolkata)
         ist = pytz.timezone('Asia/Kolkata')
         now_str = datetime.now(ist).strftime("%d %b %Y %H:%M:%S")
 
@@ -600,6 +601,16 @@ def main():
         conn.close()
         
         st.dataframe(df_db, use_container_width=True)
+
+        # Interactive TradingView Live Chart Component
+        st.markdown("---")
+        st.subheader("📈 Live Nifty TradingView Chart")
+        tradingview_html = """
+        <div class="tradingview-widget-container" style="height:500px;width:100%;">
+          <iframe src="https://s.tradingview.com/widgetembed/?frameElementId=tradingview_chart&symbol=NSE%3ANIFTY&interval=3&hidesidetoolbar=0&symboledit=1&saveimage=1&toolbarbg=f1f3f6&studies=%5B%5D&theme=dark&style=1&timezone=Asia%2FKolkata" style="width: 100%; height: 500px; border: none;"></iframe>
+        </div>
+        """
+        components.html(tradingview_html, height=520)
 
 if __name__ == "__main__":
     main()
