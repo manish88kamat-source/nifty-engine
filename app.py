@@ -5,6 +5,7 @@ import yfinance as yf
 import requests
 import ta
 import sqlite3
+import pytz
 from datetime import datetime, time
 import warnings
 import logging
@@ -510,7 +511,9 @@ def main():
         save_to_sqlite(records)
         last = records[-1]
 
-        now_str = datetime.now().strftime("%d %b %Y %H:%M:%S")
+        # IST Timezone Conversion Fix
+        ist = pytz.timezone('Asia/Kolkata')
+        now_str = datetime.now(ist).strftime("%d %b %Y %H:%M:%S")
 
         st.markdown(f"""
         <div class="top-header">
