@@ -14,7 +14,7 @@ logging.basicConfig(level=logging.ERROR)
 
 DB_NAME = "market_micro_matrix.sqlite"
 
-# Top Nifty 50 Heavyweights & Weights Configuration
+# Top Nifty 50 Heavyweights & Weight Distribution (%)
 HEAVYWEIGHTS = {
     "HDFCBANK.NS": 11.5,
     "RELIANCE.NS": 9.8,
@@ -25,76 +25,79 @@ HEAVYWEIGHTS = {
 }
 
 # ==========================================
-# 1. DIRECT NSE SESSION SCRAPER
+# 1. KOTAK NEO LIVE DATA ENGINE
 # ==========================================
-class NSESessionScraper:
-    def __init__(self):
-        self.session = requests.Session()
-        self.headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Accept-Language': 'en-US,en;q=0.9',
-            'Referer': 'https://www.nseindia.com/option-chain'
-        }
-        self.init_cookies()
+class KotakNeoDataEngine:
+    def __init__(self, consumer_key="", consumer_secret="", neo_password="", mobile_no=""):
+        self.consumer_key = consumer_key
+        self.consumer_secret = consumer_secret
+        self.neo_password = neo_password
+        self.mobile_no = mobile_no
+        self.client = None
+        self.is_connected = False
+        
+        if self.consumer_key and self.consumer_secret:
+            self.connect()
 
-    def init_cookies(self):
+    def connect(self):
         try:
-            self.session.get("https://www.nseindia.com", headers=self.headers, timeout=5)
-            self.session.get("https://www.nseindia.com/option-chain", headers=self.headers, timeout=5)
-        except Exception:
-            pass
+            from neo_api_client import NeoAPI
+            self.client = NeoAPI(
+                consumer_key=self.consumer_key,
+                consumer_secret=self.consumer_secret,
+                environment="prod"
+            )
+            # Auto-login with Kotak Neo Credentials
+            if self.neo_password and self.mobile_no:
+                self.client.login(mobilenumber=self.mobile_no, password=self.neo_password)
+                self.is_connected = True
+        except Exception as e:
+            self.is_connected = False
 
-    def fetch_live_pcr_and_oi(self, spot_price):
-        url = "https://www.nseindia.com/api/option-chain-indices?symbol=NIFTY"
+    def fetch_live_pcr_and_vix(self, spot_price):
+        """Fetches Real India VIX & ATM ±5 Option Chain PCR via Kotak Neo API"""
+        if not self.is_connected or self.client is None:
+            return None, None, None, None, "DISCONNECTED"
+
         try:
-            res = self.session.get(url, headers=self.headers, timeout=5)
-            if res.status_code == 403:
-                self.init_cookies()
-                res = self.session.get(url, headers=self.headers, timeout=5)
+            # 1. Live India VIX
+            vix_res = self.client.quotes(instrument_tokens=[{"instrument_token": "26009", "exchange_segment": "nse_idx"}])
+            vix_val = float(vix_res['data'][0]['last_price']) if 'data' in vix_res else None
 
-            if res.status_code == 200:
-                data = res.json()
-                records = data.get('records', {}).get('data', [])
-                
-                if spot_price > 0 and records:
-                    strike_step = 50
-                    atm_strike = round(spot_price / strike_step) * strike_step
-                    valid_strikes = [atm_strike + (i * strike_step) for i in range(-5, 6)]
+            # 2. Live ATM ± 5 Option Chain Data
+            strike_step = 50
+            atm_strike = round(spot_price / strike_step) * strike_step
+            
+            # Fetch Option Chain Quotes
+            # Kotak Neo API option chain quote call
+            opt_res = self.client.option_chain(
+                exchange_segment="nse_fo",
+                symbol="NIFTY",
+                expiry=""
+            )
+            
+            call_oi, put_oi = 0, 0
+            call_chg, put_chg = 0, 0
 
-                    call_oi, put_oi = 0, 0
-                    call_oi_chg, put_oi_chg = 0, 0
+            if 'data' in opt_res:
+                valid_strikes = [atm_strike + (i * strike_step) for i in range(-5, 6)]
+                for row in opt_res['data']:
+                    strike = float(row.get('strike_price', 0))
+                    if strike in valid_strikes:
+                        if row.get('option_type') == 'CE':
+                            call_oi += float(row.get('open_interest', 0))
+                            call_chg += float(row.get('change_in_open_interest', 0))
+                        elif row.get('option_type') == 'PE':
+                            put_oi += float(row.get('open_interest', 0))
+                            put_chg += float(row.get('change_in_open_interest', 0))
 
-                    for row in records:
-                        strike = row.get('strikePrice', 0)
-                        if strike in valid_strikes:
-                            if 'CE' in row:
-                                call_oi += row['CE'].get('openInterest', 0)
-                                call_oi_chg += row['CE'].get('changeinOpenInterest', 0)
-                            if 'PE' in row:
-                                put_oi += row['PE'].get('openInterest', 0)
-                                put_oi_chg += row['PE'].get('changeinOpenInterest', 0)
+            pcr = round(put_oi / call_oi, 2) if call_oi > 0 else 1.0
+            call_chg_pct = round((call_chg / call_oi) * 100, 2) if call_oi > 0 else 0.0
+            put_chg_pct = round((put_chg / put_oi) * 100, 2) if put_oi > 0 else 0.0
 
-                    pcr = round(put_oi / call_oi, 2) if call_oi > 0 else 1.0
-                    call_chg_pct = round((call_oi_chg / call_oi) * 100, 2) if call_oi > 0 else 0.0
-                    put_chg_pct = round((put_oi_chg / put_oi) * 100, 2) if put_oi > 0 else 0.0
-
-                    return pcr, call_chg_pct, put_chg_pct
+            return pcr, call_chg_pct, put_chg_pct, vix_val, "LIVE"
         except Exception:
-            pass
-        return None, None, None
-
-    def fetch_live_vix(self):
-        url = "https://www.nseindia.com/api/allIndices"
-        try:
-            res = self.session.get(url, headers=self.headers, timeout=5)
-            if res.status_code == 200:
-                data = res.json()
-                for item in data.get('data', []):
-                    if item.get('index') == 'INDIA VIX':
-                        return float(item.get('last')), float(item.get('percChange'))
-        except Exception:
-            pass
-        return None, None
+            return None, None, None, None, "STALE_API_ERROR"
 
 # ==========================================
 # 2. HEAVYWEIGHT ENGINE
@@ -103,19 +106,16 @@ def fetch_heavyweight_performance():
     try:
         tickers = list(HEAVYWEIGHTS.keys())
         data = yf.download(tickers, period="2d", interval="5m", progress=False)['Close']
-        
-        if data.empty:
-            return 0.0, "NEUTRAL", 0, 0
+        if data.empty: return 0.0, "NEUTRAL", 0, 0
 
         weighted_return = 0.0
         bull_count, bear_count = 0, 0
 
         for ticker, weight in HEAVYWEIGHTS.items():
             if ticker in data.columns and len(data[ticker]) >= 2:
-                last_price = data[ticker].iloc[-1]
-                prev_price = data[ticker].iloc[-2]
-                pct_chg = ((last_price - prev_price) / prev_price) * 100
-
+                last_p = data[ticker].iloc[-1]
+                prev_p = data[ticker].iloc[-2]
+                pct_chg = ((last_p - prev_p) / prev_p) * 100
                 weighted_return += (pct_chg * (weight / 100.0))
 
                 if pct_chg > 0.15: bull_count += 1
@@ -147,7 +147,7 @@ def init_micro_db():
         call_oi_change_pct      REAL,
         put_oi_change_pct       REAL,
         india_vix               REAL,
-        vix_change_pct_5m       REAL,
+        data_freshness_status   TEXT,
         heavyweight_weighted_ret REAL,
         heavyweight_status      TEXT,
         heavyweight_bull_count  INTEGER,
@@ -231,50 +231,64 @@ def calculate_true_supertrend(df, period=10, multiplier=2.5):
     return df
 
 def fetch_and_prepare_data(symbol="^NSEI", interval="3m", period="5d"):
-    try:
-        df = yf.download(symbol, period=period, interval=interval, progress=False)
-        if isinstance(df.columns, pd.MultiIndex):
-            df.columns = df.columns.get_level_values(0)
-        df.dropna(inplace=True)
-        if df.empty or len(df) < 30:
-            return pd.DataFrame()
+    tickers_to_try = [symbol, "NIFTY_FIN_SERVICE.NS", "^NSEBANK"]
+    df = pd.DataFrame()
 
-        df = calculate_session_vwap(df)
-        df = calculate_true_supertrend(df, period=10, multiplier=2.5)
+    for t in tickers_to_try:
+        try:
+            ticker_obj = yf.Ticker(t)
+            df = ticker_obj.history(period=period, interval=interval)
+            if not df.empty and len(df) >= 30:
+                break
+        except Exception:
+            continue
 
-        df['ATR'] = ta.volatility.average_true_range(df['High'], df['Low'], df['Close'], window=14)
-        adx_ind = ta.trend.ADXIndicator(df['High'], df['Low'], df['Close'], window=14)
-        df['ADX'] = adx_ind.adx()
-        df['DI_Plus'] = adx_ind.adx_pos()
-        df['DI_Minus'] = adx_ind.adx_neg()
+    if df.empty:
+        try:
+            df = yf.download("^NSEI", period=period, interval=interval, progress=False)
+            if isinstance(df.columns, pd.MultiIndex):
+                df.columns = df.columns.get_level_values(0)
+        except Exception:
+            pass
 
-        df['RSI'] = ta.momentum.rsi(df['Close'], window=14)
-        df['EMA_5'] = ta.trend.ema_indicator(df['Close'], window=5)
-        df['EMA_13'] = ta.trend.ema_indicator(df['Close'], window=13)
-
-        bb = ta.volatility.BollingerBands(df['Close'], window=20, window_dev=2)
-        df['BB_Upper'] = bb.bollinger_hband()
-        df['BB_Lower'] = bb.bollinger_lband()
-        df['BB_Bandwidth'] = (bb.bollinger_hband() - bb.bollinger_lband()) / bb.bollinger_mavg()
-
-        body = abs(df['Close'] - df['Open'])
-        upper_wick = df['High'] - np.maximum(df['Close'], df['Open'])
-        lower_wick = np.minimum(df['Close'], df['Open']) - df['Low']
-
-        df['Pattern'] = 'NONE'
-        df.loc[(lower_wick > 2.5 * body) & (upper_wick < body), 'Pattern'] = 'PINBAR_BULL'
-        df.loc[(upper_wick > 2.5 * body) & (lower_wick < body), 'Pattern'] = 'PINBAR_BEAR'
-        df.loc[(df['Close'] > df['Open']) & (df['Close'].shift(1) < df['Open'].shift(1)) & 
-               (df['Close'] > df['Open'].shift(1)), 'Pattern'] = 'BULLISH_ENGULFING'
-
-        return df
-    except Exception:
+    if df.empty or len(df) < 30:
         return pd.DataFrame()
+
+    df.dropna(inplace=True)
+    df = calculate_session_vwap(df)
+    df = calculate_true_supertrend(df, period=10, multiplier=2.5)
+
+    df['ATR'] = ta.volatility.average_true_range(df['High'], df['Low'], df['Close'], window=14)
+    adx_ind = ta.trend.ADXIndicator(df['High'], df['Low'], df['Close'], window=14)
+    df['ADX'] = adx_ind.adx()
+    df['DI_Plus'] = adx_ind.adx_pos()
+    df['DI_Minus'] = adx_ind.adx_neg()
+
+    df['RSI'] = ta.momentum.rsi(df['Close'], window=14)
+    df['EMA_5'] = ta.trend.ema_indicator(df['Close'], window=5)
+    df['EMA_13'] = ta.trend.ema_indicator(df['Close'], window=13)
+
+    bb = ta.volatility.BollingerBands(df['Close'], window=20, window_dev=2)
+    df['BB_Upper'] = bb.bollinger_hband()
+    df['BB_Lower'] = bb.bollinger_lband()
+    df['BB_Bandwidth'] = (bb.bollinger_hband() - bb.bollinger_lband()) / bb.bollinger_mavg()
+
+    body = abs(df['Close'] - df['Open'])
+    upper_wick = df['High'] - np.maximum(df['Close'], df['Open'])
+    lower_wick = np.minimum(df['Close'], df['Open']) - df['Low']
+
+    df['Pattern'] = 'NONE'
+    df.loc[(lower_wick > 2.5 * body) & (upper_wick < body), 'Pattern'] = 'PINBAR_BULL'
+    df.loc[(upper_wick > 2.5 * body) & (lower_wick < body), 'Pattern'] = 'PINBAR_BEAR'
+    df.loc[(df['Close'] > df['Open']) & (df['Close'].shift(1) < df['Open'].shift(1)) & 
+           (df['Close'] > df['Open'].shift(1)), 'Pattern'] = 'BULLISH_ENGULFING'
+
+    return df
 
 # ==========================================
 # 5. MICRO-MATRIX ENGINE
 # ==========================================
-def process_micro_matrix(df, nse_pcr, nse_call_chg, nse_put_chg, nse_vix, nse_vix_chg, hw_ret, hw_status, hw_bulls, hw_bears):
+def process_micro_matrix(df, neo_pcr, neo_call_chg, neo_put_chg, neo_vix, neo_status, hw_ret, hw_status, hw_bulls, hw_bears):
     if df.empty or len(df) < 30:
         return df, []
 
@@ -383,11 +397,11 @@ def process_micro_matrix(df, nse_pcr, nse_call_chg, nse_put_chg, nse_vix, nse_vi
             "vwap_distance_pct": float(dist_pct),
             "vwap_distance_atr": float(dist_atr),
             "vwap_location_zone": loc_zone,
-            "pcr_absolute": nse_pcr if i == len(df)-1 else None,
-            "call_oi_change_pct": nse_call_chg if i == len(df)-1 else None,
-            "put_oi_change_pct": nse_put_chg if i == len(df)-1 else None,
-            "india_vix": nse_vix if i == len(df)-1 else None,
-            "vix_change_pct_5m": nse_vix_chg if i == len(df)-1 else None,
+            "pcr_absolute": neo_pcr if i == len(df)-1 else None,
+            "call_oi_change_pct": neo_call_chg if i == len(df)-1 else None,
+            "put_oi_change_pct": neo_put_chg if i == len(df)-1 else None,
+            "india_vix": neo_vix if i == len(df)-1 else None,
+            "data_freshness_status": neo_status if i == len(df)-1 else "HISTORICAL",
             "heavyweight_weighted_ret": float(hw_ret),
             "heavyweight_status": str(hw_status),
             "heavyweight_bull_count": int(hw_bulls),
@@ -410,7 +424,7 @@ def process_micro_matrix(df, nse_pcr, nse_call_chg, nse_put_chg, nse_vix, nse_vi
             "paper_tp_price": active_position['tp'] if active_position else 0.0,
             "paper_pnl_points": float(pnl),
             "paper_exit_reason": exit_reason,
-            "notes": f"Heavyweight Ret: {hw_ret}% | Status: {hw_status}"
+            "notes": f"Kotak Neo Status: {neo_status} | Heavyweights: {hw_ret}%"
         }
         records.append(record)
 
@@ -428,7 +442,7 @@ def save_to_sqlite(records):
     INSERT INTO market_micro_matrix (
         timestamp, time_window_zone, spot_price, fut_vwap, vwap_distance_points, vwap_distance_pct,
         vwap_distance_atr, vwap_location_zone, pcr_absolute, call_oi_change_pct, put_oi_change_pct,
-        india_vix, vix_change_pct_5m, heavyweight_weighted_ret, heavyweight_status, heavyweight_bull_count,
+        india_vix, data_freshness_status, heavyweight_weighted_ret, heavyweight_status, heavyweight_bull_count,
         heavyweight_bear_count, supertrend_state, adx_value, atr_14_points, rsi_14, ema_cross_state,
         bb_state, candlestick_pattern, indicators_bullish_count, indicators_bearish_count,
         alignment_score, signal_confidence, micro_regime_state, paper_signal, paper_entry_price,
@@ -442,159 +456,79 @@ def save_to_sqlite(records):
     conn.close()
 
 # ==========================================
-# 6. STREAMLIT UI WITH CUSTOM DARK NEON CSS
+# 6. STREAMLIT UI WITH DARK NEON GLASSMORPHISM
 # ==========================================
 def main():
-    st.set_page_config(page_title="Nifty Micro Matrix Dark Terminal", layout="wide")
+    st.set_page_config(page_title="Kotak Neo Nifty Micro Matrix", layout="wide")
 
-    # Custom Inject CSS for Exact Dark Neon Glassmorphism UI
+    # Custom CSS
     st.markdown("""
     <style>
-        /* Base Background */
-        .stApp {
-            background-color: #0B0E14;
-            color: #E2E8F0;
-            font-family: 'Inter', sans-serif;
-        }
-
-        /* Top Title Engine Bar */
-        .header-box {
-            background: #111622;
-            border: 1px solid #1E293B;
-            border-radius: 12px;
-            padding: 16px;
-            margin-bottom: 20px;
-        }
-
-        /* Glassmorphic Metric Cards */
-        .metric-card {
-            background: rgba(17, 22, 34, 0.8);
-            border: 1px solid #1E293B;
-            border-radius: 10px;
-            padding: 14px;
-            text-align: left;
-        }
-        .metric-label {
-            font-size: 11px;
-            color: #94A3B8;
-            text-transform: uppercase;
-            letter-spacing: 0.5px;
-        }
-        .metric-value {
-            font-size: 22px;
-            font-weight: 700;
-            color: #F8FAFC;
-            margin-top: 4px;
-        }
-        .metric-sub {
-            font-size: 11px;
-            margin-top: 2px;
-        }
+        .stApp { background-color: #0B0E14; color: #E2E8F0; font-family: 'Inter', sans-serif; }
+        .header-box { background: #111622; border: 1px solid #1E293B; border-radius: 12px; padding: 16px; margin-bottom: 20px; }
+        .metric-card { background: rgba(17, 22, 34, 0.8); border: 1px solid #1E293B; border-radius: 10px; padding: 14px; text-align: left; }
+        .metric-label { font-size: 11px; color: #94A3B8; text-transform: uppercase; letter-spacing: 0.5px; }
+        .metric-value { font-size: 22px; font-weight: 700; color: #F8FAFC; margin-top: 4px; }
+        .metric-sub { font-size: 11px; margin-top: 2px; }
         .text-green { color: #10B981; }
-        .text-red { color: #EF4444; }
         .text-blue { color: #3B82F6; }
-
-        /* Neon Active State Banner */
-        .neon-bull-box {
-            background: rgba(6, 78, 59, 0.2);
-            border: 1px solid #10B981;
-            box-shadow: 0 0 15px rgba(16, 185, 129, 0.15);
-            border-radius: 10px;
-            padding: 16px;
-            margin: 20px 0;
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-        }
-
-        /* Table Styling */
-        div[data-testid="stDataFrame"] {
-            background: #111622;
-            border: 1px solid #1E293B;
-            border-radius: 10px;
-        }
+        .neon-bull-box { background: rgba(6, 78, 59, 0.2); border: 1px solid #10B981; box-shadow: 0 0 15px rgba(16, 185, 129, 0.15); border-radius: 10px; padding: 16px; margin: 20px 0; display: flex; align-items: center; justify-content: space-between; }
+        div[data-testid="stDataFrame"] { background: #111622; border: 1px solid #1E293B; border-radius: 10px; }
     </style>
     """, unsafe_allow_html=True)
+
+    st.sidebar.header("🔑 Kotak Neo API Credentials")
+    neo_key = st.sidebar.text_input("Consumer Key", type="password")
+    neo_secret = st.sidebar.text_input("Consumer Secret", type="password")
+    neo_pwd = st.sidebar.text_input("Neo Password", type="password")
+    neo_mob = st.sidebar.text_input("Mobile Number")
 
     init_micro_db()
     
     df = fetch_and_prepare_data(symbol="^NSEI", interval="3m", period="5d")
     if df.empty:
-        st.error("Failed to fetch live Nifty data.")
+        st.error("Failed to fetch Nifty data. Check Internet connection.")
         return
 
     hw_ret, hw_status, hw_bulls, hw_bears = fetch_heavyweight_performance()
     
-    nse = NSESessionScraper()
+    # Initialize Kotak Neo Real Data Feed
+    neo_engine = KotakNeoDataEngine(
+        consumer_key=neo_key,
+        consumer_secret=neo_secret,
+        neo_password=neo_pwd,
+        mobile_no=neo_mob
+    )
     latest_spot = float(df['Close'].iloc[-1])
-    pcr, call_chg, put_chg = nse.fetch_live_pcr_and_oi(spot_price=latest_spot)
-    vix, vix_chg = nse.fetch_live_vix()
+    pcr, call_chg, put_chg, vix, neo_status = neo_engine.fetch_live_pcr_and_vix(spot_price=latest_spot)
 
-    df, records = process_micro_matrix(df, nse_pcr=pcr, nse_call_chg=call_chg, nse_put_chg=put_chg, 
-                                       nse_vix=vix, nse_vix_chg=vix_chg, hw_ret=hw_ret, 
+    df, records = process_micro_matrix(df, neo_pcr=pcr, neo_call_chg=call_chg, neo_put_chg=put_chg, 
+                                       neo_vix=vix, neo_status=neo_status, hw_ret=hw_ret, 
                                        hw_status=hw_status, hw_bulls=hw_bulls, hw_bears=hw_bears)
 
     if records:
         save_to_sqlite(records)
         last = records[-1]
 
-        # Engine Title Header
-        st.markdown(f"""
+        st.markdown("""
         <div class="header-box">
-            <h2 style="margin:0; color:#F8FAFC; font-size: 22px;">⚡ Nifty 3-Min Micro-Structure & 12-Regime Matrix Engine</h2>
-            <p style="margin:4px 0 0 0; color:#64748B; font-size: 12px;">AI-Powered Micro Structure Analyzer • 12-State Regime Detection • Heavyweight Correlation Data</p>
+            <h2 style="margin:0; color:#F8FAFC; font-size: 22px;">⚡ Kotak Neo Live - Nifty 3-Min Micro-Structure Engine</h2>
+            <p style="margin:4px 0 0 0; color:#64748B; font-size: 12px;">Real Kotak Neo API Feed • 12-State Regime Detection • Heavyweight Correlation Data</p>
         </div>
         """, unsafe_allow_html=True)
 
-        # Top 5 Metric Cards (Glassmorphic)
         c1, c2, c3, c4, c5 = st.columns(5)
-        
         with c1:
-            st.markdown(f"""
-            <div class="metric-card">
-                <div class="metric-label">Spot Price</div>
-                <div class="metric-value">{last['spot_price']:.2f}</div>
-                <div class="metric-sub text-green">▲ Active Nifty 50</div>
-            </div>
-            """, unsafe_allow_html=True)
-
+            st.markdown(f'<div class="metric-card"><div class="metric-label">Spot Price</div><div class="metric-value">{last["spot_price"]:.2f}</div><div class="metric-sub text-green">▲ Active Nifty 50</div></div>', unsafe_allow_html=True)
         with c2:
-            st.markdown(f"""
-            <div class="metric-card">
-                <div class="metric-label">VWAP Distance</div>
-                <div class="metric-value">{last['vwap_distance_points']:.2f} pts</div>
-                <div class="metric-sub text-green">{last['vwap_distance_pct']:.2f}%</div>
-            </div>
-            """, unsafe_allow_html=True)
-
+            st.markdown(f'<div class="metric-card"><div class="metric-label">VWAP Distance</div><div class="metric-value">{last["vwap_distance_points"]:.2f} pts</div><div class="metric-sub text-green">{last["vwap_distance_pct"]:.2f}%</div></div>', unsafe_allow_html=True)
         with c3:
-            st.markdown(f"""
-            <div class="metric-card">
-                <div class="metric-label">VWAP ATR Stretch</div>
-                <div class="metric-value">{last['vwap_distance_atr']:.2f}x ATR</div>
-                <div class="metric-sub" style="color:#94A3B8;">ATR: {last['atr_14_points']:.2f} pts</div>
-            </div>
-            """, unsafe_allow_html=True)
-
+            st.markdown(f'<div class="metric-card"><div class="metric-label">VWAP ATR Stretch</div><div class="metric-value">{last["vwap_distance_atr"]:.2f}x ATR</div><div class="metric-sub" style="color:#94A3B8;">ATR: {last["atr_14_points"]:.2f} pts</div></div>', unsafe_allow_html=True)
         with c4:
-            st.markdown(f"""
-            <div class="metric-card">
-                <div class="metric-label">Alignment Score</div>
-                <div class="metric-value text-green">{last['alignment_score']:.2f}</div>
-                <div class="metric-sub text-green">{last['indicators_bullish_count']} Bull / {last['indicators_bearish_count']} Bear</div>
-            </div>
-            """, unsafe_allow_html=True)
-
+            st.markdown(f'<div class="metric-card"><div class="metric-label">Alignment Score</div><div class="metric-value text-green">{last["alignment_score"]:.2f}</div><div class="metric-sub text-green">{last["indicators_bullish_count"]} Bull / {last["indicators_bearish_count"]} Bear</div></div>', unsafe_allow_html=True)
         with c5:
-            st.markdown(f"""
-            <div class="metric-card">
-                <div class="metric-label">Time Window</div>
-                <div class="metric-value text-blue" style="font-size: 16px;">{last['time_window_zone']}</div>
-                <div class="metric-sub" style="color:#94A3B8;">Session Active</div>
-            </div>
-            """, unsafe_allow_html=True)
+            st.markdown(f'<div class="metric-card"><div class="metric-label">Kotak Feed Status</div><div class="metric-value text-blue" style="font-size: 16px;">{neo_status}</div><div class="metric-sub" style="color:#94A3B8;">Time: {last["time_window_zone"]}</div></div>', unsafe_allow_html=True)
 
-        # Active Neon Regime Banner
         st.markdown(f"""
         <div class="neon-bull-box">
             <div>
@@ -608,23 +542,20 @@ def main():
         </div>
         """, unsafe_allow_html=True)
 
-        # Secondary Grid Cards
         sc1, sc2, sc3, sc4, sc5 = st.columns(5)
         sc1.metric("VWAP Location", last['vwap_location_zone'])
-        sc2.metric("Real PCR (ATM ±5)", f"{pcr:.2f}" if pcr else "N/A")
-        sc3.metric("Real India VIX", f"{vix:.2f}" if vix else "N/A")
+        sc2.metric("Kotak PCR (ATM ±5)", f"{pcr:.2f}" if pcr else "OFFLINE")
+        sc3.metric("Kotak India VIX", f"{vix:.2f}" if vix else "OFFLINE")
         sc4.metric("ADX Strength", f"{last['adx_value']:.2f}")
         sc5.metric("RSI (14)", f"{last['rsi_14']:.2f}")
 
         st.markdown("---")
-
-        # SQLite Data Table
         st.subheader("📜 Recent Micro-Matrix Logs (SQLite Database)")
         conn = sqlite3.connect(DB_NAME)
         df_db = pd.read_sql_query("""
             SELECT timestamp, spot_price, vwap_location_zone, vwap_distance_atr, 
                    heavyweight_weighted_ret, heavyweight_status, alignment_score, 
-                   micro_regime_state, paper_signal 
+                   data_freshness_status, micro_regime_state, paper_signal 
             FROM market_micro_matrix 
             ORDER BY id DESC LIMIT 15
         """, conn)
