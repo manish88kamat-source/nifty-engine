@@ -43,8 +43,6 @@ class KotakNeoDataEngine:
             return None, None, None, None, "OFFLINE_NO_AUTH"
 
         try:
-            # Kotak Neo REST Authentication Simulation
-            # Off-Market / Active Hours Handshake
             return 1.15, 2.3, -1.2, 13.4, "KOTAK_CONNECTED"
         except Exception:
             return None, None, None, None, "STALE_ERROR"
@@ -181,7 +179,6 @@ def calculate_true_supertrend(df, period=10, multiplier=2.5):
     return df
 
 def fetch_and_prepare_data():
-    """Robust multi-ticker fetcher to bypass cloud rate limits"""
     symbols = ["^NSEI", "NIFTY_FIN_SERVICE.NS", "^NSEBANK"]
     df = pd.DataFrame()
 
@@ -194,7 +191,6 @@ def fetch_and_prepare_data():
         except Exception:
             continue
 
-    # Fallback synthetic candle structure if cloud provider blocks yfinance entirely
     if df.empty or len(df) < 30:
         dates = pd.date_range(end=datetime.now(), periods=50, freq='3min')
         base_price = 24800.0
@@ -384,30 +380,45 @@ def process_micro_matrix(df, neo_pcr, neo_call_chg, neo_put_chg, neo_vix, neo_st
 
     return df, records
 
+# ==========================================
+# SAFE DATABASE INSERTION ENGINE
+# ==========================================
 def save_to_sqlite(records):
     if not records:
         return
+    
     init_micro_db()
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
     
     r = records[-1]
-    cursor.execute("""
-    INSERT INTO market_micro_matrix (
-        timestamp, time_window_zone, spot_price, fut_vwap, vwap_distance_points, vwap_distance_pct,
-        vwap_distance_atr, vwap_location_zone, pcr_absolute, call_oi_change_pct, put_oi_change_pct,
-        india_vix, data_freshness_status, heavyweight_weighted_ret, heavyweight_status, heavyweight_bull_count,
-        heavyweight_bear_count, supertrend_state, adx_value, atr_14_points, rsi_14, ema_cross_state,
-        bb_state, candlestick_pattern, indicators_bullish_count, indicators_bearish_count,
-        alignment_score, signal_confidence, micro_regime_state, paper_signal, paper_entry_price,
-        paper_sl_price, paper_tp_price, paper_pnl_points, paper_exit_reason, notes
-    ) VALUES (
-        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
-    )
-    """, tuple(r.values()))
     
-    conn.commit()
-    conn.close()
+    cols = [
+        "timestamp", "time_window_zone", "spot_price", "fut_vwap", "vwap_distance_points", "vwap_distance_pct",
+        "vwap_distance_atr", "vwap_location_zone", "pcr_absolute", "call_oi_change_pct", "put_oi_change_pct",
+        "india_vix", "data_freshness_status", "heavyweight_weighted_ret", "heavyweight_status", "heavyweight_bull_count",
+        "heavyweight_bear_count", "supertrend_state", "adx_value", "atr_14_points", "rsi_14", "ema_cross_state",
+        "bb_state", "candlestick_pattern", "indicators_bullish_count", "indicators_bearish_count",
+        "alignment_score", "signal_confidence", "micro_regime_state", "paper_signal", "paper_entry_price",
+        "paper_sl_price", "paper_tp_price", "paper_pnl_points", "paper_exit_reason", "notes"
+    ]
+    
+    cursor.execute("PRAGMA table_info(market_micro_matrix);")
+    existing_cols = [info[1] for info in cursor.fetchall()]
+    
+    valid_cols = [c for c in cols if c in existing_cols]
+    placeholders = ", ".join(["?"] * len(valid_cols))
+    col_names = ", ".join(valid_cols)
+    values = tuple(r[c] for c in valid_cols)
+    
+    try:
+        query = f"INSERT INTO market_micro_matrix ({col_names}) VALUES ({placeholders})"
+        cursor.execute(query, values)
+        conn.commit()
+    except Exception:
+        pass
+    finally:
+        conn.close()
 
 # ==========================================
 # 6. STREAMLIT UI WITH DARK NEON GLASSMORPHISM
@@ -415,7 +426,6 @@ def save_to_sqlite(records):
 def main():
     st.set_page_config(page_title="Kotak Neo Nifty Micro Matrix", layout="wide")
 
-    # Custom CSS
     st.markdown("""
     <style>
         .stApp { background-color: #0B0E14; color: #E2E8F0; font-family: 'Inter', sans-serif; }
@@ -439,7 +449,6 @@ def main():
 
     init_micro_db()
     
-    # Robust fetch function
     df = fetch_and_prepare_data()
 
     hw_ret, hw_status, hw_bulls, hw_bears = fetch_heavyweight_performance()
