@@ -23,6 +23,9 @@ HEAVYWEIGHTS = {
     "LT.NS": 3.8
 }
 
+# ==========================================
+# 1. KOTAK NEO DIRECT REST API ENGINE
+# ==========================================
 class KotakNeoDataEngine:
     def __init__(self, consumer_key="", consumer_secret="", neo_password="", mobile_no=""):
         self.consumer_key = consumer_key
@@ -39,6 +42,9 @@ class KotakNeoDataEngine:
         except Exception:
             return 1.20, 0.013, 13.50, "STALE_ERROR"
 
+# ==========================================
+# 2. HEAVYWEIGHT PERFORMANCE ENGINE
+# ==========================================
 def fetch_heavyweight_performance():
     try:
         tickers = list(HEAVYWEIGHTS.keys())
@@ -63,6 +69,9 @@ def fetch_heavyweight_performance():
     except Exception:
         return 0.0, "NEUTRAL", 0, 0
 
+# ==========================================
+# 3. DATABASE SCHEMA (36 COLUMNS DATA MINING)
+# ==========================================
 def init_micro_db():
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
@@ -72,7 +81,10 @@ def init_micro_db():
         timestamp               TEXT NOT NULL,
         time_window_zone        TEXT,
         spot_price              REAL,
+        fut_price               REAL,
         fut_vwap                REAL,
+        spot_sma_20             REAL,
+        sma_vwap_spread         REAL,
         vwap_distance_points    REAL,
         vwap_distance_pct       REAL,
         vwap_distance_atr       REAL,
@@ -110,16 +122,9 @@ def init_micro_db():
     conn.commit()
     conn.close()
 
-def calculate_session_vwap(df):
-    tp = (df['High'] + df['Low'] + df['Close']) / 3
-    pv = tp * df['Volume']
-    df['Date_Group'] = df.index.date
-    df['Cum_PV'] = pv.groupby(df['Date_Group']).cumsum()
-    df['Cum_Vol'] = df['Volume'].groupby(df['Date_Group']).cumsum()
-    df['Session_VWAP'] = df['Cum_PV'] / df['Cum_Vol']
-    df.drop(columns=['Date_Group', 'Cum_PV', 'Cum_Vol'], inplace=True)
-    return df
-
+# ==========================================
+# 4. DUAL ENGINE DATA PIPELINE (SPOT SMA + FUTURES VWAP)
+# ==========================================
 def calculate_true_supertrend(df, period=10, multiplier=2.5):
     hl2 = (df['High'] + df['Low']) / 2
     atr = ta.volatility.average_true_range(df['High'], df['Low'], df['Close'], window=period)
@@ -162,20 +167,25 @@ def calculate_true_supertrend(df, period=10, multiplier=2.5):
     return df
 
 def fetch_and_prepare_data():
-    symbols = ["^NSEI", "NIFTY_FIN_SERVICE.NS", "^NSEBANK"]
-    df = pd.DataFrame()
+    try:
+        fut_ticker = yf.Ticker("NIFTY=F")
+        spot_ticker = yf.Ticker("^NSEI")
+        
+        fut_df = fut_ticker.history(period="5d", interval="5m")
+        spot_df = spot_ticker.history(period="5d", interval="5m")
+        
+        if fut_df.empty or spot_df.empty:
+            raise ValueError("Empty data feed")
 
-    # Fixed yfinance valid interval to 5m (3m is invalid in yfinance)
-    for sym in symbols:
-        try:
-            ticker = yf.Ticker(sym)
-            df = ticker.history(period="5d", interval="5m")
-            if not df.empty and len(df) >= 20:
-                break
-        except Exception:
-            continue
-
-    if df.empty or len(df) < 20:
+        df = pd.DataFrame()
+        df['Close'] = fut_df['Close']
+        df['Spot_Close'] = spot_df['Close']
+        df['High'] = fut_df['High']
+        df['Low'] = fut_df['Low']
+        df['Open'] = fut_df['Open']
+        df['Volume'] = fut_df['Volume']
+        df.dropna(inplace=True)
+    except Exception:
         dates = pd.date_range(end=datetime.now(), periods=50, freq='5min')
         base_price = 24874.05
         np.random.seed(42)
@@ -185,11 +195,23 @@ def fetch_and_prepare_data():
             'High': closes + 5,
             'Low': closes - 5,
             'Close': closes,
+            'Spot_Close': closes - 10,
             'Volume': np.random.randint(1000, 50000, size=50)
         }, index=dates)
 
-    df.dropna(inplace=True)
-    df = calculate_session_vwap(df)
+    # Futures Volume VWAP
+    tp = (df['High'] + df['Low'] + df['Close']) / 3
+    pv = tp * df['Volume']
+    df['Date_Group'] = df.index.date
+    df['Cum_PV'] = pv.groupby(df['Date_Group']).cumsum()
+    df['Cum_Vol'] = df['Volume'].groupby(df['Date_Group']).cumsum()
+    df['Session_VWAP'] = df['Cum_PV'] / df['Cum_Vol']
+    df.drop(columns=['Date_Group', 'Cum_PV', 'Cum_Vol'], inplace=True)
+
+    # Spot Index SMA 20
+    df['Spot_SMA_20'] = df['Spot_Close'].rolling(window=20).mean()
+    df['SMA_VWAP_Spread'] = df['Spot_SMA_20'] - df['Session_VWAP']
+
     df = calculate_true_supertrend(df, period=10, multiplier=2.5)
 
     df['ATR'] = ta.volatility.average_true_range(df['High'], df['Low'], df['Close'], window=14)
@@ -219,6 +241,9 @@ def fetch_and_prepare_data():
 
     return df
 
+# ==========================================
+# 5. CANDLE-BY-CANDLE MATRIX PROCESSOR
+# ==========================================
 def process_micro_matrix(df, neo_pcr, neo_pcr_slope, neo_vix, neo_status, hw_ret, hw_status, hw_bulls, hw_bears):
     if df.empty or len(df) < 15:
         return df, []
@@ -236,18 +261,21 @@ def process_micro_matrix(df, neo_pcr, neo_pcr_slope, neo_vix, neo_status, hw_ret
         elif time(14, 0) <= curr_time <= time(15, 15): time_zone = "POWER_HOUR"
         else: time_zone = "MID_DAY_STABLE"
 
-        spot = float(row['Close'])
-        vwap = float(row['Session_VWAP']) if not np.isnan(row['Session_VWAP']) else spot
+        spot = float(row['Spot_Close']) if not np.isnan(row['Spot_Close']) else float(row['Close'])
+        fut = float(row['Close'])
+        vwap = float(row['Session_VWAP']) if not np.isnan(row['Session_VWAP']) else fut
+        sma_20 = float(row['Spot_SMA_20']) if not np.isnan(row['Spot_SMA_20']) else spot
+        spread = float(row['SMA_VWAP_Spread']) if not np.isnan(row['SMA_VWAP_Spread']) else 0.0
         atr = float(row['ATR']) if not np.isnan(row['ATR']) else 15.0
 
-        dist_pts = spot - vwap
+        dist_pts = fut - vwap
         dist_pct = (dist_pts / vwap) * 100
         dist_atr = dist_pts / atr if atr > 0 else 0.0
 
         loc_zone = "NEAR_VWAP" if abs(dist_pct) <= 0.15 else ("ABOVE_VWAP" if dist_pct > 0.15 else "BELOW_VWAP")
 
         bull_cnt, bear_cnt = 0, 0
-        if spot > vwap: bull_cnt += 1
+        if fut > vwap: bull_cnt += 1
         else: bear_cnt += 1
 
         if row['EMA_5'] > row['EMA_13']:
@@ -270,10 +298,10 @@ def process_micro_matrix(df, neo_pcr, neo_pcr_slope, neo_vix, neo_status, hw_ret
         else: bear_cnt += 1
 
         bb_bw = float(row['BB_Bandwidth']) if not np.isnan(row['BB_Bandwidth']) else 0.02
-        if spot > row['BB_Upper']:
+        if fut > row['BB_Upper']:
             bb_state = "EXPANSION_UPPER"
             bull_cnt += 1
-        elif spot < row['BB_Lower']:
+        elif fut < row['BB_Lower']:
             bb_state = "EXPANSION_LOWER"
             bear_cnt += 1
         elif bb_bw < 0.015: bb_state = "SQUEEZE"
@@ -303,27 +331,30 @@ def process_micro_matrix(df, neo_pcr, neo_pcr_slope, neo_vix, neo_status, hw_ret
         if active_position is not None:
             pos_type, entry_p, sl_p, tp_p = active_position['type'], active_position['entry'], active_position['sl'], active_position['tp']
             if pos_type == "BUY_CALL":
-                if spot <= sl_p: pnl, exit_reason, active_position = sl_p - entry_p, "STOP_LOSS_HIT", None
-                elif spot >= tp_p: pnl, exit_reason, active_position = tp_p - entry_p, "TARGET_HIT", None
-                elif align_score < -0.2: pnl, exit_reason, active_position = spot - entry_p, "REGIME_FLIP_EXIT", None
+                if fut <= sl_p: pnl, exit_reason, active_position = sl_p - entry_p, "STOP_LOSS_HIT", None
+                elif fut >= tp_p: pnl, exit_reason, active_position = tp_p - entry_p, "TARGET_HIT", None
+                elif align_score < -0.2: pnl, exit_reason, active_position = fut - entry_p, "REGIME_FLIP_EXIT", None
             elif pos_type == "BUY_PUT":
-                if spot >= sl_p: pnl, exit_reason, active_position = entry_p - sl_p, "STOP_LOSS_HIT", None
-                elif spot <= tp_p: pnl, exit_reason, active_position = entry_p - tp_p, "TARGET_HIT", None
-                elif align_score > 0.2: pnl, exit_reason, active_position = entry_p - spot, "REGIME_FLIP_EXIT", None
+                if fut >= sl_p: pnl, exit_reason, active_position = entry_p - sl_p, "STOP_LOSS_HIT", None
+                elif fut <= tp_p: pnl, exit_reason, active_position = entry_p - tp_p, "TARGET_HIT", None
+                elif align_score > 0.2: pnl, exit_reason, active_position = entry_p - fut, "REGIME_FLIP_EXIT", None
 
         if active_position is None:
             if align_score >= 0.6 and confidence >= 65.0:
                 paper_sig = "BUY_CALL"
-                active_position = {'type': "BUY_CALL", 'entry': spot, 'sl': spot - (1.5 * atr), 'tp': spot + (2.5 * atr)}
+                active_position = {'type': "BUY_CALL", 'entry': fut, 'sl': fut - (1.5 * atr), 'tp': fut + (2.5 * atr)}
             elif align_score <= -0.6 and confidence >= 65.0:
                 paper_sig = "BUY_PUT"
-                active_position = {'type': "BUY_PUT", 'entry': spot, 'sl': spot + (1.5 * atr), 'tp': spot - (2.5 * atr)}
+                active_position = {'type': "BUY_PUT", 'entry': fut, 'sl': fut + (1.5 * atr), 'tp': fut - (2.5 * atr)}
 
         record = {
             "timestamp": str(ts),
             "time_window_zone": time_zone,
             "spot_price": spot,
+            "fut_price": fut,
             "fut_vwap": vwap,
+            "spot_sma_20": sma_20,
+            "sma_vwap_spread": spread,
             "vwap_distance_points": float(dist_pts),
             "vwap_distance_pct": float(dist_pct),
             "vwap_distance_atr": float(dist_atr),
@@ -350,7 +381,7 @@ def process_micro_matrix(df, neo_pcr, neo_pcr_slope, neo_vix, neo_status, hw_ret
             "signal_confidence": float(confidence),
             "micro_regime_state": micro_regime,
             "paper_signal": paper_sig,
-            "paper_entry_price": spot if paper_sig != "NO_TRADE" else 0.0,
+            "paper_entry_price": fut if paper_sig != "NO_TRADE" else 0.0,
             "paper_sl_price": active_position['sl'] if active_position else 0.0,
             "paper_tp_price": active_position['tp'] if active_position else 0.0,
             "paper_pnl_points": float(pnl),
@@ -361,6 +392,9 @@ def process_micro_matrix(df, neo_pcr, neo_pcr_slope, neo_vix, neo_status, hw_ret
 
     return df, records
 
+# ==========================================
+# 6. SAFE DATABASE INSERTION
+# ==========================================
 def save_to_sqlite(records):
     if not records:
         return
@@ -372,13 +406,13 @@ def save_to_sqlite(records):
     r = records[-1]
     
     cols = [
-        "timestamp", "time_window_zone", "spot_price", "fut_vwap", "vwap_distance_points", "vwap_distance_pct",
-        "vwap_distance_atr", "vwap_location_zone", "pcr_absolute", "call_oi_change_pct", "put_oi_change_pct",
-        "india_vix", "data_freshness_status", "heavyweight_weighted_ret", "heavyweight_status", "heavyweight_bull_count",
-        "heavyweight_bear_count", "supertrend_state", "adx_value", "atr_14_points", "rsi_14", "ema_cross_state",
-        "bb_state", "candlestick_pattern", "indicators_bullish_count", "indicators_bearish_count",
-        "alignment_score", "signal_confidence", "micro_regime_state", "paper_signal", "paper_entry_price",
-        "paper_sl_price", "paper_tp_price", "paper_pnl_points", "paper_exit_reason", "notes"
+        "timestamp", "time_window_zone", "spot_price", "fut_price", "fut_vwap", "spot_sma_20", "sma_vwap_spread",
+        "vwap_distance_points", "vwap_distance_pct", "vwap_distance_atr", "vwap_location_zone", "pcr_absolute",
+        "call_oi_change_pct", "put_oi_change_pct", "india_vix", "data_freshness_status", "heavyweight_weighted_ret",
+        "heavyweight_status", "heavyweight_bull_count", "heavyweight_bear_count", "supertrend_state", "adx_value",
+        "atr_14_points", "rsi_14", "ema_cross_state", "bb_state", "candlestick_pattern", "indicators_bullish_count",
+        "indicators_bearish_count", "alignment_score", "signal_confidence", "micro_regime_state", "paper_signal",
+        "paper_entry_price", "paper_sl_price", "paper_tp_price", "paper_pnl_points", "paper_exit_reason", "notes"
     ]
     
     cursor.execute("PRAGMA table_info(market_micro_matrix);")
@@ -398,6 +432,9 @@ def save_to_sqlite(records):
     finally:
         conn.close()
 
+# ==========================================
+# 7. STREAMLIT DARK NEON UI ENGINE
+# ==========================================
 def main():
     st.set_page_config(page_title="Nifty Micro-Structure Engine", layout="wide", initial_sidebar_state="collapsed")
 
@@ -454,7 +491,7 @@ def main():
         neo_password=neo_pwd,
         mobile_no=neo_mob
     )
-    latest_spot = float(df['Close'].iloc[-1])
+    latest_spot = float(df['Spot_Close'].iloc[-1]) if 'Spot_Close' in df.columns else float(df['Close'].iloc[-1])
     pcr, pcr_slope, vix, neo_status = neo_engine.fetch_live_pcr_and_vix(spot_price=latest_spot)
 
     df, records = process_micro_matrix(
@@ -478,8 +515,8 @@ def main():
         st.markdown(f"""
         <div class="top-header">
             <div>
-                <div class="header-title">⚡ Nifty 3-Min Micro-Structure & 12-Regime Matrix Engine</div>
-                <div class="header-sub">AI-Powered Micro Structure Analyzer • 12-State Regime Detection • Real-Time Market Intelligence</div>
+                <div class="header-title">⚡ Nifty 3-Min Micro-Structure & SMA-VWAP Correlation Engine</div>
+                <div class="header-sub">Spot Index SMA 20 vs Futures Volume VWAP Divergence Mining • Real-Time Market Intelligence</div>
             </div>
             <div class="header-right">
                 ● Last Updated: {now_str}<br>
@@ -489,14 +526,14 @@ def main():
 
         <div class="card-row">
             <div class="metric-box">
-                <div class="metric-title">Spot Price <span>📈</span></div>
+                <div class="metric-title">Spot Index Price <span>📈</span></div>
                 <div class="metric-num">{last["spot_price"]:,.2f}</div>
-                <div class="metric-green">▲ 98.35 (0.40%)</div>
+                <div class="metric-green">Futures: {last["fut_price"]:,.2f}</div>
             </div>
             <div class="metric-box">
-                <div class="metric-title">VWAP Distance <span>⚖️</span></div>
-                <div class="metric-num">{last["vwap_distance_points"]:.2f} <span style="font-size:14px; font-weight:normal; color:#94A3B8;">pts</span></div>
-                <div class="metric-green">{last["vwap_distance_pct"]:.2f}%</div>
+                <div class="metric-title">Spot SMA 20 vs Fut VWAP <span>⚖️</span></div>
+                <div class="metric-num">{last["sma_vwap_spread"]:.2f} <span style="font-size:14px; font-weight:normal; color:#94A3B8;">spread</span></div>
+                <div class="metric-green">SMA: {last["spot_sma_20"]:.1f} | VWAP: {last["fut_vwap"]:.1f}</div>
             </div>
             <div class="metric-box">
                 <div class="metric-title">VWAP ATR Stretch <span>📊</span></div>
@@ -522,9 +559,9 @@ def main():
                 <div class="bull-icon-circle">🐂</div>
                 <div>
                     <div class="regime-title-text">
-                        CURRENT 3-MIN STATE: <span style="color:#10B981;">🟢 {last['micro_regime_state']} (Aggressive Long Setup)</span>
+                        CURRENT 3-MIN STATE: <span style="color:#10B981;">🟢 {last['micro_regime_state']}</span>
                     </div>
-                    <div class="regime-desc">Price is above VWAP with strong bullish alignment and trending momentum.</div>
+                    <div class="regime-desc">Futures Volume VWAP is aligned with Spot SMA 20 Trend.</div>
                 </div>
             </div>
             <div>
@@ -535,7 +572,7 @@ def main():
 
         <div class="grid-10">
             <div class="small-card"><div class="small-title">📍 VWAP Location</div><div class="small-val-green">{last['vwap_location_zone']}</div></div>
-            <div class="small-card"><div class="small-title">📈 VWAP Distance (ATR)</div><div class="small-val-green">{last['vwap_distance_atr']:.2f}x ATR</div></div>
+            <div class="small-card"><div class="small-title">📈 SMA-VWAP Spread</div><div class="small-val-green">{last['sma_vwap_spread']:.2f}</div></div>
             <div class="small-card"><div class="small-title">⚖️ PCR (Absolute)</div><div class="small-val-purple">{last['pcr_absolute']:.2f}</div></div>
             <div class="small-card"><div class="small-title">📈 PCR Slope (5m)</div><div class="small-val-green">{last['call_oi_change_pct']:.3f}</div></div>
             <div class="small-card"><div class="small-title">🛡️ India VIX</div><div class="small-val-blue">{last['india_vix']:.2f}</div></div>
@@ -548,12 +585,12 @@ def main():
         </div>
         """, unsafe_allow_html=True)
 
-        st.markdown("##### 📄 RECENT MICRO-MATRIX LOGS (SQLite Database)")
+        st.markdown("##### 📄 RECENT CORRELATION & MICRO-MATRIX LOGS (SQLite Data Mining)")
         conn = sqlite3.connect(DB_NAME)
         df_db = pd.read_sql_query("""
-            SELECT timestamp as Timestamp, spot_price as "Spot Price", vwap_location_zone as "VWAP Location", 
-                   vwap_distance_atr as "VWAP Distance (ATR)", alignment_score as "Alignment Score", 
-                   micro_regime_state as "Micro Regime State", paper_signal as "Paper Signal" 
+            SELECT timestamp as Timestamp, spot_price as "Spot Index", fut_price as "Futures Price",
+                   spot_sma_20 as "Spot SMA 20", fut_vwap as "Futures VWAP", sma_vwap_spread as "SMA-VWAP Spread",
+                   alignment_score as "Alignment Score", micro_regime_state as "Micro Regime", paper_signal as "Signal"
             FROM market_micro_matrix 
             ORDER BY id DESC LIMIT 15
         """, conn)
