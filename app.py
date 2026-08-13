@@ -415,33 +415,77 @@ def save_to_sqlite(records):
         conn.close()
 
 def main():
-    st.set_page_config(page_title="Nifty Micro-Structure Engine", layout="wide", initial_sidebar_state="collapsed")
+    st.set_page_config(page_title="Nifty Micro Engine", layout="wide", initial_sidebar_state="collapsed")
 
+    # CSS FLEX GRID LAYOUT
     st.markdown("""
     <style>
         .stApp { background-color: #07090E; color: #E2E8F0; font-family: 'Inter', sans-serif; }
         
-        .top-header { display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #1E293B; padding-bottom: 12px; margin-bottom: 20px; }
-        .header-title { font-size: 20px; font-weight: 800; color: #FFFFFF; display: flex; align-items: center; gap: 8px; }
+        .top-header { display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #1E293B; padding-bottom: 10px; margin-bottom: 15px; }
+        .header-title { font-size: 18px; font-weight: 800; color: #FFFFFF; }
         .header-sub { font-size: 11px; color: #64748B; margin-top: 2px; }
         .header-right { text-align: right; font-size: 11px; color: #10B981; font-weight: 600; }
         
-        .card-row { display: grid; grid-template-columns: repeat(5, 1fr); gap: 12px; margin-bottom: 20px; }
-        .metric-box { background: #0F141C; border: 1px solid #1E293B; border-radius: 10px; padding: 14px; position: relative; }
-        .metric-title { font-size: 11px; color: #94A3B8; font-weight: 600; display: flex; justify-content: space-between; align-items: center; }
-        .metric-num { font-size: 22px; font-weight: 800; color: #FFFFFF; margin: 8px 0 4px 0; }
-        .metric-green { color: #10B981; font-size: 11px; font-weight: 600; }
-        .metric-blue { color: #3B82F6; font-size: 14px; font-weight: 700; }
+        /* TOP 5 METRIC CARDS GRID */
+        .top-flex-grid {
+            display: grid;
+            grid-template-columns: repeat(5, 1fr);
+            gap: 10px;
+            margin-bottom: 15px;
+        }
         
-        .regime-box { background: rgba(6, 78, 59, 0.15); border: 1px solid #10B981; border-radius: 10px; padding: 16px; display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; }
-        .regime-left { display: flex; align-items: center; gap: 14px; }
-        .bull-icon-circle { background: #065F46; border: 1px solid #10B981; border-radius: 50%; width: 42px; height: 42px; display: flex; align-items: center; justify-content: center; font-size: 20px; }
-        .regime-title-text { font-size: 15px; font-weight: 800; color: #10B981; display: flex; align-items: center; gap: 8px; }
-        .regime-desc { font-size: 12px; color: #94A3B8; margin-top: 2px; }
-        .signal-btn { background: #10B981; color: #07090E; padding: 8px 18px; border-radius: 6px; font-weight: 800; font-size: 13px; letter-spacing: 0.5px; }
+        .metric-box {
+            background: #0F141C;
+            border: 1px solid #1E293B;
+            border-radius: 8px;
+            padding: 10px;
+        }
+        .metric-title { font-size: 10px; color: #94A3B8; font-weight: 600; text-transform: uppercase; }
+        .metric-num { font-size: 18px; font-weight: 800; color: #FFFFFF; margin: 4px 0; }
+        .metric-green { color: #10B981; font-size: 10px; font-weight: 600; }
+        .metric-blue { color: #3B82F6; font-size: 12px; font-weight: 700; }
+        
+        /* REGIME BANNER */
+        .regime-box {
+            background: rgba(6, 78, 59, 0.15);
+            border: 1px solid #10B981;
+            border-radius: 8px;
+            padding: 12px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 15px;
+        }
+        .regime-left { display: flex; align-items: center; gap: 10px; }
+        .bull-icon-circle { background: #065F46; border: 1px solid #10B981; border-radius: 50%; width: 34px; height: 34px; display: flex; align-items: center; justify-content: center; font-size: 16px; }
+        .regime-title-text { font-size: 13px; font-weight: 800; color: #10B981; }
+        .regime-desc { font-size: 10px; color: #94A3B8; }
+        .signal-btn { background: #10B981; color: #07090E; padding: 5px 12px; border-radius: 6px; font-weight: 800; font-size: 11px; }
+        
+        /* SIDE-BY-SIDE 2-COLUMN CSS FLEX GRID FOR INDICATORS */
+        .flex-indicator-grid {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 10px;
+            margin-bottom: 20px;
+        }
+        
+        .indicator-card {
+            background: #0F141C;
+            border: 1px solid #1E293B;
+            border-radius: 8px;
+            padding: 10px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .ind-label { font-size: 11px; color: #94A3B8; font-weight: 600; }
+        .ind-value { font-size: 13px; font-weight: 800; color: #10B981; }
         
         @media (max-width: 768px) {
-            .card-row { grid-template-columns: repeat(2, 1fr); }
+            .top-flex-grid { grid-template-columns: repeat(2, 1fr); }
+            .flex-indicator-grid { grid-template-columns: repeat(2, 1fr); }
         }
     </style>
     """, unsafe_allow_html=True)
@@ -485,89 +529,104 @@ def main():
         ist = pytz.timezone('Asia/Kolkata')
         now_str = datetime.now(ist).strftime("%d %b %Y %H:%M:%S")
 
+        # 1. TOP HEADER & TOP 5 METRICS BOXES
         st.markdown(f"""
         <div class="top-header">
             <div>
-                <div class="header-title">⚡ Nifty 3-Min Micro-Structure & SMA-VWAP Correlation Engine</div>
-                <div class="header-sub">Spot Index SMA 20 vs Futures Volume VWAP Divergence Mining • Real-Time Market Intelligence</div>
+                <div class="header-title">⚡ Nifty 3-Min Micro Engine</div>
+                <div class="header-sub">Spot SMA 20 vs Futures Volume VWAP Correlation Mining</div>
             </div>
             <div class="header-right">
-                ● Last Updated: {now_str}<br>
-                <span style="color:#64748B; font-weight:normal;">3-Min Auto Refresh 🔄</span>
+                ● {now_str}<br>
+                <span style="color:#64748B;">3-Min Auto Refresh 🔄</span>
             </div>
         </div>
 
-        <div class="card-row">
+        <div class="top-flex-grid">
             <div class="metric-box">
-                <div class="metric-title">Spot Index Price <span>📈</span></div>
+                <div class="metric-title">Spot Index</div>
                 <div class="metric-num">{last["spot_price"]:,.2f}</div>
-                <div class="metric-green">Futures: {last["fut_price"]:,.2f}</div>
+                <div class="metric-green">Fut: {last["fut_price"]:,.2f}</div>
             </div>
             <div class="metric-box">
-                <div class="metric-title">Spot SMA 20 vs Fut VWAP <span>⚖️</span></div>
-                <div class="metric-num">{last["sma_vwap_spread"]:.2f} <span style="font-size:14px; font-weight:normal; color:#94A3B8;">spread</span></div>
-                <div class="metric-green">SMA: {last["spot_sma_20"]:.1f} | VWAP: {last["fut_vwap"]:.1f}</div>
+                <div class="metric-title">SMA-VWAP Spread</div>
+                <div class="metric-num">{last["sma_vwap_spread"]:.2f}</div>
+                <div class="metric-green">SMA:{last["spot_sma_20"]:.1f} | VWAP:{last["fut_vwap"]:.1f}</div>
             </div>
             <div class="metric-box">
-                <div class="metric-title">VWAP ATR Stretch <span>📊</span></div>
-                <div class="metric-num">{last["vwap_distance_atr"]:.2f}x ATR</div>
-                <div style="font-size:11px; color:#94A3B8;">ATR: {last["atr_14_points"]:.2f} pts</div>
+                <div class="metric-title">VWAP ATR Stretch</div>
+                <div class="metric-num">{last["vwap_distance_atr"]:.2f}x</div>
+                <div style="font-size:10px; color:#94A3B8;">ATR: {last["atr_14_points"]:.2f}</div>
             </div>
             <div class="metric-box">
-                <div class="metric-title">Alignment Score <span>🎯</span></div>
+                <div class="metric-title">Alignment Score</div>
                 <div class="metric-num" style="color:#10B981;">{last["alignment_score"]:.2f}</div>
                 <div class="metric-green">{last["indicators_bullish_count"]} Bull / {last["indicators_bearish_count"]} Bear</div>
             </div>
             <div class="metric-box">
-                <div class="metric-title">Time Window <span>🕒</span></div>
+                <div class="metric-title">Time Window</div>
                 <div class="metric-num metric-blue">{last["time_window_zone"]}</div>
-                <div style="font-size:11px; color:#94A3B8;">14:00 - 15:15</div>
             </div>
         </div>
 
-        <div style="font-size:11px; font-weight:700; color:#94A3B8; letter-spacing:1px; margin-bottom:8px;">🎯 ACTIVE MICRO REGIME STATE</div>
-
+        <!-- 2. REGIME BANNER -->
         <div class="regime-box">
             <div class="regime-left">
                 <div class="bull-icon-circle">🐂</div>
                 <div>
-                    <div class="regime-title-text">
-                        CURRENT 3-MIN STATE: <span style="color:#10B981;">🟢 {last['micro_regime_state']}</span>
-                    </div>
-                    <div class="regime-desc">Futures Volume VWAP is aligned with Spot SMA 20 Trend.</div>
+                    <div class="regime-title-text">REGIME: {last['micro_regime_state']}</div>
+                    <div class="regime-desc">Futures Volume VWAP aligned with Spot SMA 20</div>
                 </div>
             </div>
             <div>
-                <div style="font-size:10px; color:#94A3B8; text-align:right; margin-bottom:3px;">Paper Signal</div>
                 <div class="signal-btn">{last['paper_signal']}</div>
             </div>
         </div>
+
+        <!-- 3. COMPACT 2-COLUMN SIDE-BY-SIDE INDICATORS BOXES -->
+        <div style="font-size:11px; font-weight:700; color:#94A3B8; margin-bottom:8px;">📊 MICRO INDICATOR MATRIX</div>
+        <div class="flex-indicator-grid">
+            <div class="indicator-card"><span class="ind-label">📍 VWAP Location</span><span class="ind-value">{last['vwap_location_zone']}</span></div>
+            <div class="indicator-card"><span class="ind-label">📈 SMA-VWAP Spread</span><span class="ind-value">{last['sma_vwap_spread']:.2f}</span></div>
+            <div class="indicator-card"><span class="ind-label">⚖️ Kotak PCR</span><span class="ind-value" style="color:#A855F7;">{last['pcr_absolute']:.2f}</span></div>
+            <div class="indicator-card"><span class="ind-label">📈 PCR Slope (5m)</span><span class="ind-value">{last['call_oi_change_pct']:.3f}</span></div>
+            <div class="indicator-card"><span class="ind-label">🛡️ India VIX</span><span class="ind-value" style="color:#3B82F6;">{last['india_vix']:.2f}</span></div>
+            <div class="indicator-card"><span class="ind-label">📊 ADX Strength</span><span class="ind-value" style="color:#F59E0B;">{last['adx_value']:.2f}</span></div>
+            <div class="indicator-card"><span class="ind-label">🟣 RSI (14)</span><span class="ind-value" style="color:#A855F7;">{last['rsi_14']:.2f}</span></div>
+            <div class="indicator-card"><span class="ind-label">🎹 BB State</span><span class="ind-value" style="color:#3B82F6;">{last['bb_state']}</span></div>
+            <div class="indicator-card"><span class="ind-label">🕯️ Pattern</span><span class="ind-value" style="color:#FFFFFF;">{last['candlestick_pattern']}</span></div>
+            <div class="indicator-card"><span class="ind-label">📈 Supertrend</span><span class="ind-value">{last['supertrend_state']}</span></div>
+        </div>
         """, unsafe_allow_html=True)
 
-        # FIXED TRADINGVIEW ADVANCED EMBED WIDGET (No restriction pop-up)
+        # 4. CHART BELOW INDICATORS
         st.subheader("📈 Live Nifty TradingView Chart")
-        tradingview_html = """
-        <div class="tradingview-widget-container" style="height:500px;width:100%;">
-          <iframe src="https://s.tradingview.com/widgetembed/?frameElementId=tradingview_chart&symbol=NSE%3ANIFTY1!&interval=3&hidesidetoolbar=0&symboledit=1&saveimage=1&toolbarbg=f1f3f6&studies=%5B%5D&theme=dark&style=1&timezone=Asia%2FKolkata" style="width: 100%; height: 500px; border: none;"></iframe>
+        tradingview_script = """
+        <div class="tradingview-widget-container" style="height:480px;width:100%;">
+          <div id="tradingview_chart_element" style="height:480px;width:100%;"></div>
+          <script type="text/javascript" src="https://s3.tradingview.com/tv.js"></script>
+          <script type="text/javascript">
+          new TradingView.widget(
+          {
+            "autosize": true,
+            "symbol": "NIFTY",
+            "interval": "3",
+            "timezone": "Asia/Kolkata",
+            "theme": "dark",
+            "style": "1",
+            "locale": "in",
+            "toolbar_bg": "#f1f3f6",
+            "enable_publishing": false,
+            "allow_symbol_change": true,
+            "container_id": "tradingview_chart_element"
+          }
+          );
+          </script>
         </div>
         """
-        components.html(tradingview_html, height=520)
+        components.html(tradingview_script, height=500)
 
-        # NATIVE COMPACT METRICS GRID (Responsive & Clean on Mobile)
-        g1, g2, g3, g4, g5 = st.columns(5)
-        g1.metric("VWAP Location", last['vwap_location_zone'])
-        g2.metric("SMA-VWAP Spread", f"{last['sma_vwap_spread']:.2f}")
-        g3.metric("Kotak PCR", f"{last['pcr_absolute']:.2f}")
-        g4.metric("PCR Slope (5m)", f"{last['call_oi_change_pct']:.3f}")
-        g5.metric("India VIX", f"{last['india_vix']:.2f}")
-
-        g6, g7, g8, g9, g10 = st.columns(5)
-        g6.metric("ADX Strength", f"{last['adx_value']:.2f}")
-        g7.metric("RSI (14)", f"{last['rsi_14']:.2f}")
-        g8.metric("BB State", last['bb_state'])
-        g9.metric("Candle Pattern", last['candlestick_pattern'])
-        g10.metric("Supertrend", last['supertrend_state'])
-
+        # 5. BOTTOM SQLITE DATA LOGS
         st.markdown("---")
         st.markdown("##### 📄 RECENT CORRELATION & MICRO-MATRIX LOGS (SQLite Data Mining)")
         
