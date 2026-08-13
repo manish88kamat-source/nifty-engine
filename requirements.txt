@@ -4,5 +4,4 @@ numpy
 yfinance
 ta
 requests
-neo_api_client
 pyotp
