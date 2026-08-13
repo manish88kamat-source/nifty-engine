@@ -417,7 +417,6 @@ def save_to_sqlite(records):
 def main():
     st.set_page_config(page_title="Nifty Micro Engine", layout="wide", initial_sidebar_state="collapsed")
 
-    # CSS FLEX GRID LAYOUT
     st.markdown("""
     <style>
         .stApp { background-color: #07090E; color: #E2E8F0; font-family: 'Inter', sans-serif; }
@@ -427,7 +426,6 @@ def main():
         .header-sub { font-size: 11px; color: #64748B; margin-top: 2px; }
         .header-right { text-align: right; font-size: 11px; color: #10B981; font-weight: 600; }
         
-        /* TOP 5 METRIC CARDS GRID */
         .top-flex-grid {
             display: grid;
             grid-template-columns: repeat(5, 1fr);
@@ -446,7 +444,6 @@ def main():
         .metric-green { color: #10B981; font-size: 10px; font-weight: 600; }
         .metric-blue { color: #3B82F6; font-size: 12px; font-weight: 700; }
         
-        /* REGIME BANNER */
         .regime-box {
             background: rgba(6, 78, 59, 0.15);
             border: 1px solid #10B981;
@@ -463,7 +460,6 @@ def main():
         .regime-desc { font-size: 10px; color: #94A3B8; }
         .signal-btn { background: #10B981; color: #07090E; padding: 5px 12px; border-radius: 6px; font-weight: 800; font-size: 11px; }
         
-        /* SIDE-BY-SIDE 2-COLUMN CSS FLEX GRID FOR INDICATORS */
         .flex-indicator-grid {
             display: grid;
             grid-template-columns: repeat(2, 1fr);
@@ -529,7 +525,6 @@ def main():
         ist = pytz.timezone('Asia/Kolkata')
         now_str = datetime.now(ist).strftime("%d %b %Y %H:%M:%S")
 
-        # 1. TOP HEADER & TOP 5 METRICS BOXES
         st.markdown(f"""
         <div class="top-header">
             <div>
@@ -569,7 +564,6 @@ def main():
             </div>
         </div>
 
-        <!-- 2. REGIME BANNER -->
         <div class="regime-box">
             <div class="regime-left">
                 <div class="bull-icon-circle">🐂</div>
@@ -583,7 +577,6 @@ def main():
             </div>
         </div>
 
-        <!-- 3. COMPACT 2-COLUMN SIDE-BY-SIDE INDICATORS BOXES -->
         <div style="font-size:11px; font-weight:700; color:#94A3B8; margin-bottom:8px;">📊 MICRO INDICATOR MATRIX</div>
         <div class="flex-indicator-grid">
             <div class="indicator-card"><span class="ind-label">📍 VWAP Location</span><span class="ind-value">{last['vwap_location_zone']}</span></div>
@@ -599,34 +592,18 @@ def main():
         </div>
         """, unsafe_allow_html=True)
 
-        # 4. CHART BELOW INDICATORS
-        st.subheader("📈 Live Nifty TradingView Chart")
-        tradingview_script = """
-        <div class="tradingview-widget-container" style="height:480px;width:100%;">
-          <div id="tradingview_chart_element" style="height:480px;width:100%;"></div>
-          <script type="text/javascript" src="https://s3.tradingview.com/tv.js"></script>
-          <script type="text/javascript">
-          new TradingView.widget(
-          {
-            "autosize": true,
-            "symbol": "NIFTY",
-            "interval": "3",
-            "timezone": "Asia/Kolkata",
-            "theme": "dark",
-            "style": "1",
-            "locale": "in",
-            "toolbar_bg": "#f1f3f6",
-            "enable_publishing": false,
-            "allow_symbol_change": true,
-            "container_id": "tradingview_chart_element"
-          }
-          );
-          </script>
+        # OPTION B: UNRESTRICTED DIRECT NIFTY SPOT INDEX LIVE LIGHT-WEIGHT CHART
+        st.subheader("📈 Live Nifty Spot Index Candlestick Chart")
+        direct_spot_chart_html = """
+        <div style="height:500px;width:100%;border-radius:8px;overflow:hidden;border:1px solid #1E293B;">
+            <iframe 
+                src="https://s.tradingview.com/widgetembed/?frameElementId=tradingview_spot_widget&symbol=INDEX%3ANIFTY&interval=3&hidesidetoolbar=0&symboledit=0&saveimage=1&toolbarbg=1E293B&theme=dark&style=1&timezone=Asia%2FKolkata" 
+                style="width:100%;height:500px;border:none;">
+            </iframe>
         </div>
         """
-        components.html(tradingview_script, height=500)
+        components.html(direct_spot_chart_html, height=510)
 
-        # 5. BOTTOM SQLITE DATA LOGS
         st.markdown("---")
         st.markdown("##### 📄 RECENT CORRELATION & MICRO-MATRIX LOGS (SQLite Data Mining)")
         
