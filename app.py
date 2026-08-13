@@ -440,15 +440,8 @@ def main():
         .regime-desc { font-size: 12px; color: #94A3B8; margin-top: 2px; }
         .signal-btn { background: #10B981; color: #07090E; padding: 8px 18px; border-radius: 6px; font-weight: 800; font-size: 13px; letter-spacing: 0.5px; }
         
-        .grid-10 { display: grid; grid-template-columns: repeat(5, 1fr); gap: 12px; margin-bottom: 25px; }
-        .small-card { background: #0F141C; border: 1px solid #1E293B; border-radius: 8px; padding: 12px; text-align: center; }
-        .small-title { font-size: 10px; color: #94A3B8; font-weight: 600; text-transform: uppercase; margin-bottom: 6px; }
-        .small-val-green { font-size: 16px; font-weight: 800; color: #10B981; }
-        .small-val-purple { font-size: 16px; font-weight: 800; color: #A855F7; }
-        .small-val-blue { font-size: 16px; font-weight: 800; color: #3B82F6; }
-        
         @media (max-width: 768px) {
-            .card-row, .grid-10 { grid-template-columns: repeat(2, 1fr); }
+            .card-row { grid-template-columns: repeat(2, 1fr); }
         }
     </style>
     """, unsafe_allow_html=True)
@@ -551,15 +544,16 @@ def main():
         </div>
         """, unsafe_allow_html=True)
 
+        # FIXED TRADINGVIEW ADVANCED EMBED WIDGET (No restriction pop-up)
         st.subheader("📈 Live Nifty TradingView Chart")
         tradingview_html = """
         <div class="tradingview-widget-container" style="height:500px;width:100%;">
-          <iframe src="https://s.tradingview.com/widgetembed/?frameElementId=tradingview_chart&symbol=NSE%3ANIFTY&interval=3&hidesidetoolbar=0&symboledit=1&saveimage=1&toolbarbg=f1f3f6&studies=%5B%5D&theme=dark&style=1&timezone=Asia%2FKolkata" style="width: 100%; height: 500px; border: none;"></iframe>
+          <iframe src="https://s.tradingview.com/widgetembed/?frameElementId=tradingview_chart&symbol=NSE%3ANIFTY1!&interval=3&hidesidetoolbar=0&symboledit=1&saveimage=1&toolbarbg=f1f3f6&studies=%5B%5D&theme=dark&style=1&timezone=Asia%2FKolkata" style="width: 100%; height: 500px; border: none;"></iframe>
         </div>
         """
         components.html(tradingview_html, height=520)
 
-        # Clean Native Grid Columns (Fixed HTML Display Issue)
+        # NATIVE COMPACT METRICS GRID (Responsive & Clean on Mobile)
         g1, g2, g3, g4, g5 = st.columns(5)
         g1.metric("VWAP Location", last['vwap_location_zone'])
         g2.metric("SMA-VWAP Spread", f"{last['sma_vwap_spread']:.2f}")
@@ -577,7 +571,6 @@ def main():
         st.markdown("---")
         st.markdown("##### 📄 RECENT CORRELATION & MICRO-MATRIX LOGS (SQLite Data Mining)")
         
-        # Robust SQLite Query with Fallback Filter
         try:
             conn = sqlite3.connect(DB_NAME)
             df_db = pd.read_sql_query("""
@@ -601,7 +594,7 @@ def main():
                 conn.close()
                 st.dataframe(df_db, use_container_width=True)
             except Exception:
-                st.info("🔄 Database schema updating with new live candles... Check back after next 3-min update.")
+                st.info("🔄 Database schema updating with new live candles...")
 
 if __name__ == "__main__":
     main()
