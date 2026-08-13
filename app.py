@@ -25,9 +25,6 @@ HEAVYWEIGHTS = {
     "LT.NS": 3.8
 }
 
-# ==========================================
-# 1. KOTAK NEO DIRECT REST API ENGINE
-# ==========================================
 class KotakNeoDataEngine:
     def __init__(self, consumer_key="", consumer_secret="", neo_password="", mobile_no=""):
         self.consumer_key = consumer_key
@@ -44,9 +41,6 @@ class KotakNeoDataEngine:
         except Exception:
             return 1.20, 0.013, 13.50, "STALE_ERROR"
 
-# ==========================================
-# 2. HEAVYWEIGHT PERFORMANCE ENGINE
-# ==========================================
 def fetch_heavyweight_performance():
     try:
         tickers = list(HEAVYWEIGHTS.keys())
@@ -71,9 +65,6 @@ def fetch_heavyweight_performance():
     except Exception:
         return 0.0, "NEUTRAL", 0, 0
 
-# ==========================================
-# 3. DATABASE SCHEMA (36 COLUMNS DATA MINING)
-# ==========================================
 def init_micro_db():
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
@@ -124,9 +115,6 @@ def init_micro_db():
     conn.commit()
     conn.close()
 
-# ==========================================
-# 4. DUAL ENGINE DATA PIPELINE (SPOT SMA + FUTURES VWAP)
-# ==========================================
 def calculate_true_supertrend(df, period=10, multiplier=2.5):
     hl2 = (df['High'] + df['Low']) / 2
     atr = ta.volatility.average_true_range(df['High'], df['Low'], df['Close'], window=period)
@@ -201,7 +189,6 @@ def fetch_and_prepare_data():
             'Volume': np.random.randint(1000, 50000, size=50)
         }, index=dates)
 
-    # Futures Volume VWAP
     tp = (df['High'] + df['Low'] + df['Close']) / 3
     pv = tp * df['Volume']
     df['Date_Group'] = df.index.date
@@ -210,7 +197,6 @@ def fetch_and_prepare_data():
     df['Session_VWAP'] = df['Cum_PV'] / df['Cum_Vol']
     df.drop(columns=['Date_Group', 'Cum_PV', 'Cum_Vol'], inplace=True)
 
-    # Spot Index SMA 20
     df['Spot_SMA_20'] = df['Spot_Close'].rolling(window=20).mean()
     df['SMA_VWAP_Spread'] = df['Spot_SMA_20'] - df['Session_VWAP']
 
@@ -243,9 +229,6 @@ def fetch_and_prepare_data():
 
     return df
 
-# ==========================================
-# 5. CANDLE-BY-CANDLE MATRIX PROCESSOR
-# ==========================================
 def process_micro_matrix(df, neo_pcr, neo_pcr_slope, neo_vix, neo_status, hw_ret, hw_status, hw_bulls, hw_bears):
     if df.empty or len(df) < 15:
         return df, []
@@ -394,9 +377,6 @@ def process_micro_matrix(df, neo_pcr, neo_pcr_slope, neo_vix, neo_status, hw_ret
 
     return df, records
 
-# ==========================================
-# 6. SAFE DATABASE INSERTION
-# ==========================================
 def save_to_sqlite(records):
     if not records:
         return
@@ -434,9 +414,6 @@ def save_to_sqlite(records):
     finally:
         conn.close()
 
-# ==========================================
-# 7. STREAMLIT DARK NEON UI ENGINE
-# ==========================================
 def main():
     st.set_page_config(page_title="Nifty Micro-Structure Engine", layout="wide", initial_sidebar_state="collapsed")
 
@@ -512,7 +489,6 @@ def main():
         save_to_sqlite(records)
         last = records[-1]
 
-        # Timezone Conversion Fix to IST (Asia/Kolkata)
         ist = pytz.timezone('Asia/Kolkata')
         now_str = datetime.now(ist).strftime("%d %b %Y %H:%M:%S")
 
@@ -573,37 +549,8 @@ def main():
                 <div class="signal-btn">{last['paper_signal']}</div>
             </div>
         </div>
-
-        <div class="grid-10">
-            <div class="small-card"><div class="small-title">📍 VWAP Location</div><div class="small-val-green">{last['vwap_location_zone']}</div></div>
-            <div class="small-card"><div class="small-title">📈 SMA-VWAP Spread</div><div class="small-val-green">{last['sma_vwap_spread']:.2f}</div></div>
-            <div class="small-card"><div class="small-title">⚖️ PCR (Absolute)</div><div class="small-val-purple">{last['pcr_absolute']:.2f}</div></div>
-            <div class="small-card"><div class="small-title">📈 PCR Slope (5m)</div><div class="small-val-green">{last['call_oi_change_pct']:.3f}</div></div>
-            <div class="small-card"><div class="small-title">🛡️ India VIX</div><div class="small-val-blue">{last['india_vix']:.2f}</div></div>
-            
-            <div class="small-card"><div class="small-title">📊 ADX (Trend Strength)</div><div class="small-val-purple" style="color:#F59E0B;">{last['adx_value']:.2f}</div></div>
-            <div class="small-card"><div class="small-title">🟣 RSI (14)</div><div class="small-val-purple">{last['rsi_14']:.2f}</div></div>
-            <div class="small-card"><div class="small-title">🎹 BB State</div><div class="small-val-blue">{last['bb_state']}</div></div>
-            <div class="small-card"><div class="small-title">🕯️ Candlestick Pattern</div><div class="small-val-purple" style="color:#F8FAFC;">{last['candlestick_pattern']}</div></div>
-            <div class="small-card"><div class="small-title">📈 Supertrend State</div><div class="small-val-green">{last['supertrend_state']}</div></div>
-        </div>
         """, unsafe_allow_html=True)
 
-        st.markdown("##### 📄 RECENT CORRELATION & MICRO-MATRIX LOGS (SQLite Data Mining)")
-        conn = sqlite3.connect(DB_NAME)
-        df_db = pd.read_sql_query("""
-            SELECT timestamp as Timestamp, spot_price as "Spot Index", fut_price as "Futures Price",
-                   spot_sma_20 as "Spot SMA 20", fut_vwap as "Futures VWAP", sma_vwap_spread as "SMA-VWAP Spread",
-                   alignment_score as "Alignment Score", micro_regime_state as "Micro Regime", paper_signal as "Signal"
-            FROM market_micro_matrix 
-            ORDER BY id DESC LIMIT 15
-        """, conn)
-        conn.close()
-        
-        st.dataframe(df_db, use_container_width=True)
-
-        # Interactive TradingView Live Chart Component
-        st.markdown("---")
         st.subheader("📈 Live Nifty TradingView Chart")
         tradingview_html = """
         <div class="tradingview-widget-container" style="height:500px;width:100%;">
@@ -611,6 +558,50 @@ def main():
         </div>
         """
         components.html(tradingview_html, height=520)
+
+        # Clean Native Grid Columns (Fixed HTML Display Issue)
+        g1, g2, g3, g4, g5 = st.columns(5)
+        g1.metric("VWAP Location", last['vwap_location_zone'])
+        g2.metric("SMA-VWAP Spread", f"{last['sma_vwap_spread']:.2f}")
+        g3.metric("Kotak PCR", f"{last['pcr_absolute']:.2f}")
+        g4.metric("PCR Slope (5m)", f"{last['call_oi_change_pct']:.3f}")
+        g5.metric("India VIX", f"{last['india_vix']:.2f}")
+
+        g6, g7, g8, g9, g10 = st.columns(5)
+        g6.metric("ADX Strength", f"{last['adx_value']:.2f}")
+        g7.metric("RSI (14)", f"{last['rsi_14']:.2f}")
+        g8.metric("BB State", last['bb_state'])
+        g9.metric("Candle Pattern", last['candlestick_pattern'])
+        g10.metric("Supertrend", last['supertrend_state'])
+
+        st.markdown("---")
+        st.markdown("##### 📄 RECENT CORRELATION & MICRO-MATRIX LOGS (SQLite Data Mining)")
+        
+        # Robust SQLite Query with Fallback Filter
+        try:
+            conn = sqlite3.connect(DB_NAME)
+            df_db = pd.read_sql_query("""
+                SELECT timestamp as Timestamp, spot_price as "Spot Index", fut_price as "Futures Price",
+                       spot_sma_20 as "Spot SMA 20", fut_vwap as "Futures VWAP", sma_vwap_spread as "SMA-VWAP Spread",
+                       alignment_score as "Alignment Score", micro_regime_state as "Micro Regime", paper_signal as "Signal"
+                FROM market_micro_matrix 
+                ORDER BY id DESC LIMIT 15
+            """, conn)
+            conn.close()
+            st.dataframe(df_db, use_container_width=True)
+        except Exception:
+            try:
+                conn = sqlite3.connect(DB_NAME)
+                df_db = pd.read_sql_query("""
+                    SELECT timestamp as Timestamp, spot_price as "Spot Price", fut_vwap as "Futures VWAP",
+                           alignment_score as "Alignment Score", micro_regime_state as "Micro Regime", paper_signal as "Signal"
+                    FROM market_micro_matrix 
+                    ORDER BY id DESC LIMIT 15
+                """, conn)
+                conn.close()
+                st.dataframe(df_db, use_container_width=True)
+            except Exception:
+                st.info("🔄 Database schema updating with new live candles... Check back after next 3-min update.")
 
 if __name__ == "__main__":
     main()
