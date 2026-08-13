@@ -165,17 +165,18 @@ def fetch_and_prepare_data():
     symbols = ["^NSEI", "NIFTY_FIN_SERVICE.NS", "^NSEBANK"]
     df = pd.DataFrame()
 
+    # Fixed yfinance valid interval to 5m (3m is invalid in yfinance)
     for sym in symbols:
         try:
             ticker = yf.Ticker(sym)
-            df = ticker.history(period="5d", interval="3m")
-            if not df.empty and len(df) >= 30:
+            df = ticker.history(period="5d", interval="5m")
+            if not df.empty and len(df) >= 20:
                 break
         except Exception:
             continue
 
-    if df.empty or len(df) < 30:
-        dates = pd.date_range(end=datetime.now(), periods=50, freq='3min')
+    if df.empty or len(df) < 20:
+        dates = pd.date_range(end=datetime.now(), periods=50, freq='5min')
         base_price = 24874.05
         np.random.seed(42)
         closes = base_price + np.cumsum(np.random.randn(50) * 5)
@@ -219,13 +220,13 @@ def fetch_and_prepare_data():
     return df
 
 def process_micro_matrix(df, neo_pcr, neo_pcr_slope, neo_vix, neo_status, hw_ret, hw_status, hw_bulls, hw_bears):
-    if df.empty or len(df) < 30:
+    if df.empty or len(df) < 15:
         return df, []
 
     records = []
     active_position = None
 
-    for i in range(20, len(df)):
+    for i in range(10, len(df)):
         row = df.iloc[i]
         ts = df.index[i]
 
@@ -398,9 +399,8 @@ def save_to_sqlite(records):
         conn.close()
 
 def main():
-    st.set_page_config(page_title="Nifty 3-Min Micro-Structure Engine", layout="wide", initial_sidebar_state="collapsed")
+    st.set_page_config(page_title="Nifty Micro-Structure Engine", layout="wide", initial_sidebar_state="collapsed")
 
-    # Pure Reference Design Glassmorphism Styling
     st.markdown("""
     <style>
         .stApp { background-color: #07090E; color: #E2E8F0; font-family: 'Inter', sans-serif; }
@@ -457,9 +457,17 @@ def main():
     latest_spot = float(df['Close'].iloc[-1])
     pcr, pcr_slope, vix, neo_status = neo_engine.fetch_live_pcr_and_vix(spot_price=latest_spot)
 
-    df, records = process_micro_matrix(df, neo_pcr=pcr, neo_call_chg=pcr_slope, neo_put_chg=0.0, 
-                                       neo_vix=vix, neo_status=neo_status, hw_ret=hw_ret, 
-                                       hw_status=hw_status, hw_bulls=hw_bulls, hw_bears=hw_bears)
+    df, records = process_micro_matrix(
+        df, 
+        neo_pcr=pcr, 
+        neo_pcr_slope=pcr_slope, 
+        neo_vix=vix, 
+        neo_status=neo_status, 
+        hw_ret=hw_ret, 
+        hw_status=hw_status, 
+        hw_bulls=hw_bulls, 
+        hw_bears=hw_bears
+    )
 
     if records:
         save_to_sqlite(records)
