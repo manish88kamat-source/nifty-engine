@@ -3,7 +3,7 @@ name: Nifty Multi-Regime Engine Run
 on:
   push:
     branches: [ "main" ]
-  workflow_dispatch:  # Manual Trigger Button
+  workflow_dispatch:
 
 jobs:
   run-engine:
@@ -22,8 +22,9 @@ jobs:
       run: |
         python -m pip install --upgrade pip
         pip install -r requirements.txt
-        
-        - name: Run Engine Script
-      run: |
-        python -c "import warnings, logging; warnings.filterwarnings('ignore'); logging.basicConfig(level=logging.ERROR); import app"
 
+    - name: Run Clean Engine Backtest
+      env:
+        PYTHONWARNINGS: "ignore"
+      run: |
+        python -c "import app"
