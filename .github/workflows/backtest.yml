@@ -23,10 +23,8 @@ jobs:
         python -m pip install --upgrade pip
         pip install -r requirements.txt
 
-        - name: Run Clean Engine Backtest
+    - name: Run Clean Engine Backtest
       env:
-        PYTHONWARNINGS: "ignore"
         PYTHONUNBUFFERED: "1"
       run: |
-        python -c "import app; df = app.fetch_ohlcv('NIFTY', '5m', period='30d'); df = app.add_indicators(df); win_rate, total_trades, total_pnl, df_trades = app.run_vectorized_backtest(df); print(f'Total Trades Executed: {total_trades}'); print(f'Strategy Win-Rate: {win_rate}%'); print(f'Total PnL Points: {total_pnl}'); print(df_trades.tail(10).to_string())"
-
+        python app.py
