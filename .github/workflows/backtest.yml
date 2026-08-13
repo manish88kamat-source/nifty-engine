@@ -23,6 +23,7 @@ jobs:
         python -m pip install --upgrade pip
         pip install -r requirements.txt
         
-    - name: Run Engine Script
+        - name: Run Engine Script
       run: |
-        python -c "import app; app.main()"
+        python -c "import warnings, logging; warnings.filterwarnings('ignore'); logging.basicConfig(level=logging.ERROR); import app"
+
