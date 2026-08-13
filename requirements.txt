@@ -1,3 +1,6 @@
 pandas
 numpy
 yfinance
+streamlit
+requests
+ta
