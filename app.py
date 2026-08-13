@@ -463,6 +463,27 @@ def main():
                     st.dataframe(df_tr.tail(20))
                     df_tr["CumPnL"] = df_tr["PnL"].cumsum()
                     st.line_chart(df_tr.set_index("Time")["CumPnL"])
-
 if __name__ == "__main__":
-    main()
+    import sys
+    print("=========================================================")
+    print("       STARTING AUTOMATED REGIME BACKTEST ENGINE        ")
+    print("=========================================================")
+    
+    df = fetch_ohlcv("NIFTY", "5m", period="30d")
+    if df.empty:
+        print("Data fetch failed!")
+    else:
+        df = add_indicators(df)
+        win_rate, total_trades, total_pnl, df_trades = run_vectorized_backtest(df)
+        
+        print(f"\nTotal Trades Executed : {total_trades}")
+        print(f"Strategy Win-Rate     : {win_rate}%")
+        print(f"Total PnL Points      : {total_pnl} Nifty Points")
+        print("=========================================================")
+        
+        if not df_trades.empty:
+            print("\n--- RECENT 10 EXECUTED TRADES ---")
+            print(df_trades[['Time', 'Regime', 'Type', 'Entry', 'Exit', 'PnL', 'Result']].tail(10).to_string(index=False))
+        else:
+            print("No trades triggered under strict regime rules.")
+
