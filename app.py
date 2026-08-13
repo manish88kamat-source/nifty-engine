@@ -42,12 +42,12 @@ def fetch_live_india_vix():
 # 2. KOTAK NEO DIRECT UNIFIED BROKER FEED
 # ==========================================
 class KotakNeoDataEngine:
-    def __init__(self, consumer_key="", consumer_secret="", neo_password="", mobile_no=""):
+    def __init__(self, consumer_key="", neo_password="", mobile_no="", totp_pin=""):
         self.consumer_key = consumer_key
-        self.consumer_secret = consumer_secret
         self.neo_password = neo_password
         self.mobile_no = mobile_no
-        self.is_authenticated = bool(consumer_key and consumer_secret and neo_password and mobile_no)
+        self.totp_pin = totp_pin
+        self.is_authenticated = bool(consumer_key and neo_password and mobile_no)
 
     def fetch_unified_market_feed(self, current_spot):
         vix_real = fetch_live_india_vix()
@@ -228,7 +228,6 @@ def fetch_and_prepare_data():
             'Volume': np.random.randint(2000, 45000, size=50)
         }, index=dates)
 
-    # FUTURES VOLUME VWAP
     tp = (df['High'] + df['Low'] + df['Close']) / 3
     pv = tp * df['Volume']
     df['Date_Group'] = df.index.date
@@ -237,7 +236,6 @@ def fetch_and_prepare_data():
     df['Session_VWAP'] = df['Cum_PV'] / df['Cum_Vol']
     df.drop(columns=['Date_Group', 'Cum_PV', 'Cum_Vol'], inplace=True)
 
-    # SPOT INDEX SMA 20 & CORRELATION SPREAD
     df['Spot_SMA_20'] = df['Spot_Close'].rolling(window=20).mean()
     df['SMA_VWAP_Spread'] = df['Spot_SMA_20'] - df['Session_VWAP']
 
@@ -575,11 +573,11 @@ def main():
     </style>
     """, unsafe_allow_html=True)
 
-    st.sidebar.header("🔑 Kotak Neo Credentials")
+    st.sidebar.header("🔑 Kotak Neo API Setup")
     neo_key = st.sidebar.text_input("Consumer Key", type="password")
-    neo_secret = st.sidebar.text_input("Consumer Secret", type="password")
     neo_pwd = st.sidebar.text_input("Neo Password", type="password")
     neo_mob = st.sidebar.text_input("Mobile Number")
+    totp_pin = st.sidebar.text_input("Authenticator 6-Digit TOTP", type="password")
 
     init_micro_db()
     
@@ -588,9 +586,9 @@ def main():
     
     neo_engine = KotakNeoDataEngine(
         consumer_key=neo_key,
-        consumer_secret=neo_secret,
         neo_password=neo_pwd,
-        mobile_no=neo_mob
+        mobile_no=neo_mob,
+        totp_pin=totp_pin
     )
     latest_spot = float(df['Spot_Close'].iloc[-1]) if 'Spot_Close' in df.columns else float(df['Close'].iloc[-1])
     pcr, pcr_slope, vix, neo_status, spot_from_kotak = neo_engine.fetch_unified_market_feed(current_spot=latest_spot)
