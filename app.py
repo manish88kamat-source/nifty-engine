@@ -26,7 +26,20 @@ HEAVYWEIGHTS = {
 }
 
 # ==========================================
-# 1. KOTAK NEO DIRECT UNIFIED BROKER FEED
+# 1. DYNAMIC INDIA VIX FETCH ENGINE
+# ==========================================
+def fetch_live_india_vix():
+    try:
+        vix_ticker = yf.Ticker("^INDIAVIX")
+        vix_df = vix_ticker.history(period="1d", interval="5m")
+        if not vix_df.empty and 'Close' in vix_df.columns:
+            return round(float(vix_df['Close'].iloc[-1]), 2)
+    except Exception:
+        pass
+    return 11.42
+
+# ==========================================
+# 2. KOTAK NEO DIRECT UNIFIED BROKER FEED
 # ==========================================
 class KotakNeoDataEngine:
     def __init__(self, consumer_key="", consumer_secret="", neo_password="", mobile_no=""):
@@ -37,20 +50,19 @@ class KotakNeoDataEngine:
         self.is_authenticated = bool(consumer_key and consumer_secret and neo_password and mobile_no)
 
     def fetch_unified_market_feed(self, current_spot):
+        vix_real = fetch_live_india_vix()
         if not self.is_authenticated:
-            return 0.77, 0.013, 13.50, "OFFLINE_NO_AUTH", current_spot
+            return 0.77, 0.013, vix_real, "OFFLINE_NO_AUTH", current_spot
         try:
-            # Synchronized Live Broker Feed from Kotak API
             pcr_real = 0.77
-            vix_real = 13.50
             pcr_slope = 0.013
             live_kotak_spot = current_spot
             return pcr_real, pcr_slope, vix_real, "KOTAK_CONNECTED", live_kotak_spot
         except Exception:
-            return 0.77, 0.013, 13.50, "STALE_ERROR", current_spot
+            return 0.77, 0.013, vix_real, "STALE_ERROR", current_spot
 
 # ==========================================
-# 2. HEAVYWEIGHT PERFORMANCE ENGINE
+# 3. HEAVYWEIGHT PERFORMANCE ENGINE
 # ==========================================
 def fetch_heavyweight_performance():
     try:
@@ -77,7 +89,7 @@ def fetch_heavyweight_performance():
         return 0.0, "NEUTRAL", 0, 0
 
 # ==========================================
-# 3. DATABASE SCHEMA & INITIALIZATION
+# 4. DATABASE SCHEMA & INITIALIZATION
 # ==========================================
 def init_micro_db():
     conn = sqlite3.connect(DB_NAME)
@@ -130,7 +142,7 @@ def init_micro_db():
     conn.close()
 
 # ==========================================
-# 4. DUAL ENGINE PIPELINE (SPOT SMA + FUTURES VWAP)
+# 5. DUAL ENGINE PIPELINE (SPOT SMA + FUTURES VWAP)
 # ==========================================
 def calculate_true_supertrend(df, period=10, multiplier=2.5):
     hl2 = (df['High'] + df['Low']) / 2
@@ -259,7 +271,7 @@ def fetch_and_prepare_data():
     return df
 
 # ==========================================
-# 5. AUTOMATED TRADE DECISION & ENTRY-EXIT ENGINE
+# 6. AUTOMATED TRADE DECISION & ENTRY-EXIT ENGINE
 # ==========================================
 def process_micro_matrix(df, neo_pcr, neo_pcr_slope, neo_vix, neo_status, hw_ret, hw_status, hw_bulls, hw_bears):
     if df.empty or len(df) < 15:
@@ -345,7 +357,6 @@ def process_micro_matrix(df, neo_pcr, neo_pcr_slope, neo_vix, neo_status, hw_ret
 
         paper_sig, pnl, exit_reason = "NO_TRADE", 0.0, "NONE"
 
-        # AUTOMATED POSITION MANAGEMENT (EXIT LOGIC)
         if active_position is not None:
             pos_type, entry_p, sl_p, tp_p = active_position['type'], active_position['entry'], active_position['sl'], active_position['tp']
             if pos_type == "BUY_CALL":
@@ -357,7 +368,6 @@ def process_micro_matrix(df, neo_pcr, neo_pcr_slope, neo_vix, neo_status, hw_ret
                 elif fut <= tp_p: pnl, exit_reason, active_position = entry_p - tp_p, "TARGET_HIT", None
                 elif align_score > 0.2: pnl, exit_reason, active_position = entry_p - fut, "REGIME_FLIP_EXIT", None
 
-        # AUTOMATED ENTRY LOGIC (ALGORITHMIC DECISION)
         if active_position is None:
             if align_score >= 0.6 and confidence >= 65.0:
                 paper_sig = "BUY_CALL"
@@ -381,7 +391,7 @@ def process_micro_matrix(df, neo_pcr, neo_pcr_slope, neo_vix, neo_status, hw_ret
             "pcr_absolute": neo_pcr if i == len(df)-1 else 0.77,
             "call_oi_change_pct": neo_pcr_slope if i == len(df)-1 else 0.013,
             "put_oi_change_pct": 0.0,
-            "india_vix": neo_vix if i == len(df)-1 else 13.50,
+            "india_vix": neo_vix,
             "data_freshness_status": neo_status if i == len(df)-1 else "HISTORICAL",
             "heavyweight_weighted_ret": float(hw_ret),
             "heavyweight_status": str(hw_status),
@@ -412,7 +422,7 @@ def process_micro_matrix(df, neo_pcr, neo_pcr_slope, neo_vix, neo_status, hw_ret
     return df, records
 
 # ==========================================
-# 6. SAFE DATABASE LOGGING PIPELINE
+# 7. SAFE DATABASE LOGGING PIPELINE
 # ==========================================
 def save_to_sqlite(records):
     if not records:
@@ -452,16 +462,11 @@ def save_to_sqlite(records):
         conn.close()
 
 # ==========================================
-# 7. STREAMLIT LIGHTWEIGHT CANDLESTICK CHART & UI
+# 8. STREAMLIT LIGHTWEIGHT CANDLESTICK CHART & UI
 # ==========================================
 def render_kotak_lightweight_chart(df):
-    """
-    Renders pure Kotak API Data-driven TradingView Lightweight Candlestick Chart.
-    No 3rd party iframe locks or domain restriction errors.
-    """
     if df.empty: return
     
-    # Prepare OHLC Data Array for Lightweight Chart Script
     data_list = []
     for idx, row in df.tail(60).iterrows():
         ts_unix = int(idx.timestamp()) if hasattr(idx, 'timestamp') else int(datetime.now().timestamp())
@@ -506,7 +511,9 @@ def main():
         .top-header { display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #1E293B; padding-bottom: 10px; margin-bottom: 15px; }
         .header-title { font-size: 18px; font-weight: 800; color: #FFFFFF; }
         .header-sub { font-size: 11px; color: #64748B; margin-top: 2px; }
-        .header-right { text-align: right; font-size: 11px; color: #10B981; font-weight: 600; }
+        
+        .status-badge-connected { background: rgba(16, 185, 129, 0.15); color: #10B981; border: 1px solid #10B981; padding: 2px 8px; border-radius: 4px; font-weight: 700; font-size: 10px; display: inline-block; margin-top: 3px; }
+        .status-badge-offline { background: rgba(239, 68, 68, 0.15); color: #EF4444; border: 1px solid #EF4444; padding: 2px 8px; border-radius: 4px; font-weight: 700; font-size: 10px; display: inline-block; margin-top: 3px; }
         
         .top-flex-grid {
             display: grid;
@@ -612,15 +619,17 @@ def main():
         ist = pytz.timezone('Asia/Kolkata')
         now_str = datetime.now(ist).strftime("%d %b %Y %H:%M:%S")
 
+        status_badge_html = f'<div class="status-badge-connected">🟢 KOTAK CONNECTED</div>' if last["data_freshness_status"] == "KOTAK_CONNECTED" else f'<div class="status-badge-offline">🔴 OFFLINE / FALLBACK</div>'
+
         st.markdown(f"""
         <div class="top-header">
             <div>
-                <div class="header-title">⚡ Nifty 3-Min Micro Engine (Automated Execution)</div>
+                <div class="header-title">⚡ Nifty 3-Min Micro Engine</div>
                 <div class="header-sub">Spot SMA 20 vs Futures Volume VWAP Divergence Mining</div>
             </div>
-            <div class="header-right">
-                ● {now_str}<br>
-                <span style="color:#64748B;">3-Min Auto Refresh 🔄</span>
+            <div style="text-align: right;">
+                <div style="font-size: 11px; color: #10B981; font-weight: 600;">● {now_str}</div>
+                {status_badge_html}
             </div>
         </div>
 
