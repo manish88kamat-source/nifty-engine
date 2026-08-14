@@ -1,91 +1,72 @@
 #!/usr/bin/env python3
 """
 NIFTY 3-Min Micro Engine
-Kotak Neo Integrated Research-Lock v1.5
-
-Research-only / data-engine only.
-
-CORE LOGIC
-----------
-- session-local ATR
-- VWAP
-- SMA20
-- OI classification
-- heavyweight contribution
-- opening range
-- PCR feature
-- triple barrier
-- MFE/MAE
-- next_bar_open research convention
-- date-aware walk-forward
-- Parquet dataset
-
-DATA SOURCE
------------
-Kotak Neo API / WebSocket
+Kotak Neo Integrated Research-Lock v2.0
 
 IMPORTANT
 ---------
-This application DOES NOT place orders.
+This version uses the official Kotak Neo Python SDK from GitHub.
 
-OPTION DATA
------------
-No fabricated full option-chain endpoint is used.
+Features
+--------
+- Kotak Neo TOTP authentication
+- NIFTY 50 index live WebSocket
+- Automatic NIFTY futures discovery
+- Automatic NIFTY option discovery
+- Automatic heavyweight discovery
+- 3-minute candle aggregation
+- Session-local ATR
+- VWAP
+- SMA20
+- Futures OI classification
+- Heavyweight contribution
+- Opening range
+- PCR OI
+- PCR volume
+- OI change for PCR
+- Triple barrier labels
+- MFE / MAE
+- next_bar_open research convention
+- Date-aware walk-forward helper
+- Parquet dataset
+- Streamlit UI
 
-PCR is calculated from live CE/PE option quotes supplied through
-Kotak Neo WebSocket subscriptions.
+NO FABRICATED DATA
+------------------
+If a field is unavailable from Kotak Neo feed/API, it remains NaN.
 
-Required Streamlit secrets:
+Required secrets:
+    KOTAK_CONSUMER_KEY
+    KOTAK_MOBILE
+    KOTAK_UCC
+    KOTAK_TOTP
+    KOTAK_MPIN
 
-KOTAK_CONSUMER_KEY
-KOTAK_MOBILE
-KOTAK_UCC
-KOTAK_TOTP
-KOTAK_MPIN
+Optional:
+    NIFTY_FUT_TOKEN
+    PCR_STRIKE_COUNT
+    PCR_STRIKE_STEP
+    HEAVY_TOKENS
 
-Required market tokens:
-
-NIFTY_SPOT_TOKEN
-NIFTY_FUT_TOKEN
-
-Optional PCR:
-
-PCR_CE_TOKENS = "token1,token2,token3"
-PCR_PE_TOKENS = "token4,token5,token6"
-
-Optional heavyweight mapping:
-
-HEAVY_TOKENS = '{"HDFCBANK":"...", "RELIANCE":"..."}'
-
-Run:
-
-streamlit run app.py
-
-CLI tests:
-
-RUN_TESTS=1 python app.py
+The application can automatically discover NIFTY futures,
+NIFTY options and heavyweight equity tokens through
+Kotak Neo search_scrip().
 """
 
 from __future__ import annotations
 
-import json
-import math
 import os
+import json
 import threading
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Dict, List, Optional, Any
 
 import numpy as np
 import pandas as pd
-
-try:
-    import pyarrow as pa
-    import pyarrow.parquet as pq
-except ImportError:
-    pa = None
-    pq = None
+import pyarrow as pa
+import pyarrow.parquet as pq
 
 try:
     import streamlit as st
@@ -98,47 +79,42 @@ except ImportError:
     NeoAPI = None
 
 
-# ============================================================
+# =========================================================
 # CONFIG
-# ============================================================
+# =========================================================
 
 CONFIG = {
-    "app_version": "v1.5_kotak_neo_research_lock",
-
-    "feature_version": "v1.7_research_lock",
-
+    "app_version": "v2.0_kotak_neo",
+    "feature_version": "v2.0_research_lock",
     "label_version": "TB_v1.6_lock",
-
-    "schema_version": "1.5",
-
+    "schema_version": "2.0",
     "weight_version": "NIFTY_STATIC_2025Q1",
 
     "atr_period": 14,
-
     "sma_period": 20,
 
     "triple_upper_atr": 1.0,
-
     "triple_lower_atr": 0.75,
 
     "time_barrier_min": 30,
 
-    "mfe_horizons_min": [15, 30, 45],
+    "mfe_horizons_min": [
+        15,
+        30,
+        45,
+    ],
 
     "max_label_horizon_min": 45,
 
     "purge_bars": 18,
-
     "embargo_bars": 5,
 
     "opening_range_minutes": 15,
 
     "atr_mode": "session_local",
-
     "execution_model": "next_bar_open",
 
     "session_start": "09:15",
-
     "session_end": "15:30",
 
     "bar_minutes": 3,
@@ -149,27 +125,33 @@ CONFIG = {
 
     "nifty_index_name": "Nifty 50",
 
-    "nifty_spot_token": "",
+    "nifty_future_token":
+        os.getenv(
+            "NIFTY_FUT_TOKEN",
+            ""
+        ),
 
-    "nifty_future_token": "",
+    "pcr_strike_count": int(
+        os.getenv(
+            "PCR_STRIKE_COUNT",
+            "5"
+        )
+    ),
 
-    "pcr_ce_tokens": "",
-
-    "pcr_pe_tokens": "",
-
-    "pcr_exchange_segment": "nse_fo",
-
-    "spot_exchange_segment": "nse_cm",
-
-    "future_exchange_segment": "nse_fo",
-
-    "volume_mode": "cumulative",
-
-    "max_tick_buffer": 100000,
+    "pcr_strike_step": float(
+        os.getenv(
+            "PCR_STRIKE_STEP",
+            "50"
+        )
+    ),
 }
 
 
-DEFAULT_HEAVYWEIGHTS = {
+# =========================================================
+# NIFTY HEAVYWEIGHTS
+# =========================================================
+
+HEAVYWEIGHTS = {
     "HDFCBANK": 0.115,
     "RELIANCE": 0.098,
     "ICICIBANK": 0.080,
@@ -183,66 +165,47 @@ DEFAULT_HEAVYWEIGHTS = {
 }
 
 
-# ============================================================
-# CONFIG / SECRETS HELPERS
-# ============================================================
+# =========================================================
+# HELPERS
+# =========================================================
 
-def secret_or_env(name: str, default: str = "") -> str:
-    """
-    Streamlit secrets first, environment second.
-    """
+def safe_float(
+    value,
+    default=np.nan
+):
+    try:
+        if value is None:
+            return default
 
-    if st is not None:
-        try:
-            value = st.secrets.get(name)
-            if value is not None and str(value).strip():
-                return str(value).strip()
-        except Exception:
-            pass
+        if isinstance(value, str):
+            value = value.replace(
+                ",",
+                ""
+            ).strip()
 
-    return str(
-        os.getenv(name, default)
-    ).strip()
+            if value == "":
+                return default
 
+        return float(value)
 
-def load_runtime_config() -> Dict[str, Any]:
-    """
-    Build runtime configuration without inventing tokens.
-    """
-
-    cfg = dict(CONFIG)
-
-    cfg["nifty_spot_token"] = secret_or_env(
-        "NIFTY_SPOT_TOKEN",
-        CONFIG["nifty_spot_token"],
-    )
-
-    cfg["nifty_future_token"] = secret_or_env(
-        "NIFTY_FUT_TOKEN",
-        CONFIG["nifty_future_token"],
-    )
-
-    cfg["pcr_ce_tokens"] = secret_or_env(
-        "PCR_CE_TOKENS",
-        CONFIG["pcr_ce_tokens"],
-    )
-
-    cfg["pcr_pe_tokens"] = secret_or_env(
-        "PCR_PE_TOKENS",
-        CONFIG["pcr_pe_tokens"],
-    )
-
-    cfg["volume_mode"] = secret_or_env(
-        "NEO_VOLUME_MODE",
-        CONFIG["volume_mode"],
-    )
-
-    return cfg
+    except Exception:
+        return default
 
 
-def parse_tokens(raw: Any) -> List[str]:
+def is_valid_number(value):
+    try:
+        return (
+            value is not None
+            and np.isfinite(
+                float(value)
+            )
+        )
+    except Exception:
+        return False
 
-    if raw is None:
+
+def parse_tokens(raw):
+    if not raw:
         return []
 
     if isinstance(raw, list):
@@ -259,126 +222,44 @@ def parse_tokens(raw: Any) -> List[str]:
     ]
 
 
-def load_heavy_tokens() -> Dict[str, str]:
+def env_or_secret(name):
+    """
+    Streamlit Cloud:
+        st.secrets[name]
 
-    raw = secret_or_env(
-        "HEAVY_TOKENS",
-        "",
+    Local:
+        environment variable
+    """
+
+    value = os.getenv(
+        name,
+        ""
     )
 
-    if not raw:
-        return {}
+    if value:
+        return value
 
-    try:
-        obj = json.loads(raw)
+    if st is not None:
 
-        if not isinstance(obj, dict):
-            return {}
+        try:
+            value = st.secrets.get(
+                name,
+                ""
+            )
 
-        return {
-            str(k): str(v)
-            for k, v in obj.items()
-            if str(v).strip()
-        }
+            if value:
+                return str(value)
 
-    except Exception:
-        return {}
+        except Exception:
+            pass
 
+    return ""
 
-# ============================================================
-# NUMERIC HELPERS
-# ============================================================
-
-def safe_float(
-    value: Any,
-    default: float = np.nan,
-) -> float:
-
-    try:
-
-        if value is None:
-            return default
-
-        result = float(value)
-
-        if not np.isfinite(result):
-            return default
-
-        return result
-
-    except Exception:
-
-        return default
-
-
-def is_valid_number(value: Any) -> bool:
-
-    try:
-        return (
-            value is not None
-            and np.isfinite(float(value))
-        )
-    except Exception:
-        return False
-
-
-def safe_int(
-    value: Any,
-    default: int = 0,
-) -> int:
-
-    try:
-        return int(float(value))
-    except Exception:
-        return default
-
-
-# ============================================================
-# ATR
-# ============================================================
-
-def wilder_atr(
-    trs: List[float],
-    period: int = 14,
-) -> float:
-
-    if len(trs) < period:
-        return np.nan
-
-    clean = [
-        float(x)
-        for x in trs
-        if is_valid_number(x)
-    ]
-
-    if len(clean) < period:
-        return np.nan
-
-    atr = float(
-        np.mean(
-            clean[:period]
-        )
-    )
-
-    for tr in clean[period:]:
-
-        atr = (
-            atr * (period - 1)
-            + tr
-        ) / period
-
-    return float(atr)
-
-
-# ============================================================
-# BAR TIME
-# ============================================================
 
 def floor_bar_timestamp(
     ts: datetime,
-    minutes: int = 3,
-) -> Optional[datetime]:
-
+    minutes: int = 3
+):
     anchor = ts.replace(
         hour=9,
         minute=15,
@@ -390,7 +271,9 @@ def floor_bar_timestamp(
         return None
 
     elapsed = int(
-        (ts - anchor).total_seconds()
+        (
+            ts - anchor
+        ).total_seconds()
         // 60
     )
 
@@ -398,23 +281,167 @@ def floor_bar_timestamp(
         elapsed // minutes
     ) * minutes
 
-    result = (
+    return (
         anchor
-        + timedelta(minutes=bucket)
+        + timedelta(
+            minutes=bucket
+        )
     )
 
-    if result.time() > datetime.strptime(
-        CONFIG["session_end"],
-        "%H:%M",
-    ).time():
+
+def wilder_atr(
+    trs: List[float],
+    period: int = 14
+):
+    if len(trs) < period:
+        return np.nan
+
+    atr = float(
+        np.mean(
+            trs[:period]
+        )
+    )
+
+    for tr in trs[period:]:
+        atr = (
+            atr * (period - 1)
+            + tr
+        ) / period
+
+    return float(atr)
+
+
+def parse_expiry(value):
+    """
+    Convert common Kotak expiry representations into datetime.
+
+    Supports:
+    - datetime
+    - timestamp
+    - epoch seconds/milliseconds
+    - DDMMMYYYY
+    - DDMMMYY
+    - YYYY-MM-DD
+    - DD-MM-YYYY
+    - DD/MM/YYYY
+    """
+
+    if value is None:
         return None
 
-    return result
+    if isinstance(
+        value,
+        datetime
+    ):
+        return value
+
+    if isinstance(
+        value,
+        (int, float)
+    ):
+
+        try:
+
+            x = float(value)
+
+            if x <= 0:
+                return None
+
+            if x > 10_000_000_000:
+                return datetime.fromtimestamp(
+                    x / 1000
+                )
+
+            if x > 1_000_000_000:
+                return datetime.fromtimestamp(
+                    x
+                )
+
+        except Exception:
+            return None
+
+    text = str(value).strip()
+
+    if not text:
+        return None
+
+    formats = [
+        "%d%b%Y",
+        "%d%b%y",
+        "%Y-%m-%d",
+        "%d-%m-%Y",
+        "%d/%m/%Y",
+        "%d%b%Y %H:%M:%S",
+        "%Y-%m-%d %H:%M:%S",
+    ]
+
+    for fmt in formats:
+
+        try:
+            return datetime.strptime(
+                text.upper(),
+                fmt
+            )
+
+        except Exception:
+            pass
+
+    return None
 
 
-# ============================================================
-# DATA CLASS
-# ============================================================
+def expiry_from_record(record):
+    """
+    Try multiple fields used by scrip master.
+    """
+
+    for key in [
+        "pExpiryDate",
+        "lExpiryDate",
+        "pMaturityDate",
+        "pLastTradingDate",
+    ]:
+
+        value = record.get(key)
+
+        dt = parse_expiry(value)
+
+        if dt is not None:
+            return dt
+
+    return None
+
+
+def option_type_from_record(record):
+    return str(
+        record.get(
+            "pOptionType",
+            ""
+        )
+        or ""
+    ).upper().strip()
+
+
+def strike_from_record(record):
+    for key in [
+        "dStrikePrice",
+        "dStrikePrice;",
+        "strike_price",
+        "strikePrice",
+    ]:
+
+        value = safe_float(
+            record.get(key)
+        )
+
+        if is_valid_number(value):
+            return value
+
+    return np.nan
+
+
+# =========================================================
+# CANDLE
+# =========================================================
 
 @dataclass
 class Candle3Min:
@@ -434,29 +461,34 @@ class Candle3Min:
     fut_volume: float
     fut_oi: float
 
-    heavy: Dict[str, Dict[str, float]] = field(
+    heavy: Dict[
+        str,
+        Dict[str, float]
+    ] = field(
         default_factory=dict
     )
 
-    option_chain: Dict[str, Any] = field(
+    option_chain: Dict[
+        str,
+        Any
+    ] = field(
         default_factory=dict
     )
 
 
-# ============================================================
+# =========================================================
 # OPENING RANGE
-# ============================================================
+# =========================================================
 
 class OpeningRangeEngine:
 
-    def __init__(self, minutes: int = 15):
-
+    def __init__(
+        self,
+        minutes=15
+    ):
         self.minutes = minutes
-
         self.or_high = None
-
         self.or_low = None
-
         self.or_set = False
 
     def reset(self):
@@ -465,19 +497,16 @@ class OpeningRangeEngine:
         self.or_low = None
         self.or_set = False
 
-    def update(self, candle: Candle3Min):
+    def update(self, candle):
 
-        elapsed = (
+        mins = (
             candle.timestamp.hour * 60
             + candle.timestamp.minute
-            - 9 * 60
-            - 15
+        ) - (
+            9 * 60 + 15
         )
 
-        if elapsed < 0:
-            return
-
-        if elapsed < self.minutes:
+        if mins < self.minutes:
 
             if self.or_high is None:
 
@@ -488,26 +517,23 @@ class OpeningRangeEngine:
 
                 self.or_high = max(
                     self.or_high,
-                    candle.fut_h,
+                    candle.fut_h
                 )
 
                 self.or_low = min(
                     self.or_low,
-                    candle.fut_l,
+                    candle.fut_l
                 )
 
         else:
 
-            self.or_set = (
-                self.or_high is not None
-                and self.or_low is not None
-            )
+            self.or_set = True
 
     def features(
         self,
-        candle: Candle3Min,
-        atr: float,
-    ) -> Dict[str, Any]:
+        candle,
+        atr
+    ):
 
         names = [
             "or_high",
@@ -521,13 +547,13 @@ class OpeningRangeEngine:
         if (
             not self.or_set
             or self.or_high is None
-            or self.or_low is None
             or not is_valid_number(atr)
             or atr <= 0
         ):
+
             return {
-                key: np.nan
-                for key in names
+                k: np.nan
+                for k in names
             }
 
         return {
@@ -569,9 +595,9 @@ class OpeningRangeEngine:
         }
 
 
-# ============================================================
+# =========================================================
 # SESSION CONTEXT
-# ============================================================
+# =========================================================
 
 class SessionContextEngine:
 
@@ -584,9 +610,9 @@ class SessionContextEngine:
 
     def set_previous_day(
         self,
-        close: float,
-        high: float,
-        low: float,
+        close,
+        high,
+        low
     ):
 
         self.prev_close = close
@@ -595,7 +621,7 @@ class SessionContextEngine:
 
     def set_today_open(
         self,
-        open_price: float,
+        open_price
     ):
 
         self.today_open = open_price
@@ -606,9 +632,9 @@ class SessionContextEngine:
 
     def features(
         self,
-        candle: Candle3Min,
-        atr: float,
-    ) -> Dict[str, Any]:
+        candle,
+        atr
+    ):
 
         names = [
             "gap_points",
@@ -625,18 +651,16 @@ class SessionContextEngine:
         ):
 
             return {
-                key: np.nan
-                for key in names
+                k: np.nan
+                for k in names
             }
 
-        open_price = (
-            self.today_open
-            if self.today_open is not None
-            else candle.fut_o
-        )
-
         gap = (
-            open_price
+            (
+                self.today_open
+                if self.today_open is not None
+                else candle.fut_o
+            )
             - self.prev_close
         )
 
@@ -677,25 +701,19 @@ class SessionContextEngine:
         }
 
 
-# ============================================================
+# =========================================================
 # PCR ENGINE
-# ============================================================
+# =========================================================
 
 class OptionChainEngine:
-    """
-    PCR feature engine.
-
-    Input is already-collected live quote data.
-
-    No full-chain endpoint is called.
-    """
 
     def compute(
         self,
-        chain: Optional[Dict[str, Any]],
-    ) -> Dict[str, Any]:
+        chain
+    ):
 
         if not chain:
+
             return {
                 "pcr_oi": np.nan,
                 "pcr_oi_missing": 1,
@@ -728,104 +746,113 @@ class OptionChainEngine:
                 "pe_contracts_seen": 0,
             }
 
-        mapping = {
-            "pcr_oi": "pcr_oi",
-            "pcr_volume": "pcr_volume",
-            "ce_oi_change": "ce_oi_change",
-            "pe_oi_change": "pe_oi_change",
-            "atm_iv": "atm_iv",
-            "iv_change": "iv_change",
-            "ce_oi_atm": "ce_oi_atm",
-            "pe_oi_atm": "pe_oi_atm",
-            "atm_strike": "atm_strike",
-        }
-
         out = {}
 
-        for feature, key in mapping.items():
+        for key in [
+            "pcr_oi",
+            "pcr_volume",
+            "ce_oi_change",
+            "pe_oi_change",
+            "atm_iv",
+            "iv_change",
+            "ce_oi_atm",
+            "pe_oi_atm",
+            "atm_strike",
+        ]:
 
             value = chain.get(
                 key,
-                np.nan,
+                np.nan
             )
 
-            out[feature] = value
-
-            missing = (
-                not is_valid_number(value)
-            )
+            out[key] = value
 
             out[
-                f"{feature}_missing"
-            ] = int(missing)
+                f"{key}_missing"
+            ] = int(
+                not is_valid_number(
+                    value
+                )
+            )
 
-        out["ce_contracts_seen"] = int(
+        out[
+            "ce_contracts_seen"
+        ] = int(
             chain.get(
                 "ce_contracts_seen",
-                0,
+                0
             )
         )
 
-        out["pe_contracts_seen"] = int(
+        out[
+            "pe_contracts_seen"
+        ] = int(
             chain.get(
                 "pe_contracts_seen",
-                0,
+                0
             )
         )
 
         return out
 
 
-# ============================================================
+# =========================================================
 # HEAVYWEIGHT ENGINE
-# ============================================================
+# =========================================================
 
 class HeavyweightEngine:
 
     def __init__(
         self,
-        weights: Dict[str, float],
+        weights
     ):
 
         self.base_weights = weights
-
-        self.day_open: Dict[str, float] = {}
+        self.day_open = {}
 
     def set_day_open(
         self,
-        symbol: str,
-        price: float,
+        symbol,
+        price
     ):
 
         if (
             is_valid_number(price)
             and price > 0
         ):
-            self.day_open[symbol] = price
+
+            self.day_open[
+                symbol
+            ] = price
 
     def reset_day(self):
+
         self.day_open.clear()
 
     def compute(
         self,
-        candle: Candle3Min,
-    ) -> Dict[str, float]:
+        candle
+    ):
 
         contributions = []
-
         returns = []
-
         bullish = 0
 
-        for symbol, weight in self.base_weights.items():
+        for symbol, weight in (
+            self.base_weights.items()
+        ):
 
-            data = candle.heavy.get(symbol)
-
-            if not data:
+            if symbol not in candle.heavy:
                 continue
 
-            open_price = self.day_open.get(
+            data = candle.heavy[
                 symbol
+            ]
+
+            open_price = (
+                self.day_open.get(
+                    symbol
+                )
             )
 
             if open_price is None:
@@ -834,22 +861,26 @@ class HeavyweightEngine:
                     data.get(
                         "o",
                         data.get(
-                            "c",
-                            np.nan,
-                        ),
+                            "c"
+                        )
                     )
                 )
 
                 if (
-                    is_valid_number(open_price)
+                    is_valid_number(
+                        open_price
+                    )
                     and open_price > 0
                 ):
+
                     self.day_open[
                         symbol
                     ] = open_price
 
             if (
-                not is_valid_number(open_price)
+                not is_valid_number(
+                    open_price
+                )
                 or open_price <= 0
             ):
                 continue
@@ -858,7 +889,9 @@ class HeavyweightEngine:
                 data.get("c")
             )
 
-            if not is_valid_number(close_price):
+            if not is_valid_number(
+                close_price
+            ):
                 continue
 
             ret = (
@@ -866,32 +899,20 @@ class HeavyweightEngine:
                 - open_price
             ) / open_price
 
-            relative_volume = safe_float(
-                data.get(
-                    "rel_volume",
-                    1.0,
-                ),
-                1.0,
-            )
-
-            contribution = (
-                weight
-                * ret
-                * relative_volume
-            )
-
             contributions.append(
-                contribution
+                weight * ret
             )
 
-            returns.append(ret)
+            returns.append(
+                ret
+            )
 
             vwap = safe_float(
                 data.get(
                     "vwap",
-                    close_price,
+                    close_price
                 ),
-                close_price,
+                close_price
             )
 
             if close_price >= vwap:
@@ -903,9 +924,9 @@ class HeavyweightEngine:
             else 0.0
         )
 
-        count = max(
+        n = max(
             len(contributions),
-            1,
+            1
         )
 
         return {
@@ -914,12 +935,14 @@ class HeavyweightEngine:
                 total,
 
             "breadth_10":
-                bullish / count,
+                bullish / n,
 
             "dispersion_index":
                 (
                     float(
-                        np.std(returns)
+                        np.std(
+                            returns
+                        )
                     )
                     if returns
                     else 0.0
@@ -927,41 +950,43 @@ class HeavyweightEngine:
 
             "contribution_concentration":
                 (
-                    max(contributions)
+                    max(
+                        contributions,
+                        key=abs
+                    )
                     / (
                         abs(total)
                         + 1e-9
                     )
-                )
-                if contributions
-                else 0.0,
+                    if contributions
+                    else 0.0
+                ),
 
             "hw_bullish_count":
                 bullish,
+
+            "hw_symbols_seen":
+                len(contributions),
         }
 
 
-# ============================================================
+# =========================================================
 # FEATURE ENGINE
-# ============================================================
+# =========================================================
 
 class FeatureEngine:
 
-    def __init__(
-        self,
-        heavy_weights: Dict[str, float],
-    ):
+    def __init__(self):
 
         self.vwap_pv = 0.0
-
         self.vwap_vol = 0.0
 
-        self.tr_history: List[float] = []
+        self.tr_history = []
 
-        self.history: List[Dict[str, Any]] = []
+        self.history = []
 
         self.hw = HeavyweightEngine(
-            heavy_weights
+            HEAVYWEIGHTS
         )
 
         self.or_eng = OpeningRangeEngine(
@@ -983,25 +1008,27 @@ class FeatureEngine:
         self.history.clear()
 
         self.hw.reset_day()
+
         self.or_eng.reset()
+
         self.sess.reset()
 
     def set_previous_day(
         self,
-        close: float,
-        high: float,
-        low: float,
+        close,
+        high,
+        low
     ):
 
         self.sess.set_previous_day(
             close,
             high,
-            low,
+            low
         )
 
     def set_today_open(
         self,
-        open_price: float,
+        open_price
     ):
 
         self.sess.set_today_open(
@@ -1010,13 +1037,13 @@ class FeatureEngine:
 
     def compute(
         self,
-        candle: Candle3Min,
-        previous: List[Candle3Min],
-    ) -> Dict[str, Any]:
+        candle,
+        prev
+    ):
 
-        # ----------------------------------------------------
+        # =================================================
         # VWAP
-        # ----------------------------------------------------
+        # =================================================
 
         typical = (
             candle.fut_h
@@ -1024,42 +1051,42 @@ class FeatureEngine:
             + candle.fut_c
         ) / 3.0
 
-        volume = max(
-            safe_float(
-                candle.fut_volume,
-                0.0,
-            ),
-            0.0,
+        volume = safe_float(
+            candle.fut_volume,
+            0.0
         )
 
         self.vwap_pv += (
-            typical * volume
+            typical * max(
+                volume,
+                0.0
+            )
         )
 
-        self.vwap_vol += volume
+        self.vwap_vol += max(
+            volume,
+            0.0
+        )
 
-        if self.vwap_vol > 0:
+        fut_vwap = (
+            self.vwap_pv
+            / self.vwap_vol
+            if self.vwap_vol > 0
+            else typical
+        )
 
-            fut_vwap = (
-                self.vwap_pv
-                / self.vwap_vol
-            )
-
-        else:
-
-            fut_vwap = typical
-
-        # ----------------------------------------------------
+        # =================================================
         # TRUE RANGE / ATR
-        # ----------------------------------------------------
+        # =================================================
 
-        if previous:
+        if prev:
 
             previous_close = (
-                previous[-1].fut_c
+                prev[-1].fut_c
             )
 
             tr = max(
+
                 candle.fut_h
                 - candle.fut_l,
 
@@ -1083,7 +1110,9 @@ class FeatureEngine:
 
         atr_prev = wilder_atr(
             self.tr_history,
-            CONFIG["atr_period"],
+            CONFIG[
+                "atr_period"
+            ]
         )
 
         self.tr_history.append(
@@ -1092,30 +1121,35 @@ class FeatureEngine:
 
         atr_close = wilder_atr(
             self.tr_history,
-            CONFIG["atr_period"],
+            CONFIG[
+                "atr_period"
+            ]
         )
 
-        # Research convention:
-        # features use ATR available BEFORE this bar's
-        # TR is added.
+        # Research lock:
+        # features use PREVIOUS ATR,
+        # not current close ATR.
+
         atr = atr_prev
 
         atr_warmup = int(
-            not is_valid_number(atr)
+            not is_valid_number(
+                atr
+            )
         )
 
-        # ----------------------------------------------------
+        # =================================================
         # SMA20
-        # ----------------------------------------------------
-
-        required_previous = (
-            CONFIG["sma_period"] - 1
-        )
+        # =================================================
 
         closes = [
             c.spot_c
-            for c in previous[
-                -required_previous:
+            for c in prev[
+                -(
+                    CONFIG[
+                        "sma_period"
+                    ] - 1
+                ):
             ]
         ]
 
@@ -1125,7 +1159,9 @@ class FeatureEngine:
 
         sma_ready = (
             len(closes)
-            >= CONFIG["sma_period"]
+            >= CONFIG[
+                "sma_period"
+            ]
         )
 
         spot_sma = (
@@ -1136,9 +1172,9 @@ class FeatureEngine:
             else np.nan
         )
 
-        # ----------------------------------------------------
+        # =================================================
         # NORMALIZED FEATURES
-        # ----------------------------------------------------
+        # =================================================
 
         if (
             is_valid_number(atr)
@@ -1212,36 +1248,32 @@ class FeatureEngine:
 
             spread_slope = 0.0
 
-        # ----------------------------------------------------
-        # OI CLASSIFICATION
-        # ----------------------------------------------------
+        # =================================================
+        # FUTURES OI
+        # =================================================
 
-        previous_oi = (
-            previous[-1].fut_oi
-            if previous
-            else candle.fut_oi
-        )
+        if prev:
 
-        oi_change = (
-            candle.fut_oi
-            - previous_oi
-        )
+            oi_change = (
+                candle.fut_oi
+                - prev[-1].fut_oi
+            )
 
-        previous_close = (
-            previous[-1].fut_c
-            if previous
-            else candle.fut_c
-        )
+            price_up = (
+                candle.fut_c
+                > prev[-1].fut_c
+            )
 
-        price_up = (
-            candle.fut_c
-            > previous_close
-        )
+            price_down = (
+                candle.fut_c
+                < prev[-1].fut_c
+            )
 
-        price_down = (
-            candle.fut_c
-            < previous_close
-        )
+        else:
+
+            oi_change = 0.0
+            price_up = False
+            price_down = False
 
         oi_long_buildup = int(
             price_up
@@ -1275,31 +1307,33 @@ class FeatureEngine:
 
         if oi_change != 0:
 
-            direction = (
-                1
-                if price_up
-                else -1
-            )
-
             oi_strength = (
-                direction
-                * np.sign(oi_change)
+                (
+                    1
+                    if price_up
+                    else -1
+                )
+                * np.sign(
+                    oi_change
+                )
                 * np.log1p(
-                    abs(oi_change)
+                    abs(
+                        oi_change
+                    )
                 )
             )
 
-        # ----------------------------------------------------
+        # =================================================
         # OPENING RANGE
-        # ----------------------------------------------------
+        # =================================================
 
         self.or_eng.update(
             candle
         )
 
-        # ----------------------------------------------------
+        # =================================================
         # DATA QUALITY
-        # ----------------------------------------------------
+        # =================================================
 
         missing_spot = int(
             not is_valid_number(
@@ -1326,12 +1360,14 @@ class FeatureEngine:
             or candle.fut_volume <= 0
         )
 
-        missing_heavy = int(
+        missing_heavyweight = int(
             len(candle.heavy) == 0
         )
 
         missing_option = int(
-            len(candle.option_chain) == 0
+            len(
+                candle.option_chain
+            ) == 0
         )
 
         bad_ohlc = int(
@@ -1347,59 +1383,47 @@ class FeatureEngine:
             candle.fut_oi == 0
         )
 
-        quality_flags = [
+        quality_penalties = sum([
             missing_spot,
             missing_future,
             missing_oi,
             missing_volume,
-            missing_heavy,
+            missing_heavyweight,
             missing_option,
             bad_ohlc,
             zero_volume,
             zero_oi,
-        ]
+        ])
 
         data_quality_score = max(
             0.0,
             1.0
-            - 0.1 * sum(
-                quality_flags
-            ),
+            - 0.1
+            * quality_penalties
         )
 
-        # ----------------------------------------------------
-        # CONTEXT
-        # ----------------------------------------------------
+        # =================================================
+        # BASIS
+        # =================================================
 
-        if (
-            is_valid_number(
-                candle.fut_c
+        basis = (
+            candle.fut_c
+            - candle.spot_c
+        )
+
+        # =================================================
+        # PCR
+        # =================================================
+
+        pcr_features = (
+            self.opt.compute(
+                candle.option_chain
             )
-            and is_valid_number(
-                candle.spot_c
-            )
-        ):
+        )
 
-            basis = (
-                candle.fut_c
-                - candle.spot_c
-            )
-
-        else:
-
-            basis = np.nan
-
-        if (
-            is_valid_number(atr)
-            and atr > 0
-        ):
-            or_atr = atr
-        else:
-            or_atr = 0.0
-
-        # ----------------------------------------------------
+        # =================================================
         # FINAL FEATURES
-        # ----------------------------------------------------
+        # =================================================
 
         features = {
 
@@ -1462,8 +1486,8 @@ class FeatureEngine:
                 spot_sma,
 
             "sma20_warmup_flag":
-                int(
-                    not sma_ready
+                1 - int(
+                    sma_ready
                 ),
 
             "oi_change":
@@ -1492,8 +1516,9 @@ class FeatureEngine:
                     candle.timestamp.hour
                     * 60
                     + candle.timestamp.minute
-                    - 9 * 60
-                    - 15
+                )
+                - (
+                    9 * 60 + 15
                 ),
 
             "day_of_week":
@@ -1505,17 +1530,19 @@ class FeatureEngine:
 
             **self.or_eng.features(
                 candle,
-                or_atr,
+                atr
+                if is_valid_number(atr)
+                else 0.0
             ),
 
             **self.sess.features(
                 candle,
-                or_atr,
+                atr
+                if is_valid_number(atr)
+                else 0.0
             ),
 
-            **self.opt.compute(
-                candle.option_chain
-            ),
+            **pcr_features,
 
             "missing_spot":
                 missing_spot,
@@ -1530,7 +1557,7 @@ class FeatureEngine:
                 missing_volume,
 
             "missing_heavyweight":
-                missing_heavy,
+                missing_heavyweight,
 
             "missing_option_chain":
                 missing_option,
@@ -1558,9 +1585,9 @@ class FeatureEngine:
         return features
 
 
-# ============================================================
+# =========================================================
 # LABEL ENGINE
-# ============================================================
+# =========================================================
 
 class LabelEngine:
 
@@ -1574,7 +1601,7 @@ class LabelEngine:
             "triple_lower_atr"
         ]
 
-        self.time_barrier = CONFIG[
+        self.tb_horizon = CONFIG[
             "time_barrier_min"
         ]
 
@@ -1598,10 +1625,10 @@ class LabelEngine:
 
     def _excursion(
         self,
-        entry: float,
-        future: List[Candle3Min],
-        direction: int,
-        max_bars: int,
+        entry,
+        future,
+        direction,
+        max_bars
     ):
 
         mfe = 0.0
@@ -1609,7 +1636,7 @@ class LabelEngine:
 
         available = min(
             len(future),
-            max_bars,
+            max_bars
         )
 
         for candle in future[
@@ -1621,13 +1648,13 @@ class LabelEngine:
                 mfe = max(
                     mfe,
                     candle.fut_h
-                    - entry,
+                    - entry
                 )
 
                 mae = max(
                     mae,
                     entry
-                    - candle.fut_l,
+                    - candle.fut_l
                 )
 
             else:
@@ -1635,13 +1662,13 @@ class LabelEngine:
                 mfe = max(
                     mfe,
                     entry
-                    - candle.fut_l,
+                    - candle.fut_l
                 )
 
                 mae = max(
                     mae,
                     candle.fut_h
-                    - entry,
+                    - entry
                 )
 
         complete = int(
@@ -1651,128 +1678,118 @@ class LabelEngine:
         return (
             mfe,
             mae,
-            complete,
+            complete
         )
 
     def generate(
         self,
-        entry_price: float,
-        atr: float,
-        future_after_entry: List[Candle3Min],
-        direction: int = 1,
-        signal_timestamp: Optional[
-            datetime
-        ] = None,
-        entry_timestamp: Optional[
-            datetime
-        ] = None,
-    ) -> Dict[str, Any]:
-
-        # ----------------------------------------------------
-        # Alignment lock
-        # ----------------------------------------------------
+        entry_price,
+        atr,
+        future_after_entry,
+        direction=1,
+        signal_timestamp=None,
+        entry_timestamp=None,
+    ):
 
         if (
             entry_timestamp
             and future_after_entry
         ):
 
-            first_future_timestamp = (
+            first_ts = (
                 future_after_entry[
                     0
                 ].timestamp
             )
 
-            if (
-                first_future_timestamp
-                <= entry_timestamp
-            ):
+            if first_ts <= entry_timestamp:
 
                 raise ValueError(
                     "FUTURE ALIGNMENT "
-                    "VIOLATION: future candle "
-                    "must be strictly AFTER "
-                    "entry bar."
+                    "VIOLATION"
                 )
 
         if (
-            not is_valid_number(atr)
+            atr is None
+            or not is_valid_number(atr)
             or atr <= 0
         ):
 
             atr = np.nan
 
-        # ----------------------------------------------------
-        # Barriers
-        # ----------------------------------------------------
+        if np.isnan(atr):
 
-        if is_valid_number(atr):
+            upper = np.nan
+            lower = np.nan
 
-            target = (
+        else:
+
+            upper = (
                 entry_price
                 + direction
                 * self.upper
                 * atr
             )
 
-            stop = (
+            lower = (
                 entry_price
                 - direction
                 * self.lower
                 * atr
             )
 
-        else:
-
-            target = np.nan
-            stop = np.nan
-
         outcome = "TIMEOUT"
 
-        bars_to_outcome = 0
+        bars = 0
 
         mfe_tb = 0.0
         mae_tb = 0.0
 
         time_to_mfe = 0
 
-        max_bars = (
-            self.time_barrier
-            // CONFIG["bar_minutes"]
+        max_tb_bars = (
+            self.tb_horizon
+            // CONFIG[
+                "bar_minutes"
+            ]
         )
 
         for i, candle in enumerate(
             future_after_entry[
-                :max_bars
+                :max_tb_bars
             ]
         ):
 
-            bars_to_outcome = i + 1
+            bars = i + 1
 
             if direction == 1:
 
                 mfe_tb = max(
                     mfe_tb,
                     candle.fut_h
-                    - entry_price,
+                    - entry_price
                 )
 
                 mae_tb = max(
                     mae_tb,
                     entry_price
-                    - candle.fut_l,
+                    - candle.fut_l
                 )
 
                 hit_target = (
-                    is_valid_number(target)
+                    not np.isnan(
+                        upper
+                    )
                     and candle.fut_h
-                    >= target
+                    >= upper
                 )
 
                 hit_stop = (
-                    is_valid_number(stop)
+                    not np.isnan(
+                        lower
+                    )
                     and candle.fut_l
-                    <= stop
+                    <= lower
                 )
 
             else:
@@ -1780,36 +1797,42 @@ class LabelEngine:
                 mfe_tb = max(
                     mfe_tb,
                     entry_price
-                    - candle.fut_l,
+                    - candle.fut_l
                 )
 
                 mae_tb = max(
                     mae_tb,
                     candle.fut_h
-                    - entry_price,
+                    - entry_price
                 )
 
                 hit_target = (
-                    is_valid_number(target)
+                    not np.isnan(
+                        upper
+                    )
                     and candle.fut_l
-                    <= target
+                    <= upper
                 )
 
                 hit_stop = (
-                    is_valid_number(stop)
+                    not np.isnan(
+                        lower
+                    )
                     and candle.fut_h
-                    >= stop
+                    >= lower
                 )
 
             if (
                 mfe_tb > 0
                 and time_to_mfe == 0
             ):
-                time_to_mfe = (
-                    i + 1
-                )
 
-            if hit_target and hit_stop:
+                time_to_mfe = bars
+
+            if (
+                hit_target
+                and hit_stop
+            ):
 
                 outcome = "AMBIGUOUS"
                 break
@@ -1823,10 +1846,6 @@ class LabelEngine:
 
                 outcome = "STOP_FIRST"
                 break
-
-        # ----------------------------------------------------
-        # R multiple
-        # ----------------------------------------------------
 
         if outcome == "TARGET_FIRST":
 
@@ -1845,46 +1864,40 @@ class LabelEngine:
 
         valid = int(
             outcome != "AMBIGUOUS"
-            and is_valid_number(atr)
+            and not np.isnan(
+                atr
+            )
         )
 
-        # ----------------------------------------------------
-        # Normalized excursion
-        # ----------------------------------------------------
-
-        if (
-            is_valid_number(atr)
-            and atr > 0
-        ):
-
-            mfe_atr = (
-                mfe_tb / atr
+        mfe_atr = (
+            mfe_tb / atr
+            if (
+                not np.isnan(atr)
+                and atr > 0
             )
+            else np.nan
+        )
 
-            mae_atr = (
-                mae_tb / atr
+        mae_atr = (
+            mae_tb / atr
+            if (
+                not np.isnan(atr)
+                and atr > 0
             )
-
-        else:
-
-            mfe_atr = np.nan
-            mae_atr = np.nan
+            else np.nan
+        )
 
         velocity = (
             mfe_atr
             / max(
-                bars_to_outcome,
-                1,
+                bars,
+                1
             )
             if is_valid_number(
                 mfe_atr
             )
             else np.nan
         )
-
-        # ----------------------------------------------------
-        # Trajectory
-        # ----------------------------------------------------
 
         if is_valid_number(
             mfe_atr
@@ -1951,15 +1964,6 @@ class LabelEngine:
             "entry_price":
                 entry_price,
 
-            "target_price":
-                target,
-
-            "stop_price":
-                stop,
-
-            "direction":
-                direction,
-
             "triple_barrier_outcome":
                 outcome,
 
@@ -1985,21 +1989,19 @@ class LabelEngine:
                 time_to_mfe,
 
             "bars_to_outcome":
-                bars_to_outcome,
+                bars,
 
             "velocity":
                 velocity,
         }
 
-        # ----------------------------------------------------
-        # MFE / MAE horizons
-        # ----------------------------------------------------
-
         for horizon in self.mfe_horizons:
 
-            max_horizon_bars = (
+            max_bars = (
                 horizon
-                // CONFIG["bar_minutes"]
+                // CONFIG[
+                    "bar_minutes"
+                ]
             )
 
             mfe_h, mae_h, complete = (
@@ -2007,36 +2009,31 @@ class LabelEngine:
                     entry_price,
                     future_after_entry,
                     direction,
-                    max_horizon_bars,
+                    max_bars
                 )
             )
 
-            if (
-                is_valid_number(atr)
-                and atr > 0
-            ):
-
-                labels[
-                    f"mfe_atr_{horizon}m"
-                ] = (
-                    mfe_h / atr
+            labels[
+                f"mfe_atr_{horizon}m"
+            ] = (
+                mfe_h / atr
+                if (
+                    not np.isnan(atr)
+                    and atr > 0
                 )
+                else np.nan
+            )
 
-                labels[
-                    f"mae_atr_{horizon}m"
-                ] = (
-                    mae_h / atr
+            labels[
+                f"mae_atr_{horizon}m"
+            ] = (
+                mae_h / atr
+                if (
+                    not np.isnan(atr)
+                    and atr > 0
                 )
-
-            else:
-
-                labels[
-                    f"mfe_atr_{horizon}m"
-                ] = np.nan
-
-                labels[
-                    f"mae_atr_{horizon}m"
-                ] = np.nan
+                else np.nan
+            )
 
             labels[
                 f"horizon_{horizon}m_complete"
@@ -2045,86 +2042,75 @@ class LabelEngine:
         return labels
 
 
-# ============================================================
+# =========================================================
 # DATASET MANAGER
-# ============================================================
+# =========================================================
 
 class DatasetManager:
 
     def __init__(
         self,
-        path: Optional[str] = None,
+        path=None
     ):
 
         self.base = Path(
             path
-            or CONFIG["dataset_path"]
+            or CONFIG[
+                "dataset_path"
+            ]
         )
 
         self.base.mkdir(
             parents=True,
-            exist_ok=True,
+            exist_ok=True
         )
 
     def write_parquet(
         self,
-        df: pd.DataFrame,
-        name: str = "features",
+        df,
+        name="features"
     ):
 
         if df.empty:
             return
 
-        if pa is None or pq is None:
+        data = df.copy()
 
-            raise ImportError(
-                "pyarrow is required for "
-                "Parquet dataset writing."
-            )
+        if "timestamp" in data.columns:
 
-        frame = df.copy()
-
-        if "timestamp" in frame.columns:
-
-            frame["date"] = (
+            data["date"] = (
                 pd.to_datetime(
-                    frame["timestamp"]
+                    data[
+                        "timestamp"
+                    ]
                 )
                 .dt.date
                 .astype(str)
             )
 
         table = pa.Table.from_pandas(
-            frame,
-            preserve_index=False,
-        )
-
-        output = (
-            self.base
-            / name
-        )
-
-        output.mkdir(
-            parents=True,
-            exist_ok=True,
+            data,
+            preserve_index=False
         )
 
         pq.write_to_dataset(
             table,
-            root_path=str(output),
-            partition_cols=(
-                ["date"]
-                if "date" in frame.columns
-                else None
+            root_path=str(
+                self.base / name
             ),
+            partition_cols=[
+                "date"
+            ]
+            if "date" in data.columns
+            else None,
             existing_data_behavior=
                 "overwrite_or_ignore",
         )
 
     def purged_walk_forward_by_date(
         self,
-        df: pd.DataFrame,
-        n_splits: int = 5,
+        df,
+        n_splits=5
     ):
 
         if "timestamp" not in df.columns:
@@ -2133,67 +2119,85 @@ class DatasetManager:
                 "timestamp required"
             )
 
-        frame = df.copy()
+        data = df.copy()
 
-        frame["date"] = (
+        data["date"] = (
             pd.to_datetime(
-                frame["timestamp"]
+                data[
+                    "timestamp"
+                ]
             ).dt.date
         )
 
-        dates = sorted(
-            frame["date"].unique()
+        unique_dates = sorted(
+            data["date"].unique()
         )
 
-        if len(dates) < 3:
-            return []
+        n_dates = len(
+            unique_dates
+        )
 
-        fold_size = max(
+        fold = max(
             1,
-            len(dates)
-            // (n_splits + 1),
+            n_dates
+            // (
+                n_splits + 1
+            )
         )
 
         splits = []
 
-        for i in range(n_splits):
+        for i in range(
+            n_splits
+        ):
 
             train_end = (
-                (i + 1)
-                * fold_size
-            )
+                i + 1
+            ) * fold
 
             test_start = (
                 train_end + 1
             )
 
             test_end = min(
-                test_start + fold_size,
-                len(dates),
+                test_start + fold,
+                n_dates
             )
 
-            if test_start >= len(dates):
+            if test_start >= n_dates:
                 break
 
-            train_dates = dates[
-                :train_end
-            ]
+            train_dates = (
+                unique_dates[
+                    :train_end
+                ]
+            )
 
-            test_dates = dates[
-                test_start:test_end
-            ]
+            test_dates = (
+                unique_dates[
+                    test_start:test_end
+                ]
+            )
 
-            train_idx = frame[
-                frame["date"].isin(
-                    train_dates
-                )
-            ].index.tolist()
+            train_idx = (
+                data[
+                    data["date"].isin(
+                        train_dates
+                    )
+                ]
+                .index
+                .tolist()
+            )
 
-            test_idx = frame[
-                frame["date"].isin(
-                    test_dates
-                )
-            ].index.tolist()
+            test_idx = (
+                data[
+                    data["date"].isin(
+                        test_dates
+                    )
+                ]
+                .index
+                .tolist()
+            )
 
             if (
                 train_idx
@@ -2202,78 +2206,77 @@ class DatasetManager:
                 ] > 0
             ):
 
-                embargo = min(
-                    len(train_idx),
-                    CONFIG[
-                        "embargo_bars"
-                    ],
-                )
+                cut = CONFIG[
+                    "embargo_bars"
+                ]
 
-                train_idx = (
-                    train_idx[:-embargo]
-                )
+                if len(train_idx) > cut:
+                    train_idx = train_idx[
+                        :-cut
+                    ]
 
-            if train_idx and test_idx:
+            if (
+                train_idx
+                and test_idx
+            ):
 
                 splits.append(
                     (
                         train_idx,
-                        test_idx,
+                        test_idx
                     )
                 )
 
         return splits
 
 
-# ============================================================
+# =========================================================
 # KOTAK NEO ADAPTER
-# ============================================================
+# =========================================================
 
 class KotakNeoAdapter:
 
-    def __init__(
-        self,
-        runtime_config: Optional[
-            Dict[str, Any]
-        ] = None,
-    ):
+    def __init__(self):
 
         if NeoAPI is None:
 
             raise ImportError(
                 "neo_api_client is not installed. "
-                "Install the Kotak Neo SDK."
+                "Check requirements.txt."
             )
 
-        self.cfg = (
-            runtime_config
-            or load_runtime_config()
+        self.consumer_key = (
+            env_or_secret(
+                "KOTAK_CONSUMER_KEY"
+            )
         )
 
-        self.consumer_key = secret_or_env(
-            "KOTAK_CONSUMER_KEY"
+        self.mobile = (
+            env_or_secret(
+                "KOTAK_MOBILE"
+            )
         )
 
-        self.mobile = secret_or_env(
-            "KOTAK_MOBILE"
+        self.ucc = (
+            env_or_secret(
+                "KOTAK_UCC"
+            )
         )
 
-        self.ucc = secret_or_env(
-            "KOTAK_UCC"
+        self.totp = (
+            env_or_secret(
+                "KOTAK_TOTP"
+            )
         )
 
-        self.totp = secret_or_env(
-            "KOTAK_TOTP"
-        )
-
-        self.mpin = secret_or_env(
-            "KOTAK_MPIN"
+        self.mpin = (
+            env_or_secret(
+                "KOTAK_MPIN"
+            )
         )
 
         self.client = NeoAPI(
-            environment=self.cfg[
-                "neo_environment"
-            ],
+            environment="prod",
             access_token=None,
             neo_fin_key=None,
             consumer_key=(
@@ -2286,34 +2289,32 @@ class KotakNeoAdapter:
 
         self.lock = threading.Lock()
 
-        self.latest: Dict[
-            str,
-            Dict[str, Any]
-        ] = {}
+        self.latest = {}
 
-        self.tick_buffer: List[
-            Dict[str, Any]
-        ] = []
+        self.tick_buffer = []
 
-        self.previous_option_oi: Dict[
-            str,
-            float
-        ] = {}
+        self.future_token = ""
 
-        self.previous_atm_iv = np.nan
+        self.future_symbol = ""
 
-        self.last_bar_volume: Dict[
-            str,
-            float
-        ] = {}
+        self.future_expiry = None
 
-    # --------------------------------------------------------
+        self.pcr_tokens = []
+
+        self.pcr_records = {}
+
+        self.heavy_tokens = {}
+
+        self.discovery_log = []
+
+    # =====================================================
     # LOGIN
-    # --------------------------------------------------------
+    # =====================================================
 
     def login(self):
 
         required = {
+
             "KOTAK_CONSUMER_KEY":
                 self.consumer_key,
 
@@ -2341,7 +2342,9 @@ class KotakNeoAdapter:
 
             raise RuntimeError(
                 "Missing credentials: "
-                + ", ".join(missing)
+                + ", ".join(
+                    missing
+                )
             )
 
         self.client.totp_login(
@@ -2358,137 +2361,157 @@ class KotakNeoAdapter:
 
         return True
 
-    # --------------------------------------------------------
+    # =====================================================
     # CALLBACKS
-    # --------------------------------------------------------
+    # =====================================================
 
-    def on_open(self, message):
+    def on_open(
+        self,
+        message
+    ):
 
         print(
             "[Kotak Neo] WebSocket opened:",
-            message,
+            message
         )
 
-    def on_error(self, message):
+    def on_error(
+        self,
+        message
+    ):
 
         print(
-            "[Kotak Neo] WebSocket error:",
-            message,
+            "[Kotak Neo] ERROR:",
+            message
         )
 
-    def on_close(self, message):
+    def on_close(
+        self,
+        message
+    ):
 
         self.connected = False
 
         print(
             "[Kotak Neo] WebSocket closed:",
-            message,
+            message
         )
 
-    def on_message(self, message):
+    def on_message(
+        self,
+        message
+    ):
 
         try:
 
-            data = self._decode_message(
+            data = self.decode_message(
                 message
             )
 
             if data is None:
                 return
 
-            self._process_tick(
+            self.process_tick(
                 data
             )
 
         except Exception as exc:
 
             print(
-                "[Kotak Neo] message parse error:",
-                repr(exc),
+                "[Kotak Neo] Tick parse error:",
+                repr(exc)
             )
 
-    # --------------------------------------------------------
-    # MESSAGE DECODING
-    # --------------------------------------------------------
+    # =====================================================
+    # MESSAGE DECODER
+    # =====================================================
 
-    def _decode_message(
+    def decode_message(
         self,
-        message: Any,
-    ) -> Optional[Dict[str, Any]]:
+        message
+    ):
 
         if isinstance(
             message,
-            dict,
+            dict
         ):
             return message
 
         if isinstance(
             message,
-            str,
+            list
+        ):
+            return message
+
+        if isinstance(
+            message,
+            str
         ):
 
             try:
-                decoded = json.loads(
+                return json.loads(
                     message
                 )
-
-                if isinstance(
-                    decoded,
-                    dict,
-                ):
-                    return decoded
 
             except Exception:
                 return None
 
         return None
 
-    # --------------------------------------------------------
+    # =====================================================
     # TIMESTAMP
-    # --------------------------------------------------------
+    # =====================================================
 
-    def _tick_time(
+    def tick_time(
         self,
-        data: Dict[str, Any],
-    ) -> datetime:
+        data
+    ):
 
         raw = (
             data.get("ltt")
             or data.get("ftdm")
             or data.get("tvalue")
-            or data.get("timestamp")
+            or data.get("ftm0")
         )
 
         if raw is None:
+
             return datetime.now()
 
         try:
 
             if isinstance(
                 raw,
-                (int, float),
+                (int, float)
             ):
 
-                if raw > 10_000_000_000:
+                value = float(
+                    raw
+                )
+
+                if value > 10_000_000_000:
 
                     return datetime.fromtimestamp(
-                        raw / 1000
+                        value / 1000
                     )
 
-                if raw > 1_000_000_000:
+                if value > 1_000_000_000:
 
                     return datetime.fromtimestamp(
-                        raw
+                        value
                     )
 
-            text = str(raw)
+            text = str(
+                raw
+            )
 
-            formats = (
+            formats = [
                 "%d/%m/%Y %H:%M:%S",
                 "%Y-%m-%d %H:%M:%S",
                 "%Y-%m-%dT%H:%M:%S",
                 "%d-%m-%Y %H:%M:%S",
-            )
+                "%d/%m/%Y %H:%M",
+            ]
 
             for fmt in formats:
 
@@ -2496,84 +2519,170 @@ class KotakNeoAdapter:
 
                     return datetime.strptime(
                         text,
-                        fmt,
+                        fmt
                     )
 
                 except ValueError:
-                    continue
+                    pass
 
         except Exception:
             pass
 
         return datetime.now()
 
-    # --------------------------------------------------------
+    # =====================================================
     # TICK PROCESSOR
-    # --------------------------------------------------------
+    # =====================================================
 
-    def _process_tick(
+    def process_tick(
         self,
-        payload: Dict[str, Any],
+        data
     ):
 
-        # Some feed messages wrap the quote in "data".
+        # Some SDK responses may contain
+        # nested data.
+
         if isinstance(
-            payload.get("data"),
-            dict,
+            data,
+            dict
         ):
 
-            data = payload["data"]
+            if isinstance(
+                data.get("data"),
+                dict
+            ):
 
-        else:
+                data = data[
+                    "data"
+                ]
 
-            data = payload
+        # Ignore unsupported structures.
 
         if not isinstance(
             data,
-            dict,
+            dict
         ):
             return
 
         token = str(
             data.get(
                 "tk",
-                data.get(
-                    "token",
-                    ""
-                ),
+                ""
             )
-        ).strip()
+        )
 
         exchange = str(
             data.get(
                 "e",
-                data.get(
-                    "exchange_segment",
-                    ""
-                ),
+                ""
             )
-        ).strip()
-
-        if not token:
-            return
-
-        ltp = safe_float(
-            data.get("ltp")
         )
+
+        name = str(
+            data.get(
+                "name",
+                ""
+            )
+        ).lower()
+
+        symbol = str(
+            data.get(
+                "ts",
+                data.get(
+                    "pTrdSymbol",
+                    ""
+                )
+            )
+        )
+
+        # Index LTP is documented as `iv`
+        # by Kotak websocket docs.
+        # Stock/future LTP is `ltp`.
+
+        if (
+            name == "index"
+            or symbol.lower()
+            == "nifty 50"
+        ):
+
+            ltp = safe_float(
+                data.get(
+                    "iv"
+                )
+            )
+
+            open_price = safe_float(
+                data.get(
+                    "openingPrice"
+                )
+            )
+
+            high_price = safe_float(
+                data.get(
+                    "highPrice"
+                )
+            )
+
+            low_price = safe_float(
+                data.get(
+                    "lowPrice"
+                )
+            )
+
+            volume = 0.0
+            oi = 0.0
+
+        else:
+
+            ltp = safe_float(
+                data.get(
+                    "ltp"
+                )
+            )
+
+            open_price = safe_float(
+                data.get(
+                    "op"
+                )
+            )
+
+            high_price = safe_float(
+                data.get(
+                    "h"
+                )
+            )
+
+            low_price = safe_float(
+                data.get(
+                    "lo"
+                )
+            )
+
+            volume = safe_float(
+                data.get(
+                    "v"
+                ),
+                0.0
+            )
+
+            oi = safe_float(
+                data.get(
+                    "oi"
+                ),
+                0.0
+            )
 
         if not is_valid_number(
             ltp
         ):
             return
 
-        timestamp = self._tick_time(
-            data
-        )
-
         item = {
 
             "timestamp":
-                timestamp,
+                self.tick_time(
+                    data
+                ),
 
             "token":
                 token,
@@ -2582,98 +2691,39 @@ class KotakNeoAdapter:
                 exchange,
 
             "symbol":
-                str(
-                    data.get(
-                        "ts",
-                        data.get(
-                            "symbol",
-                            ""
-                        ),
-                    )
-                ),
+                symbol,
+
+            "name":
+                name,
 
             "ltp":
                 ltp,
 
             "volume":
-                safe_float(
-                    data.get(
-                        "v",
-                        data.get(
-                            "volume",
-                            0,
-                        ),
-                    ),
-                    0.0,
-                ),
+                volume,
 
             "oi":
-                safe_float(
-                    data.get(
-                        "oi",
-                        0,
-                    ),
-                    0.0,
-                ),
+                oi,
 
             "open":
-                safe_float(
-                    data.get(
-                        "op",
-                        data.get(
-                            "open",
-                            np.nan,
-                        ),
-                    )
-                ),
+                open_price,
 
             "high":
-                safe_float(
-                    data.get(
-                        "h",
-                        data.get(
-                            "high",
-                            np.nan,
-                        ),
-                    )
-                ),
+                high_price,
 
             "low":
-                safe_float(
-                    data.get(
-                        "lo",
-                        data.get(
-                            "low",
-                            np.nan,
-                        ),
-                    )
-                ),
+                low_price,
 
             "vwap":
                 safe_float(
                     data.get(
-                        "ap",
-                        data.get(
-                            "vwap",
-                            np.nan,
-                        ),
-                    )
-                ),
-
-            "iv":
-                safe_float(
-                    data.get(
-                        "iv",
-                        np.nan,
+                        "ap"
                     )
                 ),
 
             "strike":
-                safe_float(
-                    data.get(
-                        "strike",
-                        np.nan,
-                    )
+                strike_from_record(
+                    data
                 ),
 
             "option_type":
@@ -2682,10 +2732,16 @@ class KotakNeoAdapter:
                         "option_type",
                         data.get(
                             "optType",
-                            ""
-                        ),
+                            data.get(
+                                "pOptionType",
+                                ""
+                            )
+                        )
                     )
                 ).upper(),
+
+            "raw":
+                data,
         }
 
         with self.lock:
@@ -2698,28 +2754,22 @@ class KotakNeoAdapter:
                 item
             )
 
-            max_buffer = int(
-                self.cfg.get(
-                    "max_tick_buffer",
-                    100000,
-                )
+    # =====================================================
+    # SDK SUBSCRIBE
+    # =====================================================
+
+    def subscribe(
+        self,
+        instrument_tokens,
+        is_index=False,
+        is_depth=False
+    ):
+
+        if not self.connected:
+
+            raise RuntimeError(
+                "Login first."
             )
-
-            if len(
-                self.tick_buffer
-            ) > max_buffer:
-
-                self.tick_buffer = (
-                    self.tick_buffer[
-                        -max_buffer:
-                    ]
-                )
-
-    # --------------------------------------------------------
-    # CALLBACK REGISTRATION
-    # --------------------------------------------------------
-
-    def _register_callbacks(self):
 
         self.client.on_message = (
             self.on_message
@@ -2737,15 +2787,25 @@ class KotakNeoAdapter:
             self.on_open
         )
 
-    # --------------------------------------------------------
-    # GENERIC SUBSCRIBE
-    # --------------------------------------------------------
+        return self.client.subscribe(
+            instrument_tokens=(
+                instrument_tokens
+            ),
+            isIndex=is_index,
+            isDepth=is_depth,
+        )
 
-    def subscribe(
+    # =====================================================
+    # SEARCH SCRIPT
+    # =====================================================
+
+    def search_scrip(
         self,
-        instrument_tokens: List[Dict[str, str]],
-        is_index: bool = False,
-        is_depth: bool = False,
+        exchange_segment,
+        symbol,
+        expiry="",
+        option_type="",
+        strike_price=""
     ):
 
         if not self.connected:
@@ -2754,99 +2814,602 @@ class KotakNeoAdapter:
                 "Login first."
             )
 
-        self._register_callbacks()
-
-        if not instrument_tokens:
-
-            raise ValueError(
-                "No instrument tokens supplied."
+        result = (
+            self.client.search_scrip(
+                exchange_segment=(
+                    exchange_segment
+                ),
+                symbol=symbol,
+                expiry=expiry,
+                option_type=(
+                    option_type
+                ),
+                strike_price=(
+                    strike_price
+                ),
             )
-
-        return self.client.subscribe(
-            instrument_tokens=
-                instrument_tokens,
-            isIndex=is_index,
-            isDepth=is_depth,
         )
 
-    # --------------------------------------------------------
-    # SPOT + FUTURE
-    # --------------------------------------------------------
+        if result is None:
+            return []
 
-    def subscribe_spot_future(self):
+        if isinstance(
+            result,
+            list
+        ):
+            return result
 
-        spot_token = self.cfg[
-            "nifty_spot_token"
-        ]
+        if isinstance(
+            result,
+            dict
+        ):
 
-        future_token = self.cfg[
-            "nifty_future_token"
-        ]
+            for key in [
+                "data",
+                "result",
+                "records",
+            ]:
 
-        if not spot_token:
+                value = result.get(
+                    key
+                )
 
-            raise RuntimeError(
-                "NIFTY_SPOT_TOKEN missing."
+                if isinstance(
+                    value,
+                    list
+                ):
+                    return value
+
+        return []
+
+    # =====================================================
+    # FUTURE DISCOVERY
+    # =====================================================
+
+    def discover_nifty_future(
+        self
+    ):
+
+        manual = str(
+            CONFIG[
+                "nifty_future_token"
+            ]
+            or ""
+        ).strip()
+
+        if manual:
+
+            self.future_token = manual
+
+            self.future_symbol = (
+                "NIFTY-FUT-MANUAL"
             )
 
-        if not future_token:
+            self.discovery_log.append(
+                "NIFTY future token supplied manually."
+            )
+
+            return {
+                "token":
+                    manual,
+
+                "symbol":
+                    self.future_symbol,
+
+                "expiry":
+                    None,
+            }
+
+        records = self.search_scrip(
+            "nse_fo",
+            "NIFTY"
+        )
+
+        if not records:
 
             raise RuntimeError(
-                "NIFTY_FUT_TOKEN missing."
+                "Kotak search_scrip returned "
+                "no NIFTY F&O records."
             )
+
+        now = datetime.now()
+
+        candidates = []
+
+        for record in records:
+
+            symbol = str(
+                record.get(
+                    "pTrdSymbol",
+                    ""
+                )
+            )
+
+            inst = str(
+                record.get(
+                    "pInstType",
+                    ""
+                )
+                or ""
+            ).upper()
+
+            expiry = (
+                expiry_from_record(
+                    record
+                )
+            )
+
+            token = str(
+                record.get(
+                    "pSymbol",
+                    ""
+                )
+            ).strip()
+
+            if not token:
+                continue
+
+            # NIFTY index future normally has
+            # FUTIDX in instrument information
+            # or FUT in trading symbol.
+
+            is_future = (
+                "FUT" in inst
+                or symbol.upper().endswith(
+                    "FUT"
+                )
+            )
+
+            if not is_future:
+                continue
+
+            if expiry is not None:
+
+                if expiry < now - timedelta(
+                    days=1
+                ):
+                    continue
+
+            candidates.append(
+                (
+                    expiry
+                    or datetime.max,
+                    token,
+                    symbol,
+                    record,
+                )
+            )
+
+        if not candidates:
+
+            raise RuntimeError(
+                "Could not automatically discover "
+                "NIFTY future. Use NIFTY_FUT_TOKEN "
+                "in Streamlit Secrets."
+            )
+
+        candidates.sort(
+            key=lambda x: x[0]
+        )
+
+        expiry, token, symbol, record = (
+            candidates[0]
+        )
+
+        self.future_token = str(
+            token
+        )
+
+        self.future_symbol = (
+            symbol
+        )
+
+        self.future_expiry = (
+            expiry
+        )
+
+        self.discovery_log.append(
+            "NIFTY Future: "
+            f"{symbol} / token={token}"
+        )
+
+        return {
+            "token":
+                self.future_token,
+
+            "symbol":
+                self.future_symbol,
+
+            "expiry":
+                self.future_expiry,
+
+            "record":
+                record,
+        }
+
+    # =====================================================
+    # HEAVYWEIGHT DISCOVERY
+    # =====================================================
+
+    def discover_heavyweights(
+        self
+    ):
+
+        result = {}
+
+        manual_raw = (
+            env_or_secret(
+                "HEAVY_TOKENS"
+            )
+        )
+
+        manual = {}
+
+        if manual_raw:
+
+            try:
+
+                manual = json.loads(
+                    manual_raw
+                )
+
+            except Exception:
+                manual = {}
+
+        for symbol in HEAVYWEIGHTS:
+
+            token = ""
+
+            if symbol in manual:
+
+                token = str(
+                    manual[
+                        symbol
+                    ]
+                ).strip()
+
+            if not token:
+
+                try:
+
+                    records = (
+                        self.search_scrip(
+                            "nse_cm",
+                            symbol
+                        )
+                    )
+
+                    candidates = []
+
+                    for record in records:
+
+                        name = str(
+                            record.get(
+                                "pSymbolName",
+                                ""
+                            )
+                        ).upper()
+
+                        trading = str(
+                            record.get(
+                                "pTrdSymbol",
+                                ""
+                            )
+                        ).upper()
+
+                        record_token = str(
+                            record.get(
+                                "pSymbol",
+                                ""
+                            )
+                        ).strip()
+
+                        if (
+                            record_token
+                            and (
+                                name == symbol
+                                or trading
+                                == f"{symbol}-EQ"
+                            )
+                        ):
+
+                            candidates.append(
+                                (
+                                    record_token,
+                                    record
+                                )
+                            )
+
+                    if candidates:
+
+                        token = (
+                            candidates[0][0]
+                        )
+
+                except Exception as exc:
+
+                    print(
+                        "Heavyweight search failed",
+                        symbol,
+                        repr(exc)
+                    )
+
+            if token:
+
+                result[
+                    symbol
+                ] = token
+
+        self.heavy_tokens = result
+
+        self.discovery_log.append(
+            "Heavyweights discovered: "
+            + str(
+                len(result)
+            )
+        )
+
+        return result
+
+    # =====================================================
+    # PCR OPTION DISCOVERY
+    # =====================================================
+
+    def discover_pcr_options(
+        self,
+        spot_price
+    ):
+
+        if (
+            not is_valid_number(
+                spot_price
+            )
+            or spot_price <= 0
+        ):
+
+            return []
+
+        if self.future_expiry is None:
+
+            self.discover_nifty_future()
+
+        expiry = self.future_expiry
+
+        if expiry is None:
+
+            raise RuntimeError(
+                "NIFTY future expiry unavailable. "
+                "PCR option discovery stopped."
+            )
+
+        expiry_text = expiry.strftime(
+            "%d%b%Y"
+        ).upper()
+
+        step = float(
+            CONFIG[
+                "pcr_strike_step"
+            ]
+        )
+
+        count = int(
+            CONFIG[
+                "pcr_strike_count"
+            ]
+        )
+
+        atm = (
+            round(
+                spot_price / step
+            )
+            * step
+        )
+
+        low = (
+            atm
+            - count * step
+        )
+
+        high = (
+            atm
+            + count * step
+        )
+
+        strike_query = (
+            f"{int(low)}-{int(high)}"
+        )
+
+        discovered = []
+
+        for option_type in [
+            "CE",
+            "PE",
+        ]:
+
+            try:
+
+                records = (
+                    self.search_scrip(
+                        "nse_fo",
+                        "NIFTY",
+                        expiry=expiry_text,
+                        option_type=(
+                            option_type
+                        ),
+                        strike_price=(
+                            strike_query
+                        ),
+                    )
+                )
+
+            except Exception as exc:
+
+                print(
+                    "PCR option search failed:",
+                    option_type,
+                    repr(exc)
+                )
+
+                continue
+
+            for record in records:
+
+                token = str(
+                    record.get(
+                        "pSymbol",
+                        ""
+                    )
+                ).strip()
+
+                if not token:
+                    continue
+
+                record_strike = (
+                    strike_from_record(
+                        record
+                    )
+                )
+
+                record_type = (
+                    option_type_from_record(
+                        record
+                    )
+                )
+
+                if (
+                    not is_valid_number(
+                        record_strike
+                    )
+                ):
+                    continue
+
+                if (
+                    record_type
+                    and record_type
+                    != option_type
+                ):
+                    continue
+
+                if (
+                    record_strike
+                    < low - step
+                    or record_strike
+                    > high + step
+                ):
+                    continue
+
+                discovered.append({
+
+                    "token":
+                        token,
+
+                    "option_type":
+                        option_type,
+
+                    "strike":
+                        record_strike,
+
+                    "symbol":
+                        record.get(
+                            "pTrdSymbol",
+                            ""
+                        ),
+
+                    "expiry":
+                        expiry_text,
+                })
+
+        # Remove duplicate tokens.
+
+        unique = {}
+
+        for item in discovered:
+
+            unique[
+                item["token"]
+            ] = item
+
+        self.pcr_tokens = list(
+            unique.values()
+        )
+
+        self.discovery_log.append(
+            "PCR contracts discovered: "
+            + str(
+                len(
+                    self.pcr_tokens
+                )
+            )
+        )
+
+        return self.pcr_tokens
+
+    # =====================================================
+    # AUTO DISCOVERY
+    # =====================================================
+
+    def auto_discover(
+        self
+    ):
+
+        future = (
+            self.discover_nifty_future()
+        )
+
+        heavy = (
+            self.discover_heavyweights()
+        )
+
+        # Spot index quote is obtained from
+        # Nifty 50 live index feed after subscribe.
+
+        self.discovery_log.append(
+            "Index identifier: Nifty 50"
+        )
+
+        return {
+            "future":
+                future,
+
+            "heavyweights":
+                heavy,
+        }
+
+    # =====================================================
+    # SUBSCRIBE CORE
+    # =====================================================
+
+    def subscribe_core(
+        self
+    ):
+
+        if not self.future_token:
+
+            self.discover_nifty_future()
 
         tokens = [
 
             {
                 "instrument_token":
-                    str(spot_token),
+                    CONFIG[
+                        "nifty_index_name"
+                    ],
 
                 "exchange_segment":
-                    self.cfg[
-                        "spot_exchange_segment"
-                    ],
+                    "nse_cm",
             },
 
             {
                 "instrument_token":
-                    str(future_token),
+                    self.future_token,
 
                 "exchange_segment":
-                    self.cfg[
-                        "future_exchange_segment"
-                    ],
+                    "nse_fo",
             },
         ]
 
-        return self.subscribe(
-            tokens,
-            is_index=True,
-            is_depth=False,
-        )
-
-    # --------------------------------------------------------
-    # PCR SUBSCRIPTION
-    # --------------------------------------------------------
-
-    def subscribe_pcr_tokens(self):
-
-        ce_tokens = parse_tokens(
-            self.cfg[
-                "pcr_ce_tokens"
-            ]
-        )
-
-        pe_tokens = parse_tokens(
-            self.cfg[
-                "pcr_pe_tokens"
-            ]
-        )
-
-        tokens = []
-
-        for token in (
-            ce_tokens
-            + pe_tokens
+        for symbol, token in (
+            self.heavy_tokens.items()
         ):
 
             tokens.append({
@@ -2855,73 +3418,67 @@ class KotakNeoAdapter:
                     token,
 
                 "exchange_segment":
-                    self.cfg[
-                        "pcr_exchange_segment"
-                    ],
+                    "nse_cm",
             })
 
-        if not tokens:
-
-            return False
-
-        self.subscribe(
+        return self.subscribe(
             tokens,
             is_index=False,
-            is_depth=False,
+            is_depth=False
         )
 
-        return True
+    # =====================================================
+    # SUBSCRIBE PCR
+    # =====================================================
 
-    # --------------------------------------------------------
-    # HEAVYWEIGHT SUBSCRIPTION
-    # --------------------------------------------------------
+    def subscribe_pcr(
+        self,
+        spot_price
+    ):
 
-    def subscribe_heavyweights(self):
+        contracts = (
+            self.discover_pcr_options(
+                spot_price
+            )
+        )
 
-        mapping = load_heavy_tokens()
+        if not contracts:
 
-        if not mapping:
             return False
 
-        tokens = []
+        tokens = [
 
-        for symbol, token in mapping.items():
-
-            tokens.append({
-
+            {
                 "instrument_token":
-                    str(token),
+                    item[
+                        "token"
+                    ],
 
                 "exchange_segment":
-                    "nse_cm",
+                    "nse_fo",
+            }
 
-            })
+            for item in contracts
+        ]
 
         self.subscribe(
             tokens,
             is_index=False,
-            is_depth=False,
+            is_depth=False
         )
 
         return True
 
-    # --------------------------------------------------------
-    # PCR
-    # --------------------------------------------------------
+    # =====================================================
+    # CALCULATE PCR
+    # =====================================================
 
-    def calculate_pcr(self):
+    def calculate_pcr(
+        self
+    ):
 
-        ce_tokens = parse_tokens(
-            self.cfg[
-                "pcr_ce_tokens"
-            ]
-        )
-
-        pe_tokens = parse_tokens(
-            self.cfg[
-                "pcr_pe_tokens"
-            ]
-        )
+        ce = []
+        pe = []
 
         with self.lock:
 
@@ -2929,112 +3486,94 @@ class KotakNeoAdapter:
                 self.latest
             )
 
-        ce_oi = 0.0
-        pe_oi = 0.0
+        for item in (
+            self.pcr_tokens
+        ):
 
-        ce_volume = 0.0
-        pe_volume = 0.0
+            token = item[
+                "token"
+            ]
 
-        ce_count = 0
-        pe_count = 0
-
-        ce_ivs = []
-        pe_ivs = []
-
-        ce_rows = []
-        pe_rows = []
-
-        for token in ce_tokens:
-
-            row = latest.get(
-                str(token)
+            data = latest.get(
+                token
             )
 
-            if not row:
+            if not data:
                 continue
 
-            oi = max(
-                safe_float(
-                    row.get(
-                        "oi",
-                        0,
-                    ),
-                    0.0,
+            oi = safe_float(
+                data.get(
+                    "oi"
                 ),
-                0.0,
+                0.0
             )
 
-            volume = max(
-                safe_float(
-                    row.get(
-                        "volume",
-                        0,
-                    ),
-                    0.0,
+            volume = safe_float(
+                data.get(
+                    "volume"
                 ),
-                0.0,
+                0.0
             )
 
-            ce_oi += oi
+            row = {
 
-            ce_volume += volume
+                "token":
+                    token,
 
-            ce_count += 1
+                "strike":
+                    item[
+                        "strike"
+                    ],
 
-            iv = safe_float(
-                row.get("iv")
-            )
-
-            if is_valid_number(iv):
-                ce_ivs.append(iv)
-
-            ce_rows.append(row)
-
-        for token in pe_tokens:
-
-            row = latest.get(
-                str(token)
-            )
-
-            if not row:
-                continue
-
-            oi = max(
-                safe_float(
-                    row.get(
-                        "oi",
-                        0,
+                "oi":
+                    max(
+                        oi,
+                        0.0
                     ),
-                    0.0,
-                ),
-                0.0,
-            )
 
-            volume = max(
-                safe_float(
-                    row.get(
-                        "volume",
-                        0,
+                "volume":
+                    max(
+                        volume,
+                        0.0
                     ),
-                    0.0,
-                ),
-                0.0,
-            )
+            }
 
-            pe_oi += oi
+            if (
+                item[
+                    "option_type"
+                ]
+                == "CE"
+            ):
 
-            pe_volume += volume
+                ce.append(
+                    row
+                )
 
-            pe_count += 1
+            else:
 
-            iv = safe_float(
-                row.get("iv")
-            )
+                pe.append(
+                    row
+                )
 
-            if is_valid_number(iv):
-                pe_ivs.append(iv)
+        ce_oi = sum(
+            x["oi"]
+            for x in ce
+        )
 
-            pe_rows.append(row)
+        pe_oi = sum(
+            x["oi"]
+            for x in pe
+        )
+
+        ce_volume = sum(
+            x["volume"]
+            for x in ce
+        )
+
+        pe_volume = sum(
+            x["volume"]
+            for x in pe
+        )
 
         pcr_oi = (
             pe_oi / ce_oi
@@ -3048,275 +3587,138 @@ class KotakNeoAdapter:
             else np.nan
         )
 
-        # ----------------------------------------------------
-        # OI change from previous snapshot
-        # ----------------------------------------------------
+        # ---------------------------------------------
+        # OI change
+        # ---------------------------------------------
 
-        ce_previous = 0.0
-        pe_previous = 0.0
+        current_ce_oi = ce_oi
+        current_pe_oi = pe_oi
 
-        for token in ce_tokens:
-
-            token = str(token)
-
-            current = latest.get(
-                token
+        previous_ce_oi = (
+            self.pcr_records.get(
+                "ce_oi"
             )
+        )
 
-            if not current:
-                continue
-
-            current_oi = max(
-                safe_float(
-                    current.get(
-                        "oi",
-                        0,
-                    ),
-                    0.0,
-                ),
-                0.0,
+        previous_pe_oi = (
+            self.pcr_records.get(
+                "pe_oi"
             )
-
-            ce_previous += (
-                self.previous_option_oi.get(
-                    token,
-                    current_oi,
-                )
-            )
-
-        for token in pe_tokens:
-
-            token = str(token)
-
-            current = latest.get(
-                token
-            )
-
-            if not current:
-                continue
-
-            current_oi = max(
-                safe_float(
-                    current.get(
-                        "oi",
-                        0,
-                    ),
-                    0.0,
-                ),
-                0.0,
-            )
-
-            pe_previous += (
-                self.previous_option_oi.get(
-                    token,
-                    current_oi,
-                )
-            )
+        )
 
         ce_oi_change = (
-            ce_oi
-            - ce_previous
-            if ce_count
+            current_ce_oi
+            - previous_ce_oi
+            if is_valid_number(
+                previous_ce_oi
+            )
             else np.nan
         )
 
         pe_oi_change = (
-            pe_oi
-            - pe_previous
-            if pe_count
+            current_pe_oi
+            - previous_pe_oi
+            if is_valid_number(
+                previous_pe_oi
+            )
             else np.nan
         )
 
-        # Update snapshot.
-        for token in (
-            ce_tokens
-            + pe_tokens
-        ):
+        self.pcr_records[
+            "ce_oi"
+        ] = current_ce_oi
 
-            token = str(token)
+        self.pcr_records[
+            "pe_oi"
+        ] = current_pe_oi
 
-            row = latest.get(
-                token
-            )
-
-            if row:
-
-                self.previous_option_oi[
-                    token
-                ] = max(
-                    safe_float(
-                        row.get(
-                            "oi",
-                            0,
-                        ),
-                        0.0,
-                    ),
-                    0.0,
-                )
-
-        # ----------------------------------------------------
-        # ATM approximation
-        # ----------------------------------------------------
-        #
-        # We do NOT invent ATM strike.
-        #
-        # If strike exists in feed, use the strike whose
-        # distance to NIFTY spot is smallest.
-        # ----------------------------------------------------
-
-        spot_price = self._latest_spot_price()
-
-        all_option_rows = (
-            ce_rows + pe_rows
-        )
-
-        strike_candidates = [
-            row
-            for row in all_option_rows
-            if is_valid_number(
-                row.get("strike")
-            )
-        ]
+        # ---------------------------------------------
+        # ATM
+        # ---------------------------------------------
 
         atm_strike = np.nan
+        ce_atm_oi = np.nan
+        pe_atm_oi = np.nan
 
-        if (
-            is_valid_number(
-                spot_price
+        all_strikes = [
+
+            x["strike"]
+            for x in (
+                ce + pe
             )
-            and strike_candidates
-        ):
-
-            atm_row = min(
-                strike_candidates,
-                key=lambda x:
-                    abs(
-                        float(
-                            x["strike"]
-                        )
-                        - spot_price
-                    ),
-            )
-
-            atm_strike = safe_float(
-                atm_row.get(
-                    "strike"
-                )
-            )
-
-        atm_rows = []
-
-        if is_valid_number(
-            atm_strike
-        ):
-
-            for row in (
-                all_option_rows
-            ):
-
-                strike = safe_float(
-                    row.get("strike")
-                )
-
-                if (
-                    is_valid_number(strike)
-                    and abs(
-                        strike
-                        - atm_strike
-                    ) < 0.01
-                ):
-
-                    atm_rows.append(
-                        row
-                    )
-
-        atm_ivs = [
-            safe_float(
-                row.get("iv")
-            )
-            for row in atm_rows
             if is_valid_number(
-                row.get("iv")
+                x["strike"]
             )
         ]
 
-        atm_iv = (
-            float(
-                np.mean(atm_ivs)
-            )
-            if atm_ivs
-            else (
-                float(
-                    np.mean(
-                        ce_ivs + pe_ivs
+        if all_strikes:
+
+            # Nearest available strike
+            # to live NIFTY.
+
+            with self.lock:
+
+                index_items = [
+                    x
+                    for x in (
+                        self.latest.values()
+                    )
+                    if str(
+                        x.get(
+                            "symbol",
+                            ""
+                        )
+                    ).lower()
+                    == "nifty 50"
+                ]
+
+            spot = np.nan
+
+            if index_items:
+
+                spot = safe_float(
+                    index_items[-1].get(
+                        "ltp"
                     )
                 )
-                if (
-                    ce_ivs
-                    or pe_ivs
-                )
-                else np.nan
-            )
-        )
 
-        if (
-            is_valid_number(atm_iv)
-            and is_valid_number(
-                self.previous_atm_iv
-            )
-        ):
-
-            iv_change = (
-                atm_iv
-                - self.previous_atm_iv
-            )
-
-        else:
-
-            iv_change = np.nan
-
-        if is_valid_number(atm_iv):
-
-            self.previous_atm_iv = (
-                atm_iv
-            )
-
-        ce_atm_oi = 0.0
-        pe_atm_oi = 0.0
-
-        for row in atm_rows:
-
-            option_type = str(
-                row.get(
-                    "option_type",
-                    "",
-                )
-            ).upper()
-
-            oi = max(
-                safe_float(
-                    row.get(
-                        "oi",
-                        0,
-                    ),
-                    0.0,
-                ),
-                0.0,
-            )
-
-            if option_type in (
-                "CE",
-                "CALL",
+            if is_valid_number(
+                spot
             ):
 
-                ce_atm_oi += oi
+                atm_strike = min(
+                    all_strikes,
+                    key=lambda x:
+                        abs(
+                            x - spot
+                        )
+                )
 
-            elif option_type in (
-                "PE",
-                "PUT",
-            ):
+                ce_atm = [
+                    x
+                    for x in ce
+                    if x["strike"]
+                    == atm_strike
+                ]
 
-                pe_atm_oi += oi
+                pe_atm = [
+                    x
+                    for x in pe
+                    if x["strike"]
+                    == atm_strike
+                ]
+
+                if ce_atm:
+
+                    ce_atm_oi = (
+                        ce_atm[0]["oi"]
+                    )
+
+                if pe_atm:
+
+                    pe_atm_oi = (
+                        pe_atm[0]["oi"]
+                    )
 
         return {
 
@@ -3332,128 +3734,37 @@ class KotakNeoAdapter:
             "pe_oi_change":
                 pe_oi_change,
 
+            # Kotak WebSocket docs do not expose
+            # IV as a standard field.
             "atm_iv":
-                atm_iv,
+                np.nan,
 
             "iv_change":
-                iv_change,
+                np.nan,
 
             "ce_oi_atm":
-                (
-                    ce_atm_oi
-                    if atm_rows
-                    else np.nan
-                ),
+                ce_atm_oi,
 
             "pe_oi_atm":
-                (
-                    pe_atm_oi
-                    if atm_rows
-                    else np.nan
-                ),
+                pe_atm_oi,
 
             "atm_strike":
                 atm_strike,
 
             "ce_contracts_seen":
-                ce_count,
+                len(ce),
 
             "pe_contracts_seen":
-                pe_count,
+                len(pe),
         }
 
-    # --------------------------------------------------------
-    # LATEST SPOT
-    # --------------------------------------------------------
+    # =====================================================
+    # BUILD 3-MINUTE BARS
+    # =====================================================
 
-    def _latest_spot_price(self):
-
-        token = str(
-            self.cfg[
-                "nifty_spot_token"
-            ]
-        )
-
-        with self.lock:
-
-            row = self.latest.get(
-                token
-            )
-
-        if not row:
-            return np.nan
-
-        return safe_float(
-            row.get("ltp")
-        )
-
-    # --------------------------------------------------------
-    # HEAVYWEIGHT SNAPSHOT
-    # --------------------------------------------------------
-
-    def latest_heavyweights(self):
-
-        mapping = load_heavy_tokens()
-
-        result = {}
-
-        if not mapping:
-            return result
-
-        with self.lock:
-            latest = dict(
-                self.latest
-            )
-
-        for symbol, token in mapping.items():
-
-            row = latest.get(
-                str(token)
-            )
-
-            if not row:
-                continue
-
-            result[symbol] = {
-
-                "o":
-                    safe_float(
-                        row.get(
-                            "open"
-                        )
-                    ),
-
-                "c":
-                    safe_float(
-                        row.get(
-                            "ltp"
-                        )
-                    ),
-
-                "v":
-                    safe_float(
-                        row.get(
-                            "volume"
-                        ),
-                        0.0,
-                    ),
-
-                "vwap":
-                    safe_float(
-                        row.get(
-                            "vwap"
-                        )
-                    ),
-
-            }
-
-        return result
-
-    # --------------------------------------------------------
-    # BUILD 3-MIN CANDLES
-    # --------------------------------------------------------
-
-    def build_3min_candles(self):
+    def build_3min_candles(
+        self
+    ):
 
         with self.lock:
 
@@ -3463,25 +3774,16 @@ class KotakNeoAdapter:
 
             self.tick_buffer.clear()
 
+            latest = dict(
+                self.latest
+            )
+
         if not ticks:
             return []
 
-        spot_token = str(
-            self.cfg[
-                "nifty_spot_token"
-            ]
-        )
-
         future_token = str(
-            self.cfg[
-                "nifty_future_token"
-            ]
+            self.future_token
         )
-
-        allowed = {
-            spot_token,
-            future_token,
-        }
 
         buckets = {}
 
@@ -3494,34 +3796,77 @@ class KotakNeoAdapter:
                 )
             )
 
-            if token not in allowed:
-                continue
-
-            ts = floor_bar_timestamp(
-                tick["timestamp"],
-                self.cfg[
-                    "bar_minutes"
-                ],
+            symbol = str(
+                tick.get(
+                    "symbol",
+                    ""
+                )
             )
 
-            if ts is None:
+            is_index = (
+                symbol.lower()
+                == CONFIG[
+                    "nifty_index_name"
+                ].lower()
+                or str(
+                    tick.get(
+                        "name",
+                        ""
+                    )
+                ).lower()
+                == "index"
+            )
+
+            is_future = (
+                token
+                == future_token
+            )
+
+            if not (
+                is_index
+                or is_future
+            ):
+                continue
+
+            timestamp = tick.get(
+                "timestamp"
+            )
+
+            if not isinstance(
+                timestamp,
+                datetime
+            ):
+                continue
+
+            bar_time = (
+                floor_bar_timestamp(
+                    timestamp,
+                    CONFIG[
+                        "bar_minutes"
+                    ]
+                )
+            )
+
+            if bar_time is None:
                 continue
 
             key = (
                 token,
-                ts,
+                bar_time
             )
 
             buckets.setdefault(
                 key,
-                [],
-            ).append(tick)
+                []
+            ).append(
+                tick
+            )
 
-        bars = {}
+        bars = []
 
         for (
             token,
-            timestamp,
+            timestamp
         ), rows in sorted(
             buckets.items()
         ):
@@ -3533,83 +3878,75 @@ class KotakNeoAdapter:
 
             prices = [
                 safe_float(
-                    row.get("ltp")
+                    x.get("ltp")
                 )
-                for row in rows
+                for x in rows
+            ]
+
+            prices = [
+                x
+                for x in prices
                 if is_valid_number(
-                    row.get("ltp")
+                    x
                 )
             ]
 
             if not prices:
                 continue
 
-            raw_volumes = [
+            # Kotak `v` is cumulative volume.
+            # Candle volume = last - first,
+            # not simply max volume.
+
+            volumes = [
                 safe_float(
-                    row.get(
-                        "volume",
-                        0,
+                    x.get(
+                        "volume"
                     ),
-                    0.0,
+                    0.0
                 )
-                for row in rows
+                for x in rows
             ]
 
-            raw_volumes = [
-                max(v, 0.0)
-                for v in raw_volumes
+            volumes = [
+                x
+                for x in volumes
+                if is_valid_number(
+                    x
+                )
             ]
 
-            # For most exchange feeds volume is cumulative.
-            # Bar volume = end cumulative - previous cumulative.
-            if (
-                self.cfg[
-                    "volume_mode"
-                ].lower()
-                == "cumulative"
-            ):
+            if volumes:
 
-                end_volume = (
-                    raw_volumes[-1]
-                    if raw_volumes
-                    else 0.0
-                )
-
-                previous_volume = (
-                    self.last_bar_volume.get(
-                        token,
-                        end_volume,
-                    )
-                )
-
-                bar_volume = max(
+                candle_volume = max(
                     0.0,
-                    end_volume
-                    - previous_volume,
+                    max(volumes)
+                    - min(volumes)
                 )
-
-                self.last_bar_volume[
-                    token
-                ] = end_volume
 
             else:
 
-                bar_volume = sum(
-                    raw_volumes
-                )
+                candle_volume = 0.0
 
-            oi_values = [
+            ois = [
                 safe_float(
-                    row.get(
-                        "oi",
-                        0,
+                    x.get(
+                        "oi"
                     ),
-                    0.0,
+                    0.0
                 )
-                for row in rows
+                for x in rows
             ]
 
-            bar = {
+            ois = [
+                x
+                for x in ois
+                if is_valid_number(
+                    x
+                )
+            ]
+
+            bars.append({
 
                 "token":
                     token,
@@ -3630,49 +3967,75 @@ class KotakNeoAdapter:
                     prices[-1],
 
                 "volume":
-                    bar_volume,
+                    candle_volume,
 
                 "oi":
                     (
-                        oi_values[-1]
-                        if oi_values
+                        ois[-1]
+                        if ois
                         else 0.0
                     ),
-            }
 
-            bars.setdefault(
+                "symbol":
+                    rows[-1].get(
+                        "symbol",
+                        ""
+                    ),
+
+                "is_index":
+                    (
+                        token
+                        != future_token
+                    ),
+            })
+
+        merged = {}
+
+        for bar in bars:
+
+            timestamp = bar[
+                "timestamp"
+            ]
+
+            merged.setdefault(
                 timestamp,
                 {}
             )
 
-            if token == spot_token:
+            if bar["is_index"]:
 
-                bars[timestamp][
+                merged[
+                    timestamp
+                ][
                     "spot"
                 ] = bar
 
-            elif token == future_token:
+            else:
 
-                bars[timestamp][
+                merged[
+                    timestamp
+                ][
                     "future"
                 ] = bar
 
         output = []
 
-        for timestamp, pair in sorted(
-            bars.items()
+        for timestamp, item in sorted(
+            merged.items()
         ):
 
-            spot = pair.get(
+            spot = item.get(
                 "spot"
             )
 
-            future = pair.get(
+            future = item.get(
                 "future"
             )
 
-            # Never fabricate missing future/spot.
-            if spot is None or future is None:
+            if spot is None:
+                continue
+
+            if future is None:
                 continue
 
             output.append({
@@ -3690,27 +4053,29 @@ class KotakNeoAdapter:
         return output
 
 
-# ============================================================
-# NIFTY CONTROLLER
-# ============================================================
+# =========================================================
+# ENGINE CONTROLLER
+# =========================================================
 
 class NiftyMicroEngine:
 
     def __init__(self):
 
-        self.features = FeatureEngine(
-            DEFAULT_HEAVYWEIGHTS
+        self.features = (
+            FeatureEngine()
         )
 
-        self.labels = LabelEngine()
+        self.labels = (
+            LabelEngine()
+        )
 
-        self.dataset = DatasetManager()
+        self.dataset = (
+            DatasetManager()
+        )
 
-        self.previous_candles = []
+        self.prev_candles = []
 
         self.feature_rows = []
-
-        self.label_rows = []
 
         self.current_date = None
 
@@ -3718,10 +4083,12 @@ class NiftyMicroEngine:
 
     def reset_if_new_day(
         self,
-        timestamp: datetime,
+        timestamp
     ):
 
-        current_date = timestamp.date()
+        current_date = (
+            timestamp.date()
+        )
 
         if (
             self.current_date
@@ -3730,15 +4097,17 @@ class NiftyMicroEngine:
 
             self.features.reset_session()
 
-            self.previous_candles.clear()
+            self.prev_candles.clear()
 
-            self.current_date = current_date
+            self.current_date = (
+                current_date
+            )
 
             self.last_bar_timestamp = None
 
     def process_candle(
         self,
-        candle: Candle3Min,
+        candle
     ):
 
         self.reset_if_new_day(
@@ -3754,21 +4123,23 @@ class NiftyMicroEngine:
 
             return None
 
-        feature = self.features.compute(
-            candle,
-            self.previous_candles,
+        feature = (
+            self.features.compute(
+                candle,
+                self.prev_candles
+            )
         )
 
-        self.previous_candles.append(
+        self.prev_candles.append(
             candle
         )
 
         if len(
-            self.previous_candles
+            self.prev_candles
         ) > 500:
 
-            self.previous_candles = (
-                self.previous_candles[
+            self.prev_candles = (
+                self.prev_candles[
                     -500:
                 ]
             )
@@ -3802,36 +4173,36 @@ class NiftyMicroEngine:
 
         self.dataset.write_parquet(
             df,
-            name="features",
+            name="features"
         )
 
 
-# ============================================================
+# =========================================================
 # UNIT TESTS
-# ============================================================
+# =========================================================
 
 def run_unit_tests():
 
     print(
-        "\n======================================"
+        "\n================================"
     )
 
     print(
-        "KOTAK NEO RESEARCH LOCK UNIT TESTS"
+        "KOTAK NEO RESEARCH LOCK TESTS"
     )
 
     print(
-        "======================================"
+        "================================"
     )
 
-    # --------------------------------------------------------
-    # ATR warmup
-    # --------------------------------------------------------
+    # ---------------------------------
+    # ATR
+    # ---------------------------------
 
     assert np.isnan(
         wilder_atr(
             [10, 12],
-            14,
+            14
         )
     )
 
@@ -3839,77 +4210,50 @@ def run_unit_tests():
         "PASS: ATR warm-up"
     )
 
-    # --------------------------------------------------------
-    # Bar flooring
-    # --------------------------------------------------------
+    # ---------------------------------
+    # Candle
+    # ---------------------------------
 
-    ts = datetime(
+    timestamp = datetime(
         2025,
         1,
         2,
         9,
-        18,
-        20,
+        18
     )
-
-    assert (
-        floor_bar_timestamp(
-            ts,
-            3,
-        )
-        == datetime(
-            2025,
-            1,
-            2,
-            9,
-            18,
-        )
-    )
-
-    print(
-        "PASS: 3-minute flooring"
-    )
-
-    # --------------------------------------------------------
-    # Candle / Feature engine
-    # --------------------------------------------------------
 
     candle = Candle3Min(
 
-        timestamp=datetime(
-            2025,
-            1,
-            2,
-            9,
-            18,
-        ),
+        timestamp,
 
-        spot_o=24000,
-        spot_h=24050,
-        spot_l=23980,
-        spot_c=24020,
+        24000,
+        24050,
+        23980,
+        24020,
 
-        fut_o=24010,
-        fut_h=24060,
-        fut_l=23990,
-        fut_c=24030,
+        24010,
+        24060,
+        23990,
+        24030,
 
-        fut_volume=100000,
-        fut_oi=5_000_000,
+        100000,
+        5_000_000,
     )
 
-    engine = NiftyMicroEngine()
+    engine = (
+        NiftyMicroEngine()
+    )
 
-    feature = (
+    features = (
         engine.process_candle(
             candle
         )
     )
 
-    assert feature is not None
+    assert features is not None
 
     assert (
-        feature[
+        features[
             "execution_model"
         ]
         == "next_bar_open"
@@ -3917,21 +4261,21 @@ def run_unit_tests():
 
     assert (
         "pcr_oi"
-        in feature
+        in features
     )
 
     assert (
         "data_quality_score"
-        in feature
+        in features
     )
 
     print(
-        "PASS: FeatureEngine"
+        "PASS: Feature engine"
     )
 
-    # --------------------------------------------------------
-    # Label test
-    # --------------------------------------------------------
+    # ---------------------------------
+    # Alignment
+    # ---------------------------------
 
     label = LabelEngine()
 
@@ -3939,26 +4283,26 @@ def run_unit_tests():
 
         Candle3Min(
 
-            timestamp=datetime(
+            datetime(
                 2025,
                 1,
                 2,
                 9,
-                24,
+                24
             ),
 
-            spot_o=0,
-            spot_h=0,
-            spot_l=0,
-            spot_c=0,
+            0,
+            0,
+            0,
+            0,
 
-            fut_o=24100,
-            fut_h=24200,
-            fut_l=23900,
-            fut_c=24050,
+            24100,
+            24200,
+            23900,
+            24050,
 
-            fut_volume=0,
-            fut_oi=0,
+            0,
+            0,
         )
     ]
 
@@ -3972,21 +4316,23 @@ def run_unit_tests():
 
         direction=1,
 
-        signal_timestamp=datetime(
-            2025,
-            1,
-            2,
-            9,
-            18,
-        ),
+        signal_timestamp=
+            datetime(
+                2025,
+                1,
+                2,
+                9,
+                18
+            ),
 
-        entry_timestamp=datetime(
-            2025,
-            1,
-            2,
-            9,
-            21,
-        ),
+        entry_timestamp=
+            datetime(
+                2025,
+                1,
+                2,
+                9,
+                21
+            ),
     )
 
     assert (
@@ -4002,12 +4348,12 @@ def run_unit_tests():
     )
 
     print(
-        "PASS: LabelEngine"
+        "PASS: next_bar_open alignment"
     )
 
-    # --------------------------------------------------------
-    # Future alignment lock
-    # --------------------------------------------------------
+    # ---------------------------------
+    # Alignment violation
+    # ---------------------------------
 
     try:
 
@@ -4021,38 +4367,39 @@ def run_unit_tests():
 
                 Candle3Min(
 
-                    timestamp=datetime(
+                    datetime(
                         2025,
                         1,
                         2,
                         9,
-                        21,
+                        21
                     ),
 
-                    spot_o=0,
-                    spot_h=0,
-                    spot_l=0,
-                    spot_c=0,
+                    0,
+                    0,
+                    0,
+                    0,
 
-                    fut_o=0,
-                    fut_h=0,
-                    fut_l=0,
-                    fut_c=0,
+                    0,
+                    0,
+                    0,
+                    0,
 
-                    fut_volume=0,
-                    fut_oi=0,
+                    0,
+                    0,
                 )
             ],
 
             direction=1,
 
-            entry_timestamp=datetime(
-                2025,
-                1,
-                2,
-                9,
-                21,
-            ),
+            entry_timestamp=
+                datetime(
+                    2025,
+                    1,
+                    2,
+                    9,
+                    21
+                ),
         )
 
     except ValueError:
@@ -4064,71 +4411,11 @@ def run_unit_tests():
     else:
 
         raise AssertionError(
-            "Future alignment lock failed"
+            "Alignment lock failed"
         )
 
-    # --------------------------------------------------------
-    # Short-side label
-    # --------------------------------------------------------
-
-    short_future = [
-
-        Candle3Min(
-
-            timestamp=datetime(
-                2025,
-                1,
-                2,
-                9,
-                24,
-            ),
-
-            spot_o=0,
-            spot_h=0,
-            spot_l=0,
-            spot_c=0,
-
-            fut_o=24000,
-            fut_h=24020,
-            fut_l=23960,
-            fut_c=23970,
-
-            fut_volume=0,
-            fut_oi=0,
-        )
-    ]
-
-    short_result = label.generate(
-
-        entry_price=24000,
-
-        atr=20,
-
-        future_after_entry=
-            short_future,
-
-        direction=-1,
-
-        entry_timestamp=datetime(
-            2025,
-            1,
-            2,
-            9,
-            21,
-        ),
-    )
-
-    assert (
-        short_result["direction"]
-        == -1
-    )
-
     print(
-        "PASS: Short barrier"
-    )
-
-    print(
-        "======================================"
+        "================================"
     )
 
     print(
@@ -4136,53 +4423,13 @@ def run_unit_tests():
     )
 
     print(
-        "======================================\n"
+        "================================\n"
     )
 
 
-# ============================================================
-# STREAMLIT HELPERS
-# ============================================================
-
-def format_metric(
-    value: Any,
-    decimals: int = 3,
-):
-
-    if not is_valid_number(value):
-        return "-"
-
-    return round(
-        float(value),
-        decimals,
-    )
-
-
-def create_engine_if_missing():
-
-    if (
-        "engine"
-        not in st.session_state
-    ):
-
-        st.session_state.engine = (
-            NiftyMicroEngine()
-        )
-
-
-def create_neo_if_missing():
-
-    if (
-        "neo"
-        not in st.session_state
-    ):
-
-        st.session_state.neo = None
-
-
-# ============================================================
+# =========================================================
 # STREAMLIT APP
-# ============================================================
+# =========================================================
 
 def run_streamlit_app():
 
@@ -4193,9 +4440,10 @@ def run_streamlit_app():
         )
 
     st.set_page_config(
-        page_title=
-            "NIFTY 3-Min Micro Engine",
-        layout="wide",
+        page_title=(
+            "NIFTY 3-Min Micro Engine"
+        ),
+        layout="wide"
     )
 
     st.title(
@@ -4203,186 +4451,171 @@ def run_streamlit_app():
     )
 
     st.caption(
-        "Kotak Neo • Research-Lock • "
-        "3-Min NIFTY • PCR"
+        "Kotak Neo • Research-Lock v2.0"
     )
 
     st.info(
-        "Research/data engine only. "
-        "No order placement is enabled."
+        "NIFTY futures, heavyweight tokens "
+        "and PCR option contracts are discovered "
+        "through Kotak Neo after login. "
+        "No fabricated token is used."
     )
 
-    runtime = (
-        load_runtime_config()
-    )
+    # =====================================================
+    # SESSION STATE
+    # =====================================================
 
-    create_engine_if_missing()
-    create_neo_if_missing()
+    if "neo" not in st.session_state:
 
-    # ========================================================
+        st.session_state.neo = None
+
+    if "engine" not in st.session_state:
+
+        st.session_state.engine = (
+            NiftyMicroEngine()
+        )
+
+    if "core_subscribed" not in (
+        st.session_state
+    ):
+
+        st.session_state[
+            "core_subscribed"
+        ] = False
+
+    if "pcr_subscribed" not in (
+        st.session_state
+    ):
+
+        st.session_state[
+            "pcr_subscribed"
+        ] = False
+
+    # =====================================================
     # SIDEBAR
-    # ========================================================
+    # =====================================================
 
     st.sidebar.header(
-        "Kotak Neo Credentials"
+        "Kotak Neo"
     )
 
-    credential_status = {
+    credentials = {
 
         "Consumer Key":
             bool(
-                secret_or_env(
+                env_or_secret(
                     "KOTAK_CONSUMER_KEY"
                 )
             ),
 
         "Mobile":
             bool(
-                secret_or_env(
+                env_or_secret(
                     "KOTAK_MOBILE"
                 )
             ),
 
         "UCC":
             bool(
-                secret_or_env(
+                env_or_secret(
                     "KOTAK_UCC"
                 )
             ),
 
         "TOTP":
             bool(
-                secret_or_env(
+                env_or_secret(
                     "KOTAK_TOTP"
                 )
             ),
 
         "MPIN":
             bool(
-                secret_or_env(
+                env_or_secret(
                     "KOTAK_MPIN"
                 )
             ),
     }
 
     for name, present in (
-        credential_status.items()
+        credentials.items()
     ):
 
         st.sidebar.write(
-            f"{name}: "
-            + (
-                "✓"
-                if present
-                else "✗"
-            )
+            f"{name}:",
+            "✓"
+            if present
+            else "✗"
         )
 
     st.sidebar.divider()
 
-    st.sidebar.header(
-        "Market Tokens"
-    )
-
-    spot_token = runtime[
-        "nifty_spot_token"
-    ]
-
-    future_token = runtime[
-        "nifty_future_token"
-    ]
-
-    st.sidebar.write(
-        "NIFTY Spot:",
-        "✓" if spot_token else "✗",
-    )
-
-    st.sidebar.write(
-        "NIFTY Future:",
-        "✓" if future_token else "✗",
-    )
-
-    st.sidebar.divider()
-
-    st.sidebar.header(
-        "PCR"
-    )
-
-    ce_tokens = parse_tokens(
-        runtime[
-            "pcr_ce_tokens"
-        ]
-    )
-
-    pe_tokens = parse_tokens(
-        runtime[
-            "pcr_pe_tokens"
-        ]
-    )
-
-    st.sidebar.write(
-        "CE contracts:",
-        len(ce_tokens),
-    )
-
-    st.sidebar.write(
-        "PE contracts:",
-        len(pe_tokens),
-    )
-
-    st.sidebar.caption(
-        "PCR uses only live subscribed CE/PE "
-        "quotes. Missing data remains NaN."
-    )
-
-    st.sidebar.divider()
-
-    st.sidebar.header(
-        "Engine"
-    )
-
-    st.sidebar.write(
-        "Bar:",
-        "3 minutes",
+    st.sidebar.subheader(
+        "Research Lock"
     )
 
     st.sidebar.write(
         "ATR:",
-        "Session-local",
+        "session_local"
+    )
+
+    st.sidebar.write(
+        "Bar:",
+        "3 minutes"
     )
 
     st.sidebar.write(
         "Execution:",
-        "next_bar_open",
+        "next_bar_open"
     )
 
     st.sidebar.write(
         "TB horizon:",
-        "30 minutes",
+        "30 minutes"
     )
 
     st.sidebar.write(
-        "MFE horizons:",
-        "15 / 30 / 45 minutes",
+        "MFE:",
+        "15 / 30 / 45 minutes"
     )
 
-    # ========================================================
-    # TOP CONTROLS
-    # ========================================================
+    st.sidebar.divider()
 
-    c1, c2, c3 = st.columns(3)
+    st.sidebar.subheader(
+        "PCR"
+    )
 
-    with c1:
+    st.sidebar.write(
+        "Strike count:",
+        CONFIG[
+            "pcr_strike_count"
+        ]
+    )
+
+    st.sidebar.write(
+        "Strike step:",
+        CONFIG[
+            "pcr_strike_step"
+        ]
+    )
+
+    # =====================================================
+    # CONNECTION BUTTONS
+    # =====================================================
+
+    col1, col2 = st.columns(2)
+
+    with col1:
 
         if st.button(
             "Connect Kotak Neo",
-            use_container_width=True,
+            use_container_width=True
         ):
 
             try:
 
-                neo = KotakNeoAdapter(
-                    runtime
+                neo = (
+                    KotakNeoAdapter()
                 )
 
                 neo.login()
@@ -4401,11 +4634,11 @@ def run_streamlit_app():
                     f"Login failed: {exc}"
                 )
 
-    with c2:
+    with col2:
 
         if st.button(
             "Run Unit Tests",
-            use_container_width=True,
+            use_container_width=True
         ):
 
             try:
@@ -4413,7 +4646,7 @@ def run_streamlit_app():
                 run_unit_tests()
 
                 st.success(
-                    "All unit tests passed."
+                    "All tests passed."
                 )
 
             except Exception as exc:
@@ -4422,392 +4655,498 @@ def run_streamlit_app():
                     f"Tests failed: {exc}"
                 )
 
-    with c3:
+    neo = (
+        st.session_state.neo
+    )
 
-        if st.button(
-            "Reset Engine",
-            use_container_width=True,
-        ):
-
-            st.session_state.engine = (
-                NiftyMicroEngine()
-            )
-
-            st.success(
-                "Engine state reset."
-            )
-
-    neo = st.session_state.neo
-
-    # ========================================================
-    # CONNECTION STATUS
-    # ========================================================
-
-    if neo is not None:
-
-        if neo.connected:
-
-            st.success(
-                "Kotak Neo: CONNECTED"
-            )
-
-        else:
-
-            st.warning(
-                "Kotak Neo object exists but "
-                "WebSocket/login is not connected."
-            )
-
-    else:
+    if neo is None:
 
         st.warning(
-            "Kotak Neo not connected."
+            "Connect Kotak Neo first."
         )
 
-    # ========================================================
-    # SUBSCRIPTIONS
-    # ========================================================
+        st.stop()
 
-    if neo is not None:
+    # =====================================================
+    # AUTO DISCOVERY
+    # =====================================================
 
-        st.subheader(
-            "Live Subscriptions"
+    st.subheader(
+        "Instrument Discovery"
+    )
+
+    if st.button(
+        "Discover NIFTY Instruments",
+        use_container_width=True
+    ):
+
+        try:
+
+            discovered = (
+                neo.auto_discover()
+            )
+
+            st.success(
+                "Instrument discovery completed."
+            )
+
+            st.write(
+                "NIFTY Future:",
+                discovered[
+                    "future"
+                ].get(
+                    "symbol",
+                    "-"
+                )
+            )
+
+            st.write(
+                "Future Token:",
+                discovered[
+                    "future"
+                ].get(
+                    "token",
+                    "-"
+                )
+            )
+
+            st.write(
+                "Heavyweights:",
+                len(
+                    discovered[
+                        "heavyweights"
+                    ]
+                )
+            )
+
+        except Exception as exc:
+
+            st.error(
+                f"Discovery failed: {exc}"
+            )
+
+    # =====================================================
+    # DISCOVERY STATUS
+    # =====================================================
+
+    if neo.future_token:
+
+        d1, d2, d3 = st.columns(3)
+
+        with d1:
+
+            st.metric(
+                "NIFTY Future",
+                neo.future_symbol
+                or "-"
+            )
+
+        with d2:
+
+            st.metric(
+                "Future Token",
+                neo.future_token
+            )
+
+        with d3:
+
+            st.metric(
+                "Heavyweights",
+                len(
+                    neo.heavy_tokens
+                )
+            )
+
+    # =====================================================
+    # SUBSCRIBE CORE
+    # =====================================================
+
+    st.subheader(
+        "Live Feed"
+    )
+
+    if st.button(
+        "Subscribe NIFTY + Heavyweights",
+        use_container_width=True
+    ):
+
+        try:
+
+            if not neo.future_token:
+
+                neo.auto_discover()
+
+            neo.subscribe_core()
+
+            st.session_state[
+                "core_subscribed"
+            ] = True
+
+            st.success(
+                "NIFTY 50 + Future + "
+                "heavyweight subscriptions sent."
+            )
+
+        except Exception as exc:
+
+            st.error(
+                f"Core subscription failed: {exc}"
+            )
+
+    # =====================================================
+    # CURRENT NIFTY
+    # =====================================================
+
+    latest_spot = np.nan
+
+    with neo.lock:
+
+        latest_snapshot = dict(
+            neo.latest
         )
 
-        s1, s2, s3 = st.columns(3)
+    for item in (
+        latest_snapshot.values()
+    ):
 
-        with s1:
-
-            if st.button(
-                "Subscribe NIFTY Spot + Future",
-                use_container_width=True,
-            ):
-
-                try:
-
-                    neo.subscribe_spot_future()
-
-                    st.success(
-                        "NIFTY Spot + Future "
-                        "subscription request sent."
-                    )
-
-                except Exception as exc:
-
-                    st.error(
-                        f"Subscription failed: {exc}"
-                    )
-
-        with s2:
-
-            if st.button(
-                "Subscribe PCR Options",
-                use_container_width=True,
-            ):
-
-                try:
-
-                    ok = (
-                        neo.subscribe_pcr_tokens()
-                    )
-
-                    if ok:
-
-                        st.success(
-                            "PCR CE/PE subscriptions sent."
-                        )
-
-                    else:
-
-                        st.warning(
-                            "PCR CE/PE tokens are empty."
-                        )
-
-                except Exception as exc:
-
-                    st.error(
-                        f"PCR subscription failed: {exc}"
-                    )
-
-        with s3:
-
-            if st.button(
-                "Subscribe Heavyweights",
-                use_container_width=True,
-            ):
-
-                try:
-
-                    ok = (
-                        neo.subscribe_heavyweights()
-                    )
-
-                    if ok:
-
-                        st.success(
-                            "Heavyweight subscriptions sent."
-                        )
-
-                    else:
-
-                        st.warning(
-                            "HEAVY_TOKENS is empty."
-                        )
-
-                except Exception as exc:
-
-                    st.error(
-                        f"Heavyweight subscription failed: {exc}"
-                    )
-
-        # ====================================================
-        # PCR DASHBOARD
-        # ====================================================
-
-        st.subheader(
-            "Live PCR"
-        )
-
-        pcr = neo.calculate_pcr()
-
-        p1, p2, p3, p4, p5 = st.columns(5)
-
-        with p1:
-
-            st.metric(
-                "PCR OI",
-                format_metric(
-                    pcr[
-                        "pcr_oi"
-                    ]
-                ),
+        symbol = str(
+            item.get(
+                "symbol",
+                ""
             )
+        ).lower()
 
-        with p2:
-
-            st.metric(
-                "PCR Volume",
-                format_metric(
-                    pcr[
-                        "pcr_volume"
-                    ]
-                ),
-            )
-
-        with p3:
-
-            st.metric(
-                "CE Contracts",
-                pcr[
-                    "ce_contracts_seen"
-                ],
-            )
-
-        with p4:
-
-            st.metric(
-                "PE Contracts",
-                pcr[
-                    "pe_contracts_seen"
-                ],
-            )
-
-        with p5:
-
-            st.metric(
-                "ATM IV",
-                format_metric(
-                    pcr[
-                        "atm_iv"
-                    ]
-                ),
-            )
-
-        p6, p7, p8 = st.columns(3)
-
-        with p6:
-
-            st.metric(
-                "CE OI Δ",
-                format_metric(
-                    pcr[
-                        "ce_oi_change"
-                    ]
-                ),
-            )
-
-        with p7:
-
-            st.metric(
-                "PE OI Δ",
-                format_metric(
-                    pcr[
-                        "pe_oi_change"
-                    ]
-                ),
-            )
-
-        with p8:
-
-            st.metric(
-                "ATM Strike",
-                format_metric(
-                    pcr[
-                        "atm_strike"
-                    ],
-                    2,
-                ),
-            )
-
-        # ====================================================
-        # BUILD BAR
-        # ====================================================
-
-        st.subheader(
-            "3-Minute Aggregation"
-        )
-
-        if st.button(
-            "Build Latest 3-Min Bars",
-            use_container_width=True,
+        if (
+            symbol
+            == "nifty 50"
         ):
 
-            try:
+            latest_spot = safe_float(
+                item.get(
+                    "ltp"
+                )
+            )
 
-                bars = (
-                    neo.build_3min_candles()
+            break
+
+    # =====================================================
+    # PCR SUBSCRIPTION
+    # =====================================================
+
+    if st.button(
+        "Auto Discover + Subscribe PCR",
+        use_container_width=True
+    ):
+
+        try:
+
+            if not neo.future_token:
+
+                neo.auto_discover()
+
+            if not is_valid_number(
+                latest_spot
+            ):
+
+                st.warning(
+                    "NIFTY live price not available yet. "
+                    "First subscribe core feed and wait "
+                    "for NIFTY tick."
                 )
 
-                if not bars:
+            else:
 
-                    st.info(
-                        "No complete Spot + Future "
-                        "3-minute bar available."
+                ok = (
+                    neo.subscribe_pcr(
+                        latest_spot
+                    )
+                )
+
+                if ok:
+
+                    st.session_state[
+                        "pcr_subscribed"
+                    ] = True
+
+                    st.success(
+                        "PCR option contracts discovered "
+                        "and subscribed."
                     )
 
                 else:
 
-                    processed = 0
-
-                    for item in bars:
-
-                        spot = item[
-                            "spot"
-                        ]
-
-                        future = item[
-                            "future"
-                        ]
-
-                        option_data = (
-                            neo.calculate_pcr()
-                        )
-
-                        heavy_data = (
-                            neo.latest_heavyweights()
-                        )
-
-                        candle = Candle3Min(
-
-                            timestamp=
-                                item[
-                                    "timestamp"
-                                ],
-
-                            spot_o=
-                                spot[
-                                    "open"
-                                ],
-
-                            spot_h=
-                                spot[
-                                    "high"
-                                ],
-
-                            spot_l=
-                                spot[
-                                    "low"
-                                ],
-
-                            spot_c=
-                                spot[
-                                    "close"
-                                ],
-
-                            fut_o=
-                                future[
-                                    "open"
-                                ],
-
-                            fut_h=
-                                future[
-                                    "high"
-                                ],
-
-                            fut_l=
-                                future[
-                                    "low"
-                                ],
-
-                            fut_c=
-                                future[
-                                    "close"
-                                ],
-
-                            fut_volume=
-                                future[
-                                    "volume"
-                                ],
-
-                            fut_oi=
-                                future[
-                                    "oi"
-                                ],
-
-                            heavy=
-                                heavy_data,
-
-                            option_chain=
-                                option_data,
-                        )
-
-                        result = (
-                            st.session_state
-                            .engine
-                            .process_candle(
-                                candle
-                            )
-                        )
-
-                        if result is not None:
-
-                            processed += 1
-
-                    st.success(
-                        f"Processed {processed} "
-                        "3-minute candle(s)."
+                    st.warning(
+                        "No PCR contracts discovered."
                     )
 
-            except Exception as exc:
+        except Exception as exc:
 
-                st.error(
-                    f"Bar processing failed: {exc}"
+            st.error(
+                f"PCR discovery failed: {exc}"
+            )
+
+    # =====================================================
+    # METRICS
+    # =====================================================
+
+    pcr = neo.calculate_pcr()
+
+    m1, m2, m3, m4 = st.columns(4)
+
+    with m1:
+
+        st.metric(
+            "NIFTY",
+            (
+                round(
+                    latest_spot,
+                    2
+                )
+                if is_valid_number(
+                    latest_spot
+                )
+                else "-"
+            )
+        )
+
+    with m2:
+
+        st.metric(
+            "PCR OI",
+            (
+                round(
+                    pcr[
+                        "pcr_oi"
+                    ],
+                    3
+                )
+                if is_valid_number(
+                    pcr[
+                        "pcr_oi"
+                    ]
+                )
+                else "-"
+            )
+        )
+
+    with m3:
+
+        st.metric(
+            "PCR Volume",
+            (
+                round(
+                    pcr[
+                        "pcr_volume"
+                    ],
+                    3
+                )
+                if is_valid_number(
+                    pcr[
+                        "pcr_volume"
+                    ]
+                )
+                else "-"
+            )
+        )
+
+    with m4:
+
+        st.metric(
+            "PCR Contracts",
+            (
+                pcr[
+                    "ce_contracts_seen"
+                ]
+                + pcr[
+                    "pe_contracts_seen"
+                ]
+            )
+        )
+
+    # =====================================================
+    # BUILD BAR
+    # =====================================================
+
+    if st.button(
+        "Build Latest 3-Min Bars",
+        use_container_width=True
+    ):
+
+        try:
+
+            bars = (
+                neo.build_3min_candles()
+            )
+
+            if not bars:
+
+                st.info(
+                    "No complete NIFTY Spot + "
+                    "Future 3-minute bar available."
                 )
 
-    # ========================================================
-    # FEATURE DATASET
-    # ========================================================
+            else:
 
-    engine = (
-        st.session_state.engine
+                processed = 0
+
+                for item in bars:
+
+                    spot = item[
+                        "spot"
+                    ]
+
+                    future = item[
+                        "future"
+                    ]
+
+                    option_data = (
+                        neo.calculate_pcr()
+                    )
+
+                    # Build heavyweight snapshot.
+
+                    heavy_snapshot = {}
+
+                    with neo.lock:
+
+                        latest = dict(
+                            neo.latest
+                        )
+
+                    for symbol, token in (
+                        neo.heavy_tokens.items()
+                    ):
+
+                        data = latest.get(
+                            str(token)
+                        )
+
+                        if data:
+
+                            heavy_snapshot[
+                                symbol
+                            ] = {
+
+                                "o":
+                                    data.get(
+                                        "open"
+                                    ),
+
+                                "c":
+                                    data.get(
+                                        "ltp"
+                                    ),
+
+                                "vwap":
+                                    data.get(
+                                        "vwap"
+                                    ),
+
+                                "rel_volume":
+                                    1.0,
+                            }
+
+                    candle = Candle3Min(
+
+                        timestamp=
+                            item[
+                                "timestamp"
+                            ],
+
+                        spot_o=
+                            spot[
+                                "open"
+                            ],
+
+                        spot_h=
+                            spot[
+                                "high"
+                            ],
+
+                        spot_l=
+                            spot[
+                                "low"
+                            ],
+
+                        spot_c=
+                            spot[
+                                "close"
+                            ],
+
+                        fut_o=
+                            future[
+                                "open"
+                            ],
+
+                        fut_h=
+                            future[
+                                "high"
+                            ],
+
+                        fut_l=
+                            future[
+                                "low"
+                            ],
+
+                        fut_c=
+                            future[
+                                "close"
+                            ],
+
+                        fut_volume=
+                            future[
+                                "volume"
+                            ],
+
+                        fut_oi=
+                            future[
+                                "oi"
+                            ],
+
+                        heavy=
+                            heavy_snapshot,
+
+                        option_chain=
+                            option_data,
+                    )
+
+                    result = (
+                        st.session_state
+                        .engine
+                        .process_candle(
+                            candle
+                        )
+                    )
+
+                    if result is not None:
+
+                        processed += 1
+
+                st.success(
+                    f"Processed {processed} "
+                    "3-minute candle(s)."
+                )
+
+        except Exception as exc:
+
+            st.error(
+                f"Bar processing failed: {exc}"
+            )
+
+    # =====================================================
+    # DATAFRAME
+    # =====================================================
+
+    df = (
+        st.session_state
+        .engine
+        .dataframe()
     )
-
-    df = engine.dataframe()
 
     if not df.empty:
 
         st.subheader(
-            "Latest Research Features"
+            "Latest Features"
         )
 
         display_columns = [
@@ -4834,8 +5173,6 @@ def run_streamlit_app():
 
             "oi_change",
 
-            "oi_strength",
-
             "oi_long_buildup",
 
             "oi_short_buildup",
@@ -4843,6 +5180,8 @@ def run_streamlit_app():
             "oi_short_covering",
 
             "oi_long_unwinding",
+
+            "oi_strength",
 
             "twc",
 
@@ -4860,9 +5199,9 @@ def run_streamlit_app():
 
             "pe_oi_change",
 
-            "atm_iv",
+            "ce_oi_atm",
 
-            "iv_change",
+            "pe_oi_atm",
 
             "atm_strike",
 
@@ -4879,87 +5218,121 @@ def run_streamlit_app():
             df[
                 display_columns
             ].tail(30),
-            use_container_width=True,
+            use_container_width=True
         )
 
-        # ----------------------------------------------------
-        # Metrics
-        # ----------------------------------------------------
+        # =================================================
+        # DASHBOARD METRICS
+        # =================================================
 
-        m1, m2, m3, m4 = st.columns(4)
+        c1, c2, c3, c4 = (
+            st.columns(4)
+        )
 
-        with m1:
+        with c1:
 
             st.metric(
                 "3-Min Bars",
-                len(df),
+                len(df)
             )
 
-        with m2:
+        with c2:
 
-            if engine.previous_candles:
+            latest_future = "-"
 
-                latest_future = (
-                    engine
-                    .previous_candles[
-                        -1
-                    ]
-                    .fut_c
-                )
+            if (
+                st.session_state
+                .engine
+                .prev_candles
+            ):
 
-                st.metric(
-                    "Latest Future",
-                    format_metric(
-                        latest_future,
-                        2,
+                latest_future = round(
+                    float(
+                        st.session_state
+                        .engine
+                        .prev_candles[
+                            -1
+                        ]
+                        .fut_c
                     ),
+                    2
                 )
-
-            else:
-
-                st.metric(
-                    "Latest Future",
-                    "-",
-                )
-
-        with m3:
 
             st.metric(
-                "Latest PCR OI",
-                format_metric(
-                    df.iloc[-1].get(
-                        "pcr_oi"
-                    )
-                ),
+                "Latest Future",
+                latest_future
             )
 
-        with m4:
+        with c3:
+
+            latest_pcr = (
+                df.iloc[-1].get(
+                    "pcr_oi",
+                    np.nan
+                )
+            )
+
+            st.metric(
+                "PCR OI",
+                (
+                    round(
+                        float(
+                            latest_pcr
+                        ),
+                        3
+                    )
+                    if is_valid_number(
+                        latest_pcr
+                    )
+                    else "-"
+                )
+            )
+
+        with c4:
+
+            quality = (
+                df.iloc[-1].get(
+                    "data_quality_score",
+                    np.nan
+                )
+            )
 
             st.metric(
                 "Data Quality",
-                format_metric(
-                    df.iloc[-1].get(
-                        "data_quality_score"
+                (
+                    round(
+                        float(
+                            quality
+                        ),
+                        3
                     )
-                ),
+                    if is_valid_number(
+                        quality
+                    )
+                    else "-"
+                )
             )
 
-        # ----------------------------------------------------
-        # Save
-        # ----------------------------------------------------
+        # =================================================
+        # SAVE
+        # =================================================
 
         if st.button(
-            "Save Feature Dataset",
-            use_container_width=True,
+            "Save Dataset",
+            use_container_width=True
         ):
 
             try:
 
-                engine.save()
+                (
+                    st.session_state
+                    .engine
+                    .save()
+                )
 
                 st.success(
-                    "Feature dataset saved to "
-                    f"{CONFIG['dataset_path']}/features"
+                    "Dataset saved to "
+                    "./nifty_3min_dataset"
                 )
 
             except Exception as exc:
@@ -4968,116 +5341,63 @@ def run_streamlit_app():
                     f"Dataset save failed: {exc}"
                 )
 
-        # ----------------------------------------------------
-        # Walk-forward
-        # ----------------------------------------------------
-
-        st.subheader(
-            "Date-Aware Walk-Forward"
-        )
-
-        if st.button(
-            "Build Walk-Forward Splits",
-            use_container_width=True,
-        ):
-
-            try:
-
-                splits = (
-                    engine.dataset
-                    .purged_walk_forward_by_date(
-                        df,
-                        n_splits=5,
-                    )
-                )
-
-                if not splits:
-
-                    st.info(
-                        "Not enough dates for "
-                        "walk-forward splitting."
-                    )
-
-                else:
-
-                    rows = []
-
-                    for i, (
-                        train_idx,
-                        test_idx,
-                    ) in enumerate(
-                        splits,
-                        start=1,
-                    ):
-
-                        rows.append({
-
-                            "fold":
-                                i,
-
-                            "train_rows":
-                                len(
-                                    train_idx
-                                ),
-
-                            "test_rows":
-                                len(
-                                    test_idx
-                                ),
-
-                        })
-
-                    st.dataframe(
-                        pd.DataFrame(rows),
-                        use_container_width=True,
-                    )
-
-            except Exception as exc:
-
-                st.error(
-                    f"Walk-forward failed: {exc}"
-                )
-
     else:
 
         st.info(
-            "No 3-minute bars yet.\n\n"
-            "1. Connect Kotak Neo\n"
-            "2. Subscribe NIFTY Spot + Future\n"
-            "3. Subscribe PCR Options\n"
-            "4. Optionally subscribe Heavyweights\n"
-            "5. Wait for live ticks\n"
-            "6. Build Latest 3-Min Bars"
+            "No 3-minute bars yet."
         )
 
-    # ========================================================
+    # =====================================================
+    # DISCOVERY LOG
+    # =====================================================
+
+    with st.expander(
+        "Instrument Discovery Log"
+    ):
+
+        if neo.discovery_log:
+
+            for message in (
+                neo.discovery_log
+            ):
+
+                st.write(
+                    "•",
+                    message
+                )
+
+        else:
+
+            st.write(
+                "No discovery performed yet."
+            )
+
+    # =====================================================
     # FOOTER
-    # ========================================================
+    # =====================================================
 
     st.divider()
 
     st.caption(
-        "Research-Lock | "
-        "Execution model: next_bar_open | "
+        "Execution: next_bar_open | "
         "ATR: session_local | "
         "Bar: 3m | "
-        "TB: 30m | "
-        "MFE/MAE: 15/30/45m | "
-        "Full Option Chain API: OFF | "
-        "PCR: LIVE QUOTE BASED | "
-        "Orders: OFF"
+        "Triple Barrier: 30m | "
+        "MFE: 15/30/45m | "
+        "PCR: live CE/PE OI + volume | "
+        "No fabricated token/data"
     )
 
 
-# ============================================================
-# CLI
-# ============================================================
+# =========================================================
+# MAIN
+# =========================================================
 
 if __name__ == "__main__":
 
     if os.getenv(
         "RUN_TESTS",
-        "0",
+        "0"
     ) == "1":
 
         run_unit_tests()
