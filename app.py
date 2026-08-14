@@ -58,7 +58,53 @@ def generate_live_totp(secret_or_otp: str) -> str:
     except Exception:
         return raw
 
+def normalize_kotak_mobile(value: str) -> str:
+    """
+    Normalize Indian registered mobile number for Kotak Neo TOTP login.
 
+    Accepted examples:
+        9876543210
+        919876543210
+        +919876543210
+        00919876543210
+        +91 98765-43210
+
+    Output:
+        +919876543210
+    """
+    raw = str(value or "").strip()
+
+    if not raw:
+        raise ValueError(
+            "KOTAK_MOBILE is empty. Enter your registered Kotak mobile number."
+        )
+
+    # Keep digits only; this removes spaces, -, (, ), etc.
+    digits = "".join(ch for ch in raw if ch.isdigit())
+
+    if digits.startswith("00"):
+        digits = digits[2:]
+
+    # Already country code +91
+    if digits.startswith("91") and len(digits) == 12:
+        national = digits[2:]
+
+    # Normal Indian 10-digit mobile
+    elif len(digits) == 10:
+        national = digits
+
+    else:
+        raise ValueError(
+            "Invalid KOTAK_MOBILE format. Use your registered 10-digit "
+            "Indian mobile number, e.g. 9876543210. The app will convert it to +91 format."
+        )
+
+    if len(national) != 10 or national[0] not in "6789":
+        raise ValueError(
+            "KOTAK_MOBILE is not a valid Indian mobile number."
+        )
+
+    return "+91" + national
 # =========================================================
 # CONFIGURATION - RESEARCH LOCK FROZEN
 # =========================================================
@@ -737,7 +783,7 @@ class DatasetManager:
 class KotakNeoAdapter:
     def __init__(self):
         self.consumer_key = env_or_secret("KOTAK_CONSUMER_KEY")
-        self.mobile = env_or_secret("KOTAK_MOBILE")
+        self.mobile = normalize_kotak_mobile(env_or_secret("KOTAK_MOBILE"))
         self.ucc = env_or_secret("KOTAK_UCC")
         self.totp = env_or_secret("KOTAK_TOTP")
         self.mpin = env_or_secret("KOTAK_MPIN")
