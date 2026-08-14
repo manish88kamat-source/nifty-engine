@@ -2,7 +2,7 @@
 """
 NIFTY 3-Min Micro Engine
 Kotak Neo Integrated Research-Lock v2.0
-Real-Time Dynamic Token Discovery & Live Market Engine (Official Gateway Release)
+Real-Time Dynamic Token Discovery & 2-Step Authenticated Execution
 """
 
 from __future__ import annotations
@@ -33,10 +33,11 @@ except ImportError:
 
 
 # =========================================================
-# PURE PYTHON TOTP GENERATOR
+# PURE PYTHON TOTP GENERATOR (ZERO EXTERNAL DEPENDENCY)
 # =========================================================
 
 def generate_live_totp(secret_or_otp: str) -> str:
+    """Generate dynamic 6-digit TOTP from secret or pass clean 6-digit OTP."""
     raw = str(secret_or_otp).strip().replace(" ", "").upper()
     if raw.isdigit() and len(raw) == 6:
         return raw
@@ -56,7 +57,7 @@ def generate_live_totp(secret_or_otp: str) -> str:
 
 
 # =========================================================
-# BUILT-IN NATIVE KOTAK NEO CLIENT (OFFICIAL GATEWAY)
+# BUILT-IN NATIVE KOTAK NEO CLIENT (V2 2-STEP HANDSHAKE)
 # =========================================================
 
 class BuiltinNeoAPI:
@@ -85,7 +86,8 @@ class BuiltinNeoAPI:
             h.update(extra)
         return h
 
-    def totp_login(self, mobile_number, ucc, totp):
+    def step1_totp_login(self, mobile_number, ucc, totp):
+        """Step 1: Validate Mobile, UCC & TOTP to obtain SID"""
         live_otp = generate_live_totp(totp)
         clean_mobile = str(mobile_number).strip().replace(" ", "").replace("-", "")
         clean_ucc = str(ucc).strip()
@@ -114,7 +116,8 @@ class BuiltinNeoAPI:
                     data = res.json()
                     self.sid = data.get("data", {}).get("sid", "")
                     self.hs_server_id = data.get("data", {}).get("hsServerId", "")
-                    return data
+                    if self.sid:
+                        return data
                 else:
                     try:
                         err_json = res.json()
@@ -124,9 +127,13 @@ class BuiltinNeoAPI:
             except Exception as exc:
                 last_resp = repr(exc)
 
-        raise RuntimeError(f"Kotak Login: {last_resp}")
+        raise RuntimeError(f"Step 1 (TOTP Handshake) Failed: {last_resp}")
 
-    def totp_validate(self, mpin):
+    def step2_mpin_validate(self, mpin):
+        """Step 2: Validate MPIN with SID to obtain final Trade Token"""
+        if not self.sid:
+            raise RuntimeError("Missing SID from Step 1.")
+
         clean_mpin = str(mpin).strip()
         headers = self._headers({"sid": self.sid})
         payload = {"mpin": clean_mpin}
@@ -140,15 +147,13 @@ class BuiltinNeoAPI:
         if res.status_code == 200:
             data = res.json()
             self.session_token = data.get("data", {}).get("token", "")
-            if not self.sid:
-                self.sid = data.get("data", {}).get("sid", "")
             return data
         try:
             err_json = res.json()
             msg = err_json.get("message") or res.text
         except Exception:
             msg = res.text
-        raise RuntimeError(f"Kotak MPIN: {msg}")
+        raise RuntimeError(f"Step 2 (MPIN Handshake) Failed: {msg}")
 
     def search_scrip(self, exchange_segment, symbol, expiry="", option_type="", strike_price=""):
         headers = self._headers({
@@ -173,7 +178,7 @@ class BuiltinNeoAPI:
                     if isinstance(data.get(key), list):
                         return data[key]
         except Exception as exc:
-            print(f"[Kotak REST] Scrip search error: {exc}")
+            print(f"[Kotak REST] Scrip search error for {symbol}: {exc}")
         return []
 
     def subscribe(self, instrument_tokens, is_index=False, is_depth=False):
@@ -186,7 +191,7 @@ NeoAPI = BuiltinNeoAPI
 
 
 # =========================================================
-# CONFIG
+# ENGINE CONFIGURATION (RESEARCH-LOCK FROZEN)
 # =========================================================
 
 CONFIG = {
@@ -231,7 +236,7 @@ CONFIG = {
 
 
 # =========================================================
-# NIFTY HEAVYWEIGHTS
+# NIFTY HEAVYWEIGHT WEIGHTS (RESEARCH LOCKED)
 # =========================================================
 
 HEAVYWEIGHTS = {
@@ -249,7 +254,7 @@ HEAVYWEIGHTS = {
 
 
 # =========================================================
-# HELPERS
+# MATHEMATICAL HELPERS
 # =========================================================
 
 def safe_float(value, default=np.nan):
@@ -376,7 +381,7 @@ def strike_from_record(record):
 
 
 # =========================================================
-# CANDLE
+# CANDLE STRUCTURE
 # =========================================================
 
 @dataclass
@@ -397,7 +402,7 @@ class Candle3Min:
 
 
 # =========================================================
-# OPENING RANGE
+# OPENING RANGE ENGINE
 # =========================================================
 
 class OpeningRangeEngine:
@@ -445,7 +450,7 @@ class OpeningRangeEngine:
 
 
 # =========================================================
-# SESSION CONTEXT
+# SESSION CONTEXT ENGINE
 # =========================================================
 
 class SessionContextEngine:
@@ -482,7 +487,7 @@ class SessionContextEngine:
 
 
 # =========================================================
-# PCR ENGINE
+# OPTION CHAIN & PCR ENGINE
 # =========================================================
 
 class OptionChainEngine:
@@ -579,7 +584,7 @@ class HeavyweightEngine:
 
 
 # =========================================================
-# FEATURE ENGINE
+# FEATURE ENGINE (RESEARCH LOCKED)
 # =========================================================
 
 class FeatureEngine:
@@ -741,7 +746,7 @@ class FeatureEngine:
 
 
 # =========================================================
-# LABEL ENGINE
+# LABEL ENGINE (TRIPLE BARRIER LOCKED)
 # =========================================================
 
 class LabelEngine:
@@ -887,7 +892,7 @@ class LabelEngine:
 
 
 # =========================================================
-# DATASET MANAGER
+# DATASET MANAGER & CROSS-VALIDATION
 # =========================================================
 
 class DatasetManager:
@@ -947,7 +952,7 @@ class DatasetManager:
 
 
 # =========================================================
-# KOTAK NEO ADAPTER
+# KOTAK NEO ADAPTER (DYNAMIC DISCOVERY)
 # =========================================================
 
 class KotakNeoAdapter:
@@ -987,14 +992,14 @@ class KotakNeoAdapter:
         }
         missing = [key for key, value in required.items() if not value]
         if missing:
-            raise RuntimeError("Missing in Secrets: " + ", ".join(missing))
+            raise RuntimeError("Missing credentials: " + ", ".join(missing))
 
-        self.client.totp_login(
+        self.client.step1_totp_login(
             mobile_number=self.mobile,
             ucc=self.ucc,
             totp=totp_to_use,
         )
-        self.client.totp_validate(mpin=self.mpin)
+        self.client.step2_mpin_validate(mpin=self.mpin)
         self.connected = True
         return True
 
@@ -1501,7 +1506,7 @@ class NiftyMicroEngine:
 
 
 # =========================================================
-# UNIT TESTS
+# UNIT TESTS (RESEARCH LOCK VERIFICATION)
 # =========================================================
 
 def run_unit_tests():
@@ -1585,6 +1590,7 @@ def run_streamlit_app():
     st.title("NIFTY 3-Min Micro Engine")
     st.caption("Kotak Neo • Research-Lock v2.0 • Dynamic Discovery Active")
 
+    # Session State Initialization
     if "neo" not in st.session_state:
         st.session_state.neo = None
     if "engine" not in st.session_state:
@@ -1594,7 +1600,7 @@ def run_streamlit_app():
     if "pcr_subscribed" not in st.session_state:
         st.session_state["pcr_subscribed"] = False
 
-    # Sidebar Secrets Validation
+    # Sidebar Secrets Diagnostics
     st.sidebar.header("Kotak Neo Secrets")
     credentials = {
         "Consumer Key": bool(env_or_secret("KOTAK_CONSUMER_KEY")),
@@ -1617,7 +1623,7 @@ def run_streamlit_app():
     st.sidebar.write("Strike count:", CONFIG["pcr_strike_count"])
     st.sidebar.write("Strike step:", CONFIG["pcr_strike_step"])
 
-    # Live TOTP Entry Box
+    # Authentication UI
     st.subheader("Kotak Neo Authentication")
     user_live_totp = st.text_input(
         "Enter Live 6-Digit TOTP (from Authenticator App)",
@@ -1629,10 +1635,11 @@ def run_streamlit_app():
     with col1:
         if st.button("Connect Kotak Neo", use_container_width=True):
             try:
-                neo = KotakNeoAdapter()
-                neo.login(live_totp_override=user_live_totp)
-                st.session_state.neo = neo
-                st.success("Kotak Neo login successful.")
+                adapter = KotakNeoAdapter()
+                adapter.login(live_totp_override=user_live_totp)
+                st.session_state.neo = adapter
+                st.success("Kotak Neo 2-Step Authentication Successful!")
+                st.rerun()
             except Exception as exc:
                 st.error(f"Login failed: {exc}")
 
@@ -1644,12 +1651,13 @@ def run_streamlit_app():
             except Exception as exc:
                 st.error(f"Tests failed: {exc}")
 
+    # Guard Condition
     neo = st.session_state.get("neo")
-    if neo is None:
+    if neo is None or not getattr(neo, "connected", False):
         st.warning("Connect Kotak Neo first to enable dynamic discovery and live streaming.")
         return
 
-    # Dynamic Discovery
+    # Dynamic Discovery Section
     st.subheader("Instrument Discovery (Dynamic API)")
     if st.button("Discover NIFTY Instruments", use_container_width=True):
         try:
@@ -1670,7 +1678,7 @@ def run_streamlit_app():
         with d3:
             st.metric("Heavyweights", len(getattr(neo, "heavy_tokens", {})))
 
-    # Live Feed Subscription
+    # Live Streaming Subscriptions
     st.subheader("Live Market Feed")
     if st.button("Subscribe NIFTY + Heavyweights", use_container_width=True):
         try:
@@ -1704,7 +1712,7 @@ def run_streamlit_app():
         except Exception as exc:
             st.error(f"PCR discovery failed: {exc}")
 
-    # Metrics Display
+    # Real-Time Metrics
     pcr = neo.calculate_pcr()
     m1, m2, m3, m4 = st.columns(4)
     with m1:
@@ -1716,7 +1724,7 @@ def run_streamlit_app():
     with m4:
         st.metric("PCR Contracts", pcr["ce_contracts_seen"] + pcr["pe_contracts_seen"])
 
-    # 3-Minute Candle Aggregator
+    # 3-Minute Candle Aggregation
     if st.button("Build Latest 3-Min Bars", use_container_width=True):
         try:
             bars = neo.build_3min_candles()
@@ -1766,7 +1774,7 @@ def run_streamlit_app():
         except Exception as exc:
             st.error(f"Bar processing failed: {exc}")
 
-    # Dataframe Display
+    # Dataset Feature Viewer
     df = st.session_state.engine.dataframe()
     if not df.empty:
         st.subheader("Latest Calculated Features")
@@ -1820,7 +1828,7 @@ def run_streamlit_app():
 
 
 # =========================================================
-# MAIN ENTRYPOINT
+# ENTRYPOINT
 # =========================================================
 
 if __name__ == "__main__":
