@@ -1391,14 +1391,14 @@ def run_streamlit_app():
     c1, c2 = st.columns(2)
     with c1:
         if st.button("Connect Kotak Neo", use_container_width=True):
-            try:
-                adapter = KotakNeoAdapter()
-adapter.login(live_totp_override=user_live_totp)
-st.session_state.neo = adapter
-st.success("Kotak Neo API v2 authentication successful.")
-# st.rerun()
-            except Exception as exc:
-                st.error(f"Login failed: {exc}")
+    try:
+        adapter = KotakNeoAdapter()
+        adapter.login(live_totp_override=user_live_totp)
+        st.session_state.neo = adapter
+        st.success("Kotak Neo API v2 authentication successful.")
+        # st.rerun()
+    except Exception as exc:
+        st.error(f"Login failed: {exc}")
 
     with c2:
         if st.button("Run Unit Tests", use_container_width=True):
