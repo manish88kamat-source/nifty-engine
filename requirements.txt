@@ -1,6 +1,7 @@
-streamlit==1.61.1
+streamlit==1.61.0
 pandas==2.2.3
-numpy==2.2.6
-pyarrow==18.0.0
-requests>=2.31.0,<3
-git+https://github.com/Kotak-Neo/Kotak-neo-api-v2.git@v2.0.2#egg=neo_api_client
+numpy==2.1.0
+pyotp==2.9.0
+requests==2.32.3
+
+neo-api-client @ git+https://github.com/Kotak-Neo/Kotak-neo-api-v2.git@v2.0.2
