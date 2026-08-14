@@ -2,7 +2,7 @@
 """
 NIFTY 3-Min Micro Engine
 Kotak Neo Integrated Research-Lock v2.0
-Dynamic Discovery & Robust Multi-Endpoint Gateway
+Real-Time Dynamic Token Discovery & Live Market Engine (Official Gateway Release)
 """
 
 from __future__ import annotations
@@ -56,19 +56,14 @@ def generate_live_totp(secret_or_otp: str) -> str:
 
 
 # =========================================================
-# BUILT-IN NATIVE KOTAK NEO CLIENT (ROBUST ADAPTER)
+# BUILT-IN NATIVE KOTAK NEO CLIENT (OFFICIAL GATEWAY)
 # =========================================================
 
 class BuiltinNeoAPI:
     def __init__(self, consumer_key=None, environment="prod"):
         self.consumer_key = str(consumer_key or "").strip()
         self.environment = environment
-        self.gateways = [
-            "https://napi.kotaksecurities.com",
-            "https://gw-napi.kotaksecurities.com",
-            "https://tradeapi.kotak.com"
-        ]
-        self.base_url = self.gateways[0]
+        self.base_url = "https://napi.kotaksecurities.com"
         self.session_token = ""
         self.sid = ""
         self.hs_server_id = ""
@@ -79,8 +74,8 @@ class BuiltinNeoAPI:
 
     def _headers(self, extra=None):
         h = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-            "Accept": "application/json, text/plain, */*",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept": "application/json",
             "neo-fin-key": "neotrade",
             "Content-Type": "application/json"
         }
@@ -102,32 +97,34 @@ class BuiltinNeoAPI:
             mobs.append(f"+91{clean_mobile}")
 
         last_resp = ""
-        for base in self.gateways:
-            for mob in mobs:
-                payload = {
-                    "mobileNumber": mob,
-                    "ucc": clean_ucc,
-                    "totp": str(live_otp)
-                }
-                try:
-                    res = requests.post(
-                        f"{base}/login/1.0/login/v2/validateTotp",
-                        json=payload,
-                        headers=self._headers(),
-                        timeout=8
-                    )
-                    if res.status_code == 200:
-                        data = res.json()
-                        self.base_url = base
-                        self.sid = data.get("data", {}).get("sid", "")
-                        self.hs_server_id = data.get("data", {}).get("hsServerId", "")
-                        return data
-                    else:
-                        last_resp = f"[{base}] HTTP {res.status_code}: {res.text}"
-                except Exception as exc:
-                    last_resp = f"[{base}] {repr(exc)}"
+        for mob in mobs:
+            payload = {
+                "mobileNumber": mob,
+                "ucc": clean_ucc,
+                "totp": str(live_otp)
+            }
+            try:
+                res = requests.post(
+                    f"{self.base_url}/login/1.0/login/v2/validateTotp",
+                    json=payload,
+                    headers=self._headers(),
+                    timeout=10
+                )
+                if res.status_code == 200:
+                    data = res.json()
+                    self.sid = data.get("data", {}).get("sid", "")
+                    self.hs_server_id = data.get("data", {}).get("hsServerId", "")
+                    return data
+                else:
+                    try:
+                        err_json = res.json()
+                        last_resp = err_json.get("message") or err_json.get("error", [{}])[0].get("message") or res.text
+                    except Exception:
+                        last_resp = f"HTTP {res.status_code}: {res.text}"
+            except Exception as exc:
+                last_resp = repr(exc)
 
-        raise RuntimeError(f"Kotak Gateway Response -> {last_resp}")
+        raise RuntimeError(f"Kotak Login: {last_resp}")
 
     def totp_validate(self, mpin):
         clean_mpin = str(mpin).strip()
@@ -146,7 +143,12 @@ class BuiltinNeoAPI:
             if not self.sid:
                 self.sid = data.get("data", {}).get("sid", "")
             return data
-        raise RuntimeError(f"Kotak MPIN Error -> HTTP {res.status_code}: {res.text}")
+        try:
+            err_json = res.json()
+            msg = err_json.get("message") or res.text
+        except Exception:
+            msg = res.text
+        raise RuntimeError(f"Kotak MPIN: {msg}")
 
     def search_scrip(self, exchange_segment, symbol, expiry="", option_type="", strike_price=""):
         headers = self._headers({
