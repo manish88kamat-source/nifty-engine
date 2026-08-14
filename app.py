@@ -2,7 +2,7 @@
 """
 NIFTY 3-Min Micro Engine
 Kotak Neo Integrated Research-Lock v2.0
-Real-Time Dynamic Token Discovery & Live Market Engine (Auto-TOTP & REST Enabled)
+Real-Time Dynamic Token Discovery & Live Market Engine (Live UI TOTP Enabled)
 """
 
 from __future__ import annotations
@@ -37,7 +37,7 @@ except ImportError:
 # =========================================================
 
 def generate_live_totp(secret_or_otp: str) -> str:
-    """Generate dynamic 6-digit TOTP from secret or return raw 6-digit OTP."""
+    """Generate dynamic 6-digit TOTP from secret or return clean 6-digit OTP."""
     raw = str(secret_or_otp).strip().replace(" ", "").upper()
     if raw.isdigit() and len(raw) == 6:
         return raw
@@ -87,7 +87,7 @@ class BuiltinNeoAPI:
         else:
             candidates.append(f"+91{clean_mobile}")
 
-        last_error = "Unknown error"
+        last_error = "Authentication failed"
         for mob in candidates:
             headers = {
                 "neo-fin-key": "neotrade",
@@ -122,7 +122,7 @@ class BuiltinNeoAPI:
             except Exception as exc:
                 last_error = str(exc)
 
-        raise RuntimeError(f"{last_error} (Check TOTP/UCC in Secrets)")
+        raise RuntimeError(f"{last_error}")
 
     def totp_validate(self, mpin):
         headers = {
@@ -158,7 +158,6 @@ class BuiltinNeoAPI:
             "neo-fin-key": "neotrade",
             "Content-Type": "application/json",
             "Authorization": f"Bearer {self.session_token or self.consumer_key}",
-            "Auth": self.session_token,
             "sid": self.sid
         }
         payload = {
@@ -612,7 +611,7 @@ class FeatureEngine:
         self.sess.set_previous_day(close, high, low)
 
     def set_today_open(self, open_price):
-        self.sess.set_today_open(open_price)
+        self.today_open = open_price
 
     def compute(self, candle, prev):
         typical = (candle.fut_h + candle.fut_l + candle.fut_c) / 3.0
@@ -981,12 +980,14 @@ class KotakNeoAdapter:
         self.heavy_tokens = {}
         self.discovery_log = []
 
-    def login(self):
+    def login(self, live_totp_override=""):
+        totp_to_use = live_totp_override.strip() if live_totp_override.strip() else self.totp
+
         required = {
             "KOTAK_CONSUMER_KEY": self.consumer_key,
             "KOTAK_MOBILE": self.mobile,
             "KOTAK_UCC": self.ucc,
-            "KOTAK_TOTP": self.totp,
+            "KOTAK_TOTP": totp_to_use,
             "KOTAK_MPIN": self.mpin,
         }
         missing = [key for key, value in required.items() if not value]
@@ -996,7 +997,7 @@ class KotakNeoAdapter:
         self.client.totp_login(
             mobile_number=self.mobile,
             ucc=self.ucc,
-            totp=self.totp,
+            totp=totp_to_use,
         )
         self.client.totp_validate(mpin=self.mpin)
         self.connected = True
@@ -1588,10 +1589,6 @@ def run_streamlit_app():
     st.set_page_config(page_title="NIFTY 3-Min Micro Engine", layout="wide")
     st.title("NIFTY 3-Min Micro Engine")
     st.caption("Kotak Neo • Research-Lock v2.0 • Dynamic Discovery Active")
-    st.info(
-        "NIFTY futures, heavyweight tokens and PCR option contracts are discovered dynamically "
-        "through Kotak Neo REST API after login. No fabricated token is used."
-    )
 
     if "neo" not in st.session_state:
         st.session_state.neo = None
@@ -1602,13 +1599,13 @@ def run_streamlit_app():
     if "pcr_subscribed" not in st.session_state:
         st.session_state["pcr_subscribed"] = False
 
-    # Sidebar
-    st.sidebar.header("Kotak Neo")
+    # Sidebar Credentials Check
+    st.sidebar.header("Kotak Neo Secrets")
     credentials = {
         "Consumer Key": bool(env_or_secret("KOTAK_CONSUMER_KEY")),
         "Mobile": bool(env_or_secret("KOTAK_MOBILE")),
         "UCC": bool(env_or_secret("KOTAK_UCC")),
-        "TOTP": bool(env_or_secret("KOTAK_TOTP")),
+        "TOTP Key": bool(env_or_secret("KOTAK_TOTP")),
         "MPIN": bool(env_or_secret("KOTAK_MPIN")),
     }
     for name, present in credentials.items():
@@ -1626,13 +1623,20 @@ def run_streamlit_app():
     st.sidebar.write("Strike count:", CONFIG["pcr_strike_count"])
     st.sidebar.write("Strike step:", CONFIG["pcr_strike_step"])
 
-    # Connect buttons
+    # Live TOTP Entry Box
+    st.subheader("Kotak Neo Authentication")
+    user_live_totp = st.text_input(
+        "Enter Live 6-Digit TOTP (from Authenticator App)",
+        placeholder="e.g. 123456 (Leave blank if Secret Key is in Secrets)",
+        type="password"
+    )
+
     col1, col2 = st.columns(2)
     with col1:
         if st.button("Connect Kotak Neo", use_container_width=True):
             try:
                 neo = KotakNeoAdapter()
-                neo.login()
+                neo.login(live_totp_override=user_live_totp)
                 st.session_state.neo = neo
                 st.success("Kotak Neo login successful.")
             except Exception as exc:
