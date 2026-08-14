@@ -1,5 +1,5 @@
-git+https://github.com/Kotak-Neo/Kotak-neo-api-v2.git@v2.0.2#egg=neo_api_client
 streamlit
 pandas
 numpy
 pyarrow
+neo-api-client
