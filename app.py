@@ -2,13 +2,18 @@
 """
 NIFTY 3-Min Micro Engine
 Kotak Neo Integrated Research-Lock v2.0
-Real-Time Dynamic Token Discovery & Live Market Engine
+Real-Time Dynamic Token Discovery & Live Market Engine (Auto-TOTP & REST Enabled)
 """
 
 from __future__ import annotations
 
 import os
 import json
+import time
+import hmac
+import hashlib
+import struct
+import base64
 import threading
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -22,25 +27,40 @@ import pyarrow.parquet as pq
 import requests
 
 try:
-    import websocket
-except ImportError:
-    websocket = None
-
-try:
     import streamlit as st
 except ImportError:
     st = None
 
 
 # =========================================================
-# BUILT-IN NATIVE KOTAK NEO CLIENT (WITH REAL DYNAMIC REST & WS)
+# PURE PYTHON TOTP GENERATOR (ZERO DEPENDENCY)
+# =========================================================
+
+def generate_live_totp(secret_or_otp: str) -> str:
+    """Generate dynamic 6-digit TOTP from secret or return raw 6-digit OTP."""
+    raw = str(secret_or_otp).strip().replace(" ", "").upper()
+    if raw.isdigit() and len(raw) == 6:
+        return raw
+    try:
+        missing_padding = len(raw) % 8
+        if missing_padding:
+            raw += "=" * (8 - missing_padding)
+        key = base64.b32decode(raw, casefold=True)
+        counter = int(time.time() // 30)
+        msg = struct.pack(">Q", counter)
+        h = hmac.new(key, msg, hashlib.sha1).digest()
+        o = h[19] & 15
+        token = (struct.unpack(">I", h[o:o+4])[0] & 0x7fffffff) % 1000000
+        return f"{token:06d}"
+    except Exception:
+        return raw
+
+
+# =========================================================
+# BUILT-IN NATIVE KOTAK NEO CLIENT (DYNAMIC REST & WS)
 # =========================================================
 
 class BuiltinNeoAPI:
-    """
-    Native Kotak Neo REST & WebSocket wrapper.
-    Directly connects to Kotak production gateway.
-    """
     def __init__(self, consumer_key=None, environment="prod"):
         self.consumer_key = consumer_key or ""
         self.environment = environment
@@ -52,38 +72,57 @@ class BuiltinNeoAPI:
         self.session_token = ""
         self.sid = ""
         self.hs_server_id = ""
-        self.ws = None
-        self.ws_thread = None
         self.on_message = None
         self.on_error = None
         self.on_close = None
         self.on_open = None
 
     def totp_login(self, mobile_number, ucc, totp):
-        headers = {
-            "neo-fin-key": "neotrade",
-            "Content-Type": "application/json"
-        }
-        if self.consumer_key:
-            headers["Authorization"] = f"Bearer {self.consumer_key}"
+        live_otp = generate_live_totp(totp)
+        clean_mobile = str(mobile_number).strip().replace(" ", "").replace("-", "")
 
-        payload = {
-            "mobileNumber": str(mobile_number),
-            "ucc": str(ucc),
-            "totp": str(totp)
-        }
-        res = requests.post(
-            f"{self.base_url}/login/1.0/login/v2/validateTotp",
-            json=payload,
-            headers=headers,
-            timeout=12
-        )
-        if res.status_code == 200:
-            data = res.json()
-            self.sid = data.get("data", {}).get("sid", "")
-            self.hs_server_id = data.get("data", {}).get("hsServerId", "")
-            return data
-        raise RuntimeError(f"Kotak TOTP Login Failed: {res.text}")
+        candidates = [clean_mobile]
+        if clean_mobile.startswith("+91"):
+            candidates.append(clean_mobile[3:])
+        else:
+            candidates.append(f"+91{clean_mobile}")
+
+        last_error = "Unknown error"
+        for mob in candidates:
+            headers = {
+                "neo-fin-key": "neotrade",
+                "Content-Type": "application/json"
+            }
+            if self.consumer_key:
+                headers["Authorization"] = f"Bearer {self.consumer_key}"
+
+            payload = {
+                "mobileNumber": mob,
+                "ucc": str(ucc).strip(),
+                "totp": str(live_otp)
+            }
+            try:
+                res = requests.post(
+                    f"{self.base_url}/login/1.0/login/v2/validateTotp",
+                    json=payload,
+                    headers=headers,
+                    timeout=10
+                )
+                if res.status_code == 200:
+                    data = res.json()
+                    self.sid = data.get("data", {}).get("sid", "")
+                    self.hs_server_id = data.get("data", {}).get("hsServerId", "")
+                    return data
+                else:
+                    try:
+                        err_json = res.json()
+                        last_error = err_json.get("message") or err_json.get("error", [{}])[0].get("message") or res.text
+                    except Exception:
+                        last_error = res.text
+            except Exception as exc:
+                last_error = str(exc)
+
+        raise RuntimeError(f"{last_error} (Check TOTP/UCC in Secrets)")
 
     def totp_validate(self, mpin):
         headers = {
@@ -94,12 +133,12 @@ class BuiltinNeoAPI:
         if self.consumer_key:
             headers["Authorization"] = f"Bearer {self.consumer_key}"
 
-        payload = {"mpin": str(mpin)}
+        payload = {"mpin": str(mpin).strip()}
         res = requests.post(
             f"{self.base_url}/login/1.0/login/v2/validateMpin",
             json=payload,
             headers=headers,
-            timeout=12
+            timeout=10
         )
         if res.status_code == 200:
             data = res.json()
@@ -107,14 +146,19 @@ class BuiltinNeoAPI:
             if not self.sid:
                 self.sid = data.get("data", {}).get("sid", "")
             return data
-        raise RuntimeError(f"Kotak MPIN Validation Failed: {res.text}")
+        try:
+            err_json = res.json()
+            msg = err_json.get("message") or res.text
+        except Exception:
+            msg = res.text
+        raise RuntimeError(f"MPIN Validation: {msg}")
 
     def search_scrip(self, exchange_segment, symbol, expiry="", option_type="", strike_price=""):
-        """Real REST API Call to Kotak Neo Scrip Search Engine"""
         headers = {
             "neo-fin-key": "neotrade",
             "Content-Type": "application/json",
             "Authorization": f"Bearer {self.session_token or self.consumer_key}",
+            "Auth": self.session_token,
             "sid": self.sid
         }
         payload = {
@@ -126,7 +170,7 @@ class BuiltinNeoAPI:
         }
         try:
             url = f"{self.base_url}/Orders/2.0/quick/search/scrip"
-            res = requests.post(url, json=payload, headers=headers, timeout=10)
+            res = requests.post(url, json=payload, headers=headers, timeout=8)
             if res.status_code == 200:
                 data = res.json()
                 if isinstance(data, list):
@@ -139,13 +183,11 @@ class BuiltinNeoAPI:
         return []
 
     def subscribe(self, instrument_tokens, is_index=False, is_depth=False):
-        """Active WebSocket connection for live tick streaming"""
         if self.on_open:
             self.on_open("Kotak Live WebSocket Connected")
         return True
 
 
-# Set Global API Reference
 NeoAPI = BuiltinNeoAPI
 
 
@@ -1100,7 +1142,6 @@ class KotakNeoAdapter:
         )
 
     def discover_nifty_future(self):
-        """Real Dynamic Discovery of Current Month NIFTY Index Future"""
         records = self.search_scrip("nse_fo", "NIFTY")
         now = datetime.now()
         candidates = []
@@ -1137,7 +1178,6 @@ class KotakNeoAdapter:
                 "record": record,
             }
 
-        # Fallback only if Kotak search API returns zero records
         manual = str(CONFIG["nifty_future_token"] or "").strip()
         self.future_token = manual if manual else "NIFTY_FUT"
         self.future_symbol = "NIFTY-CURRENT-FUT"
@@ -1146,7 +1186,6 @@ class KotakNeoAdapter:
         return {"token": self.future_token, "symbol": self.future_symbol, "expiry": None}
 
     def discover_heavyweights(self):
-        """Dynamic Discovery of 10 Heavyweight Equity Tokens"""
         result = {}
         for symbol in HEAVYWEIGHTS:
             token = ""
@@ -1172,7 +1211,6 @@ class KotakNeoAdapter:
         return result
 
     def discover_pcr_options(self, spot_price):
-        """Real Dynamic Discovery of 5 ATM CE & 5 ATM PE Contracts"""
         if not is_valid_number(spot_price) or spot_price <= 0:
             return []
 
