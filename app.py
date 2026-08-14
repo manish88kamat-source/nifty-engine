@@ -2,7 +2,7 @@
 """
 NIFTY 3-Min Micro Engine
 Kotak Neo Integrated Research-Lock v2.0
-Real-Time Dynamic Token Discovery & Live Market Engine (Transparent Debugging)
+Dynamic Discovery & Robust Multi-Endpoint Gateway
 """
 
 from __future__ import annotations
@@ -56,18 +56,19 @@ def generate_live_totp(secret_or_otp: str) -> str:
 
 
 # =========================================================
-# BUILT-IN NATIVE KOTAK NEO CLIENT
+# BUILT-IN NATIVE KOTAK NEO CLIENT (ROBUST ADAPTER)
 # =========================================================
 
 class BuiltinNeoAPI:
     def __init__(self, consumer_key=None, environment="prod"):
         self.consumer_key = str(consumer_key or "").strip()
         self.environment = environment
-        self.base_url = (
-            "https://napi.kotaksecurities.com"
-            if environment == "prod"
-            else "https://gw-napi.kotaksecurities.com"
-        )
+        self.gateways = [
+            "https://napi.kotaksecurities.com",
+            "https://gw-napi.kotaksecurities.com",
+            "https://tradeapi.kotak.com"
+        ]
+        self.base_url = self.gateways[0]
         self.session_token = ""
         self.sid = ""
         self.hs_server_id = ""
@@ -76,61 +77,63 @@ class BuiltinNeoAPI:
         self.on_close = None
         self.on_open = None
 
+    def _headers(self, extra=None):
+        h = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "Accept": "application/json, text/plain, */*",
+            "neo-fin-key": "neotrade",
+            "Content-Type": "application/json"
+        }
+        if self.consumer_key:
+            h["Authorization"] = f"Bearer {self.consumer_key}"
+        if extra:
+            h.update(extra)
+        return h
+
     def totp_login(self, mobile_number, ucc, totp):
         live_otp = generate_live_totp(totp)
         clean_mobile = str(mobile_number).strip().replace(" ", "").replace("-", "")
         clean_ucc = str(ucc).strip()
 
-        candidates = [clean_mobile]
+        mobs = [clean_mobile]
         if clean_mobile.startswith("+91"):
-            candidates.append(clean_mobile[3:])
+            mobs.append(clean_mobile[3:])
         else:
-            candidates.append(f"+91{clean_mobile}")
+            mobs.append(f"+91{clean_mobile}")
 
         last_resp = ""
-        for mob in candidates:
-            headers = {
-                "neo-fin-key": "neotrade",
-                "Content-Type": "application/json"
-            }
-            if self.consumer_key:
-                headers["Authorization"] = f"Bearer {self.consumer_key}"
+        for base in self.gateways:
+            for mob in mobs:
+                payload = {
+                    "mobileNumber": mob,
+                    "ucc": clean_ucc,
+                    "totp": str(live_otp)
+                }
+                try:
+                    res = requests.post(
+                        f"{base}/login/1.0/login/v2/validateTotp",
+                        json=payload,
+                        headers=self._headers(),
+                        timeout=8
+                    )
+                    if res.status_code == 200:
+                        data = res.json()
+                        self.base_url = base
+                        self.sid = data.get("data", {}).get("sid", "")
+                        self.hs_server_id = data.get("data", {}).get("hsServerId", "")
+                        return data
+                    else:
+                        last_resp = f"[{base}] HTTP {res.status_code}: {res.text}"
+                except Exception as exc:
+                    last_resp = f"[{base}] {repr(exc)}"
 
-            payload = {
-                "mobileNumber": mob,
-                "ucc": clean_ucc,
-                "totp": str(live_otp)
-            }
-            try:
-                res = requests.post(
-                    f"{self.base_url}/login/1.0/login/v2/validateTotp",
-                    json=payload,
-                    headers=headers,
-                    timeout=10
-                )
-                if res.status_code == 200:
-                    data = res.json()
-                    self.sid = data.get("data", {}).get("sid", "")
-                    self.hs_server_id = data.get("data", {}).get("hsServerId", "")
-                    return data
-                else:
-                    last_resp = f"HTTP {res.status_code}: {res.text}"
-            except Exception as exc:
-                last_resp = f"Connection error: {repr(exc)}"
-
-        raise RuntimeError(f"Kotak TOTP Server Error -> {last_resp}")
+        raise RuntimeError(f"Kotak Gateway Response -> {last_resp}")
 
     def totp_validate(self, mpin):
         clean_mpin = str(mpin).strip()
-        headers = {
-            "neo-fin-key": "neotrade",
-            "Content-Type": "application/json",
-            "sid": self.sid
-        }
-        if self.consumer_key:
-            headers["Authorization"] = f"Bearer {self.consumer_key}"
-
+        headers = self._headers({"sid": self.sid})
         payload = {"mpin": clean_mpin}
+
         res = requests.post(
             f"{self.base_url}/login/1.0/login/v2/validateMpin",
             json=payload,
@@ -143,16 +146,13 @@ class BuiltinNeoAPI:
             if not self.sid:
                 self.sid = data.get("data", {}).get("sid", "")
             return data
-        raise RuntimeError(f"Kotak MPIN Server Error -> HTTP {res.status_code}: {res.text}")
+        raise RuntimeError(f"Kotak MPIN Error -> HTTP {res.status_code}: {res.text}")
 
     def search_scrip(self, exchange_segment, symbol, expiry="", option_type="", strike_price=""):
-        headers = {
-            "neo-fin-key": "neotrade",
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {self.session_token or self.consumer_key}",
-            "Auth": self.session_token,
-            "sid": self.sid
-        }
+        headers = self._headers({
+            "sid": self.sid,
+            "Auth": self.session_token
+        })
         payload = {
             "exchangeSegment": str(exchange_segment).lower(),
             "symbol": str(symbol).upper(),
@@ -171,7 +171,7 @@ class BuiltinNeoAPI:
                     if isinstance(data.get(key), list):
                         return data[key]
         except Exception as exc:
-            print(f"[Kotak REST] search_scrip error for {symbol}: {repr(exc)}")
+            print(f"[Kotak REST] Scrip search error: {exc}")
         return []
 
     def subscribe(self, instrument_tokens, is_index=False, is_depth=False):
@@ -1598,7 +1598,6 @@ def run_streamlit_app():
         "Consumer Key": bool(env_or_secret("KOTAK_CONSUMER_KEY")),
         "Mobile": bool(env_or_secret("KOTAK_MOBILE")),
         "UCC": bool(env_or_secret("KOTAK_UCC")),
-        "TOTP Key": bool(env_or_secret("KOTAK_TOTP")),
         "MPIN": bool(env_or_secret("KOTAK_MPIN")),
     }
     for name, present in credentials.items():
@@ -1620,7 +1619,7 @@ def run_streamlit_app():
     st.subheader("Kotak Neo Authentication")
     user_live_totp = st.text_input(
         "Enter Live 6-Digit TOTP (from Authenticator App)",
-        placeholder="e.g. 123456 (Leave blank if Secret Key is in Secrets)",
+        placeholder="e.g. 123456",
         type="password"
     )
 
