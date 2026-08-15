@@ -1,15 +1,18 @@
 #!/usr/bin/env python3
 """
 NIFTY 3-Min Micro Engine
-Kotak Neo Integrated Research-Lock v2.0
-Official Kotak Neo API v2 connectivity + dynamic discovery
-Research concepts intentionally preserved.
+Kotak Neo Integrated Research-Lock v2.4 (Hardened + Pro Terminal UI)
+- RLock protection across async ticks, bar closes, parquet writes & Streamlit UI reads
+- Safe cumulative delta volume calculation with spike guard
+- Expiry date-only comparisons (expiry day / roll safe)
+- TOTP auto-reconnect abort guard to prevent Kotak account lockout
+- Pro Dark Trading Terminal UI Layout
+- Research core & Triple Barrier label engine frozen
 """
 
 from __future__ import annotations
 
 import os
-import json
 import time
 import hmac
 import hashlib
@@ -19,7 +22,7 @@ import threading
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, Tuple
 
 import numpy as np
 import pandas as pd
@@ -38,7 +41,7 @@ except ImportError:
 
 
 # =========================================================
-# PURE PYTHON TOTP & INPUT NORMALIZATION
+# TOTP + MOBILE UTILITIES
 # =========================================================
 
 def generate_live_totp(secret_or_otp: str) -> str:
@@ -60,55 +63,39 @@ def generate_live_totp(secret_or_otp: str) -> str:
 
 
 def normalize_kotak_mobile(value: str) -> str:
-    """
-    Normalize Indian registered mobile number for Kotak Neo TOTP login.
-
-    Accepted examples:
-        9876543210
-        919876543210
-        +919876543210
-        00919876543210
-        +91 98765-43210
-
-    Output:
-        +919876543210
-    """
     raw = str(value or "").strip()
-
     if not raw:
-        raise ValueError(
-            "KOTAK_MOBILE is empty. Enter your registered Kotak mobile number."
-        )
-
+        raise ValueError("KOTAK_MOBILE is empty.")
     digits = "".join(ch for ch in raw if ch.isdigit())
-
     if digits.startswith("00"):
         digits = digits[2:]
-
     if digits.startswith("91") and len(digits) == 12:
         national = digits[2:]
     elif len(digits) == 10:
         national = digits
     else:
-        raise ValueError(
-            "Invalid KOTAK_MOBILE format. Use your registered 10-digit "
-            "Indian mobile number, e.g. 9876543210. The app will convert it to +91 format."
-        )
-
+        raise ValueError("Invalid KOTAK_MOBILE. Use 10-digit Indian mobile number.")
     if len(national) != 10 or national[0] not in "6789":
-        raise ValueError(
-            "KOTAK_MOBILE is not a valid Indian mobile number."
-        )
-
+        raise ValueError("KOTAK_MOBILE is not a valid Indian mobile number.")
     return "+91" + national
 
 
+def is_base32_totp_secret(value: str) -> bool:
+    """True only if usable as recurring TOTP secret (not one-shot 6-digit OTP)."""
+    raw = (value or "").strip().replace(" ", "")
+    if not raw:
+        return False
+    if raw.isdigit() and len(raw) == 6:
+        return False
+    return True
+
+
 # =========================================================
-# CONFIGURATION - RESEARCH LOCK FROZEN
+# CONFIGURATION — RESEARCH LOCK FROZEN
 # =========================================================
 
 CONFIG = {
-    "app_version": "v2.0_kotak_neo",
+    "app_version": "v2.4_hardened_pro_ui",
     "feature_version": "v2.0_research_lock",
     "label_version": "TB_v1.6_lock",
     "schema_version": "2.0",
@@ -135,19 +122,31 @@ CONFIG = {
     "nifty_future_token": os.getenv("NIFTY_FUT_TOKEN", "").strip(),
     "pcr_strike_count": int(os.getenv("PCR_STRIKE_COUNT", "5")),
     "pcr_strike_step": float(os.getenv("PCR_STRIKE_STEP", "50")),
+    "min_data_quality_to_trade": 0.45,
+    "signal_min_hold_bars": 2,
+    "ui_refresh_sec": 2,
+    "bar_close_grace_sec": 2,
+    "session_end_flush": True,
+    "hw_max_quote_age_sec": 240,
+    "hw_min_symbols_required": 5,
+    "feed_silence_sec": 45,
+    "dq_weights": {
+        "missing_future": 0.25,
+        "missing_spot": 0.20,
+        "bad_ohlc": 0.15,
+        "missing_oi": 0.10,
+        "zero_oi": 0.05,
+        "missing_volume": 0.08,
+        "zero_volume": 0.05,
+        "missing_option_chain": 0.08,
+        "missing_heavyweight": 0.04,
+    },
 }
 
 HEAVYWEIGHTS = {
-    "HDFCBANK": 0.115,
-    "RELIANCE": 0.098,
-    "ICICIBANK": 0.080,
-    "INFY": 0.058,
-    "ITC": 0.042,
-    "TCS": 0.040,
-    "LT": 0.038,
-    "AXISBANK": 0.033,
-    "KOTAKBANK": 0.029,
-    "SBIN": 0.028,
+    "HDFCBANK": 0.115, "RELIANCE": 0.098, "ICICIBANK": 0.080,
+    "INFY": 0.058, "ITC": 0.042, "TCS": 0.040, "LT": 0.038,
+    "AXISBANK": 0.033, "KOTAKBANK": 0.029, "SBIN": 0.028,
 }
 
 
@@ -197,6 +196,34 @@ def floor_bar_timestamp(ts: datetime, minutes=3):
     return anchor + timedelta(minutes=(elapsed // minutes) * minutes)
 
 
+def parse_tick_timestamp(tick: Dict[str, Any]) -> datetime:
+    for key in ("ft", "exch_tm", "timestamp", "ltt", "t", "time", "ts"):
+        val = tick.get(key)
+        if val is None:
+            continue
+        try:
+            if isinstance(val, datetime):
+                return val
+            x = float(val)
+            if x > 1e12:
+                return datetime.fromtimestamp(x / 1000.0)
+            if x > 1e9:
+                return datetime.fromtimestamp(x)
+        except Exception:
+            pass
+        text = str(val).strip()
+        for fmt in ("%Y-%m-%d %H:%M:%S", "%d-%m-%Y %H:%M:%S", "%H:%M:%S"):
+            try:
+                dt = datetime.strptime(text, fmt)
+                if dt.year < 2000:
+                    now = datetime.now()
+                    dt = dt.replace(year=now.year, month=now.month, day=now.day)
+                return dt
+            except Exception:
+                pass
+    return datetime.now()
+
+
 def wilder_atr(trs: List[float], period=14):
     if len(trs) < period:
         return np.nan
@@ -222,10 +249,8 @@ def parse_expiry(value):
     text = str(value).strip()
     if not text:
         return None
-    for fmt in [
-        "%d%b%Y", "%d%b%y", "%Y-%m-%d", "%d-%m-%Y", "%d/%m/%Y",
-        "%d%b%Y %H:%M:%S", "%Y-%m-%d %H:%M:%S", "%Y%m%d"
-    ]:
+    for fmt in ["%d%b%Y", "%d%b%y", "%Y-%m-%d", "%d-%m-%Y", "%d/%m/%Y",
+                "%d%b%Y %H:%M:%S", "%Y-%m-%d %H:%M:%S", "%Y%m%d"]:
         try:
             return datetime.strptime(text.upper(), fmt)
         except Exception:
@@ -234,10 +259,8 @@ def parse_expiry(value):
 
 
 def expiry_from_record(record):
-    for key in [
-        "pExpiryDate", "lExpiryDate", "pMaturityDate", "pLastTradingDate",
-        "expiryDate", "expiry", "expiry_date"
-    ]:
+    for key in ["pExpiryDate", "lExpiryDate", "pMaturityDate", "pLastTradingDate",
+                "expiryDate", "expiry", "expiry_date"]:
         dt = parse_expiry(record.get(key))
         if dt is not None:
             return dt
@@ -245,12 +268,7 @@ def expiry_from_record(record):
 
 
 def option_type_from_record(record):
-    val = str(
-        record.get("pOptionType")
-        or record.get("optType")
-        or record.get("option_type")
-        or ""
-    ).upper().strip()
+    val = str(record.get("pOptionType") or record.get("optType") or record.get("option_type") or "").upper().strip()
     if "CE" in val or "CALL" in val:
         return "CE"
     if "PE" in val or "PUT" in val:
@@ -264,10 +282,7 @@ def option_type_from_record(record):
 
 
 def strike_from_record(record):
-    for key in [
-        "dStrikePrice", "dStrikePrice;", "strike_price", "strikePrice",
-        "dStrike", "strike", "pStrikePrice"
-    ]:
+    for key in ["dStrikePrice", "dStrikePrice;", "strike_price", "strikePrice", "dStrike", "strike", "pStrikePrice"]:
         value = safe_float(record.get(key))
         if is_valid_number(value) and value > 0:
             if value > 1_000_000:
@@ -277,10 +292,7 @@ def strike_from_record(record):
 
 
 def token_from_record(record):
-    for key in [
-        "pSymbol", "pSymbolToken", "instrument_token", "instrumentToken",
-        "tok", "token", "pToken"
-    ]:
+    for key in ["pSymbol", "pSymbolToken", "instrument_token", "instrumentToken", "tok", "token", "pToken"]:
         value = record.get(key)
         if value is not None and str(value).strip():
             return str(value).strip()
@@ -304,7 +316,7 @@ def record_list(response):
 
 
 # =========================================================
-# CANDLE STRUCTURE
+# CANDLE STRUCTURE & RESEARCH ENGINES
 # =========================================================
 
 @dataclass
@@ -323,10 +335,6 @@ class Candle3Min:
     heavy: Dict[str, Dict[str, float]] = field(default_factory=dict)
     option_chain: Dict[str, Any] = field(default_factory=dict)
 
-
-# =========================================================
-# OPENING RANGE
-# =========================================================
 
 class OpeningRangeEngine:
     def __init__(self, minutes=15):
@@ -348,15 +356,11 @@ class OpeningRangeEngine:
             self.or_set = True
 
     def features(self, candle: Candle3Min, atr: float):
-        names = [
-            "or_high", "or_low", "or_width_atr",
-            "dist_to_or_high_atr", "dist_to_or_low_atr", "or_breakout_state"
-        ]
+        names = ["or_high", "or_low", "or_width_atr", "dist_to_or_high_atr", "dist_to_or_low_atr", "or_breakout_state"]
         if not self.or_set or self.or_high is None or not is_valid_number(atr) or atr <= 0:
             return {k: np.nan for k in names}
         return {
-            "or_high": self.or_high,
-            "or_low": self.or_low,
+            "or_high": self.or_high, "or_low": self.or_low,
             "or_width_atr": (self.or_high - self.or_low) / atr,
             "dist_to_or_high_atr": (candle.fut_c - self.or_high) / atr,
             "dist_to_or_low_atr": (candle.fut_c - self.or_low) / atr,
@@ -364,55 +368,40 @@ class OpeningRangeEngine:
         }
 
 
-# =========================================================
-# SESSION CONTEXT
-# =========================================================
-
 class SessionContextEngine:
     def __init__(self):
-        self.prev_close = None
-        self.prev_high = None
-        self.prev_low = None
-        self.today_open = None
+        self.prev_close = self.prev_high = self.prev_low = self.today_open = None
 
-    def set_previous_day(self, close: float, high: float, low: float):
+    def set_previous_day(self, close, high, low):
         self.prev_close, self.prev_high, self.prev_low = close, high, low
 
-    def set_today_open(self, open_price: float):
+    def set_today_open(self, open_price):
         self.today_open = open_price
 
     def reset(self):
         self.today_open = None
 
-    def features(self, candle: Candle3Min, atr: float):
+    def features(self, candle, atr):
         names = ["gap_points", "gap_atr", "gap_direction", "dist_to_pdh_atr", "dist_to_pdl_atr"]
         if self.prev_close is None or not is_valid_number(atr) or atr <= 0:
             return {k: np.nan for k in names}
         gap = (self.today_open if self.today_open is not None else candle.fut_o) - self.prev_close
         return {
-            "gap_points": gap,
-            "gap_atr": gap / atr,
+            "gap_points": gap, "gap_atr": gap / atr,
             "gap_direction": 1 if gap > 0 else (-1 if gap < 0 else 0),
             "dist_to_pdh_atr": (candle.fut_c - self.prev_high) / atr if self.prev_high is not None else np.nan,
             "dist_to_pdl_atr": (candle.fut_c - self.prev_low) / atr if self.prev_low is not None else np.nan,
         }
 
 
-# =========================================================
-# OPTION CHAIN
-# =========================================================
-
 class OptionChainEngine:
     def compute(self, chain: Dict[str, Any]):
-        keys = [
-            "pcr_oi", "pcr_volume", "ce_oi_change", "pe_oi_change",
-            "atm_iv", "iv_change", "ce_oi_atm", "pe_oi_atm", "atm_strike"
-        ]
+        keys = ["pcr_oi", "pcr_volume", "ce_oi_change", "pe_oi_change",
+                "atm_iv", "iv_change", "ce_oi_atm", "pe_oi_atm", "atm_strike"]
         if not chain:
-            out = {}
-            for key in keys:
-                out[key] = np.nan
-                out[f"{key}_missing"] = 1
+            out = {k: np.nan for k in keys}
+            for k in keys:
+                out[f"{k}_missing"] = 1
             out["ce_contracts_seen"] = out["pe_contracts_seen"] = 0
             return out
         out = {}
@@ -425,23 +414,15 @@ class OptionChainEngine:
         return out
 
 
-# =========================================================
-# HEAVYWEIGHTS
-# =========================================================
-
 class HeavyweightEngine:
-    def __init__(self, weights: Dict[str, float]):
+    def __init__(self, weights):
         self.base_weights = weights
         self.day_open: Dict[str, float] = {}
-
-    def set_day_open(self, symbol: str, price: float):
-        if is_valid_number(price) and price > 0:
-            self.day_open[symbol] = price
 
     def reset_day(self):
         self.day_open.clear()
 
-    def compute(self, candle: Candle3Min):
+    def compute(self, candle):
         contributions, returns = [], []
         bullish = 0
         for symbol, weight in self.base_weights.items():
@@ -474,14 +455,9 @@ class HeavyweightEngine:
         }
 
 
-# =========================================================
-# FEATURE ENGINE - RESEARCH LOCK
-# =========================================================
-
 class FeatureEngine:
     def __init__(self):
-        self.vwap_pv = 0.0
-        self.vwap_vol = 0.0
+        self.vwap_pv = self.vwap_vol = 0.0
         self.tr_history: List[float] = []
         self.history: List[Dict[str, Any]] = []
         self.hw = HeavyweightEngine(HEAVYWEIGHTS)
@@ -497,10 +473,10 @@ class FeatureEngine:
         self.or_eng.reset()
         self.sess.reset()
 
-    def set_previous_day(self, close: float, high: float, low: float):
+    def set_previous_day(self, close, high, low):
         self.sess.set_previous_day(close, high, low)
 
-    def set_today_open(self, open_price: float):
+    def set_today_open(self, open_price):
         self.sess.set_today_open(open_price)
 
     def compute(self, candle: Candle3Min, prev: List[Candle3Min]):
@@ -535,13 +511,11 @@ class FeatureEngine:
         last = self.history[-1] if self.history else {}
         stretch_slope = (
             normalized_stretch - last["normalized_stretch"]
-            if is_valid_number(normalized_stretch) and is_valid_number(last.get("normalized_stretch"))
-            else 0.0
+            if is_valid_number(normalized_stretch) and is_valid_number(last.get("normalized_stretch")) else 0.0
         )
         spread_slope = (
             normalized_spread - last["normalized_spread"]
-            if is_valid_number(normalized_spread) and is_valid_number(last.get("normalized_spread"))
-            else 0.0
+            if is_valid_number(normalized_spread) and is_valid_number(last.get("normalized_spread")) else 0.0
         )
 
         if prev:
@@ -570,10 +544,19 @@ class FeatureEngine:
         bad_ohlc = int(candle.fut_h < candle.fut_l or candle.spot_h < candle.spot_l)
         zero_volume = int(candle.fut_volume == 0)
         zero_oi = int(candle.fut_oi == 0)
-        penalties = sum([
-            missing_spot, missing_future, missing_oi, missing_volume,
-            missing_heavyweight, missing_option, bad_ohlc, zero_volume, zero_oi
-        ])
+
+        w = CONFIG["dq_weights"]
+        penalty = (
+            w["missing_spot"] * missing_spot +
+            w["missing_future"] * missing_future +
+            w["missing_oi"] * missing_oi +
+            w["missing_volume"] * missing_volume +
+            w["missing_heavyweight"] * missing_heavyweight +
+            w["missing_option_chain"] * missing_option +
+            w["bad_ohlc"] * bad_ohlc +
+            w["zero_volume"] * zero_volume +
+            w["zero_oi"] * zero_oi
+        )
 
         pcr_features = self.opt.compute(candle.option_chain)
         features = {
@@ -607,25 +590,16 @@ class FeatureEngine:
             **self.or_eng.features(candle, atr if is_valid_number(atr) else 0.0),
             **self.sess.features(candle, atr if is_valid_number(atr) else 0.0),
             **pcr_features,
-            "missing_spot": missing_spot,
-            "missing_future": missing_future,
-            "missing_oi": missing_oi,
-            "missing_volume": missing_volume,
-            "missing_heavyweight": missing_heavyweight,
-            "missing_option_chain": missing_option,
-            "bad_ohlc": bad_ohlc,
-            "zero_volume": zero_volume,
-            "zero_oi": zero_oi,
-            "data_quality_score": max(0.0, 1.0 - 0.1 * penalties),
+            "missing_spot": missing_spot, "missing_future": missing_future,
+            "missing_oi": missing_oi, "missing_volume": missing_volume,
+            "missing_heavyweight": missing_heavyweight, "missing_option_chain": missing_option,
+            "bad_ohlc": bad_ohlc, "zero_volume": zero_volume, "zero_oi": zero_oi,
+            "data_quality_score": float(max(0.0, 1.0 - penalty)),
             "bar_complete": 1,
         }
         self.history.append(features)
         return features
 
-
-# =========================================================
-# LABEL ENGINE - TRIPLE BARRIER LOCKED
-# =========================================================
 
 class LabelEngine:
     def __init__(self):
@@ -653,14 +627,11 @@ class LabelEngine:
                  signal_timestamp=None, entry_timestamp=None):
         if entry_timestamp and future_after_entry and future_after_entry[0].timestamp <= entry_timestamp:
             raise ValueError("FUTURE ALIGNMENT VIOLATION")
-
         atr = atr if is_valid_number(atr) and atr > 0 else np.nan
         upper = entry_price + direction * self.upper * atr if not np.isnan(atr) else np.nan
         lower = entry_price - direction * self.lower * atr if not np.isnan(atr) else np.nan
-
         outcome, bars, mfe_tb, mae_tb, time_to_mfe = "TIMEOUT", 0, 0.0, 0.0, 0
         max_tb_bars = self.tb_horizon // CONFIG["bar_minutes"]
-
         for i, candle in enumerate(future_after_entry[:max_tb_bars]):
             bars = i + 1
             if direction == 1:
@@ -673,7 +644,6 @@ class LabelEngine:
                 mae_tb = max(mae_tb, candle.fut_h - entry_price)
                 hit_target = not np.isnan(upper) and candle.fut_l <= upper
                 hit_stop = not np.isnan(lower) and candle.fut_h >= lower
-
             if mfe_tb > 0 and time_to_mfe == 0:
                 time_to_mfe = bars
             if hit_target and hit_stop:
@@ -685,13 +655,11 @@ class LabelEngine:
             if hit_stop:
                 outcome = "STOP_FIRST"
                 break
-
         r_multiple = self.upper / self.lower if outcome == "TARGET_FIRST" else (-1.0 if outcome == "STOP_FIRST" else np.nan)
         valid = int(outcome != "AMBIGUOUS" and not np.isnan(atr))
         mfe_atr = mfe_tb / atr if not np.isnan(atr) else np.nan
         mae_atr = mae_tb / atr if not np.isnan(atr) else np.nan
         velocity = mfe_atr / max(bars, 1) if is_valid_number(mfe_atr) else np.nan
-
         if is_valid_number(mfe_atr):
             if mfe_atr >= 1.2 and mae_atr <= 0.45 and velocity > 0.25:
                 trajectory = "IMPULSE"
@@ -703,23 +671,14 @@ class LabelEngine:
                 trajectory = "FAILURE"
         else:
             trajectory = "UNKNOWN"
-
         labels = {
-            "label_version": CONFIG["label_version"],
-            "execution_model": self.execution_model,
-            "signal_timestamp": signal_timestamp,
-            "entry_timestamp": entry_timestamp,
-            "entry_price": entry_price,
-            "triple_barrier_outcome": outcome,
-            "label_valid_for_training": valid,
-            "r_multiple": r_multiple,
-            "trajectory": trajectory,
+            "label_version": CONFIG["label_version"], "execution_model": self.execution_model,
+            "signal_timestamp": signal_timestamp, "entry_timestamp": entry_timestamp,
+            "entry_price": entry_price, "triple_barrier_outcome": outcome,
+            "label_valid_for_training": valid, "r_multiple": r_multiple, "trajectory": trajectory,
             "real_breakout": int(outcome == "TARGET_FIRST" and is_valid_number(mfe_atr) and mfe_atr >= 1.0 and mae_atr <= 0.55),
-            "mfe_atr_tb": mfe_atr,
-            "mae_atr_tb": mae_atr,
-            "time_to_mfe": time_to_mfe,
-            "bars_to_outcome": bars,
-            "velocity": velocity,
+            "mfe_atr_tb": mfe_atr, "mae_atr_tb": mae_atr, "time_to_mfe": time_to_mfe,
+            "bars_to_outcome": bars, "velocity": velocity,
         }
         for horizon in self.mfe_horizons:
             mfe_h, mae_h, complete = self._excursion(entry_price, future_after_entry, direction, horizon // CONFIG["bar_minutes"])
@@ -728,10 +687,6 @@ class LabelEngine:
             labels[f"horizon_{horizon}m_complete"] = complete
         return labels
 
-
-# =========================================================
-# DATASET
-# =========================================================
 
 class DatasetManager:
     def __init__(self, path=None):
@@ -746,37 +701,142 @@ class DatasetManager:
             data["date"] = pd.to_datetime(data["timestamp"]).dt.date.astype(str)
         table = pa.Table.from_pandas(data, preserve_index=False)
         pq.write_to_dataset(
-            table,
-            root_path=str(self.base / name),
+            table, root_path=str(self.base / name),
             partition_cols=["date"] if "date" in data.columns else None,
             existing_data_behavior="overwrite_or_ignore",
         )
 
-    def purged_walk_forward_by_date(self, df: pd.DataFrame, n_splits=5):
-        if "timestamp" not in df.columns:
-            raise ValueError("timestamp required")
-        data = df.copy()
-        data["date"] = pd.to_datetime(data["timestamp"]).dt.date
-        dates = sorted(data["date"].unique())
-        fold = max(1, len(dates) // (n_splits + 1))
-        splits = []
-        for i in range(n_splits):
-            train_end = (i + 1) * fold
-            test_start = train_end + 1
-            test_end = min(test_start + fold, len(dates))
-            if test_start >= len(dates):
-                break
-            train_idx = data[data["date"].isin(dates[:train_end])].index.tolist()
-            test_idx = data[data["date"].isin(dates[test_start:test_end])].index.tolist()
-            if len(train_idx) > CONFIG["embargo_bars"]:
-                train_idx = train_idx[:-CONFIG["embargo_bars"]]
-            if train_idx and test_idx:
-                splits.append((train_idx, test_idx))
-        return splits
+
+# =========================================================
+# REGIME & DECISION ENGINE
+# =========================================================
+
+class RegimeEngine:
+    def detect(self, feats: Dict[str, Any]) -> str:
+        dq = safe_float(feats.get("data_quality_score"), 0.0)
+        if dq < CONFIG["min_data_quality_to_trade"]:
+            return "DATA_BAD"
+        stretch = safe_float(feats.get("normalized_stretch"), 0.0)
+        slope = safe_float(feats.get("stretch_slope_3"), 0.0)
+        or_state = int(feats.get("or_breakout_state") or 0)
+        oi_long = int(feats.get("oi_long_buildup") or 0)
+        oi_short = int(feats.get("oi_short_buildup") or 0)
+        oi_unwind = int(feats.get("oi_long_unwinding") or 0) or int(feats.get("oi_short_covering") or 0)
+        twc = safe_float(feats.get("twc"), 0.0)
+        breadth = safe_float(feats.get("breadth_10"), 0.5)
+
+        if (abs(stretch) > 0.9 and abs(slope) > 0.15) or (or_state != 0 and abs(stretch) > 0.5):
+            if stretch > 0 and (oi_long or twc > 0 or breadth > 0.55):
+                return "IMPULSE_UP"
+            if stretch < 0 and (oi_short or twc < 0 or breadth < 0.45):
+                return "IMPULSE_DOWN"
+        if 0.35 < abs(stretch) <= 0.9:
+            return "STAIRCASE_UP" if stretch > 0 else "STAIRCASE_DOWN"
+        if oi_unwind and abs(stretch) > 0.6:
+            return "FAILURE"
+        if abs(stretch) <= 0.35 and abs(slope) < 0.08:
+            return "GRIND"
+        return "NEUTRAL"
+
+
+@dataclass
+class TradeDecision:
+    action: str
+    regime: str
+    target_points: float
+    stop_points: float
+    size_factor: float
+    confidence: float
+    reason: str
+    timestamp: Optional[datetime] = None
+
+
+class DecisionEngine:
+    def __init__(self):
+        self.regime_engine = RegimeEngine()
+        self.last_action: Optional[str] = None
+        self.last_action_bar_idx: int = -999
+        self.bar_counter: int = 0
+
+    def _realistic_target(self, atr: float, regime: str) -> Tuple[float, float, float]:
+        if not is_valid_number(atr) or atr <= 0:
+            atr = 15.0
+        if regime in ("IMPULSE_UP", "IMPULSE_DOWN"):
+            return 1.1 * atr, 0.7 * atr, 1.0
+        if regime in ("STAIRCASE_UP", "STAIRCASE_DOWN"):
+            return 0.85 * atr, 0.65 * atr, 0.85
+        if regime == "FAILURE":
+            return 0.55 * atr, 0.45 * atr, 0.6
+        if regime == "GRIND":
+            return 0.45 * atr, 0.40 * atr, 0.45
+        return 0.60 * atr, 0.50 * atr, 0.55
+
+    def decide(self, feats: Dict[str, Any]) -> TradeDecision:
+        self.bar_counter += 1
+        regime = self.regime_engine.detect(feats)
+        atr = safe_float(feats.get("atr_14_prev") or feats.get("atr_14_close"), 15.0)
+        stretch = safe_float(feats.get("normalized_stretch"), 0.0)
+        slope = safe_float(feats.get("stretch_slope_3"), 0.0)
+        or_state = int(feats.get("or_breakout_state") or 0)
+        dq = safe_float(feats.get("data_quality_score"), 0.0)
+
+        if regime == "DATA_BAD" or dq < CONFIG["min_data_quality_to_trade"]:
+            return TradeDecision("SKIP", regime, 0.0, 0.0, 0.0, 0.0,
+                                 "Data quality too low / feed unreliable", feats.get("timestamp"))
+
+        twc = safe_float(feats.get("twc"), 0.0)
+        twc_term = float(np.clip(twc * 50.0, -0.8, 0.8))
+        breadth_term = (safe_float(feats.get("breadth_10"), 0.5) - 0.5) * 1.5
+        score = (np.clip(stretch, -2, 2) * 1.2 +
+                 np.clip(slope, -1, 1) * 0.8 +
+                 or_state * 0.5 +
+                 twc_term + breadth_term)
+
+        raw_action = "CE" if score >= 0 else "PE"
+        hold = CONFIG["signal_min_hold_bars"]
+        conf_penalty = 0.0
+        if self.last_action and self.last_action != "SKIP":
+            bars_since = self.bar_counter - self.last_action_bar_idx
+            if bars_since < hold and raw_action != self.last_action:
+                action = self.last_action
+                conf_penalty = 0.15
+                reason = f"Stability hold ({bars_since}/{hold}) — kept {action}"
+            else:
+                action = raw_action
+                reason = f"Regime={regime}, score={score:.2f} [heuristic]"
+        else:
+            action = raw_action
+            reason = f"Regime={regime}, score={score:.2f} [heuristic]"
+
+        target, stop, size = self._realistic_target(atr, regime)
+        conf = 0.50 + min(0.30, abs(score) * 0.12) - conf_penalty
+        if regime.startswith("IMPULSE"):
+            conf += 0.10
+        if regime == "GRIND":
+            conf -= 0.08
+        conf = float(np.clip(conf, 0.30, 0.88))
+
+        hw_seen = int(feats.get("hw_symbols_seen") or 0)
+        min_hw = CONFIG.get("hw_min_symbols_required", 5)
+        if hw_seen >= 8:
+            pass
+        elif hw_seen >= min_hw:
+            size *= 0.85
+            conf = max(0.30, conf - 0.05)
+            reason += f" | HW soft ({hw_seen})"
+        else:
+            size *= 0.60
+            conf = max(0.30, conf - 0.12)
+            reason += f" | HW weak ({hw_seen})"
+
+        self.last_action = action
+        self.last_action_bar_idx = self.bar_counter
+        return TradeDecision(action, regime, round(target, 1), round(stop, 1),
+                             round(size, 2), round(conf, 3), reason, feats.get("timestamp"))
 
 
 # =========================================================
-# KOTAK NEO ADAPTER - OFFICIAL SDK V2 + REAL-TIME STREAMING
+# KOTAK NEO ADAPTER — PRODUCTION HARDENED
 # =========================================================
 
 class KotakNeoAdapter:
@@ -789,7 +849,8 @@ class KotakNeoAdapter:
 
         self.client = None
         self.connected = False
-        self.lock = threading.Lock()
+        self.conn_state = "DISCONNECTED"
+        self.lock = threading.RLock()
         self.latest: Dict[str, Dict[str, Any]] = {}
         self.tick_buffer: List[Dict[str, Any]] = []
 
@@ -797,22 +858,32 @@ class KotakNeoAdapter:
         self.future_token = CONFIG.get("nifty_future_token", "")
         self.future_symbol = ""
         self.future_expiry = None
-
         self.pcr_tokens: List[str] = []
         self.pcr_records: Dict[str, Dict[str, Any]] = {}
         self.heavy_tokens: Dict[str, str] = {}
         self.token_to_symbol: Dict[str, str] = {}
-
         self.discovery_log: List[str] = []
         self.last_error = ""
 
-        # Micro Engine Aggregator Components
         self.feature_engine = FeatureEngine()
         self.label_engine = LabelEngine()
         self.dataset_manager = DatasetManager()
+        self.decision_engine = DecisionEngine()
         self.candles_3m: List[Candle3Min] = []
         self.current_bar_ticks: List[Dict[str, Any]] = []
         self.current_bar_time: Optional[datetime] = None
+        self._bar_deadline: Optional[datetime] = None
+        self.last_decision: Optional[TradeDecision] = None
+        self._prev_ce_oi = 0.0
+        self._prev_pe_oi = 0.0
+        self._last_tick_wall = time.time()
+
+        self._watchdog_stop = threading.Event()
+        self._watchdog_thread: Optional[threading.Thread] = None
+        self._reconnect_attempts = 0
+        self._next_reconnect_ts = 0.0
+        self._max_reconnect_attempts = 5
+        self._backoff_sec = [5, 10, 20, 40, 60]
 
     def on_message(self, message):
         try:
@@ -823,6 +894,7 @@ class KotakNeoAdapter:
                         continue
                     token = str(item.get("tk") or item.get("token") or item.get("pSymbolToken") or "").strip()
                     if token:
+                        item["_parsed_ts"] = parse_tick_timestamp(item)
                         self.latest[token] = item
                         self.tick_buffer.append(item)
                         self._process_live_tick(token, item)
@@ -831,88 +903,108 @@ class KotakNeoAdapter:
 
     def on_error(self, error):
         self.last_error = str(error)
+        self.connected = False
+        self.conn_state = "DISCONNECTED"
 
     def on_close(self, message=None):
         self.connected = False
+        self.conn_state = "DISCONNECTED"
+        self.last_error = f"WebSocket closed: {message}"
 
     def on_open(self, message=None):
         self.connected = True
 
     def login(self, live_totp_override=""):
         if NeoAPI is None:
-            raise RuntimeError(
-                "neo_api_client missing. Install official Kotak Neo API v2 dependency."
-            )
-
+            raise RuntimeError("neo_api_client missing. Install official Kotak Neo API v2 package.")
         totp = (live_totp_override or "").strip() or self.totp
-        required = {
-            "KOTAK_CONSUMER_KEY": self.consumer_key,
-            "KOTAK_MOBILE": self.mobile,
-            "KOTAK_UCC": self.ucc,
-            "TOTP": totp,
-            "KOTAK_MPIN": self.mpin,
-        }
+        required = {"KOTAK_CONSUMER_KEY": self.consumer_key, "KOTAK_MOBILE": self.mobile,
+                    "KOTAK_UCC": self.ucc, "TOTP": totp, "KOTAK_MPIN": self.mpin}
         missing = [k for k, v in required.items() if not v]
         if missing:
             raise RuntimeError("Missing credentials: " + ", ".join(missing))
-
-        self.client = NeoAPI(
-            environment=CONFIG["neo_environment"],
-            access_token=None,
-            neo_fin_key=None,
-            consumer_key=self.consumer_key,
-        )
+        self.client = NeoAPI(environment=CONFIG["neo_environment"], access_token=None,
+                             neo_fin_key=None, consumer_key=self.consumer_key)
         self.client.on_message = self.on_message
         self.client.on_error = self.on_error
         self.client.on_close = self.on_close
         self.client.on_open = self.on_open
-
-        step1 = self.client.totp_login(
-            mobile_number=self.mobile,
-            ucc=self.ucc,
-            totp=generate_live_totp(totp),
-        )
+        step1 = self.client.totp_login(mobile_number=self.mobile, ucc=self.ucc, totp=generate_live_totp(totp))
         if isinstance(step1, dict) and step1.get("error"):
             raise RuntimeError(str(step1))
-
         step2 = self.client.totp_validate(mpin=self.mpin)
         if isinstance(step2, dict) and step2.get("error"):
             raise RuntimeError(str(step2))
-
         self.connected = True
+        self.conn_state = "AUTHENTICATED"
         return True
 
-    def discover_nifty_instruments(self) -> bool:
+    def _can_auto_reconnect(self) -> bool:
+        return is_base32_totp_secret(self.totp)
+
+    def _reset_bar_state(self, reason: str = "reconnect"):
+        with self.lock:
+            self.current_bar_ticks.clear()
+            self.current_bar_time = None
+            self._bar_deadline = None
+        self.last_error = f"Bar state cleared ({reason})"
+
+    def try_reconnect_and_resubscribe(self, live_totp_override: str = "") -> bool:
+        self.conn_state = "RECONNECTING"
+        self._reset_bar_state("reconnect")
+        try:
+            self.login(live_totp_override=live_totp_override)
+            ok = self.discover_nifty_instruments(auto_pcr=True)
+            if not ok or not self.future_token:
+                raise RuntimeError("Rediscovery failed: no active future")
+            n = self.subscribe_live_feed()
+            if n <= 0:
+                raise RuntimeError("Subscribe returned 0 instruments")
+            self.fetch_market_snapshot()
+            time.sleep(1.0)
+            with self.lock:
+                has_fut = bool(self.latest.get(self.future_token))
+                has_spot = bool(self.latest.get(self.spot_token))
+            if not (has_fut and has_spot):
+                raise RuntimeError("Feed validate failed: both Spot + Future required")
+            self.conn_state = "SUBSCRIBED"
+            self.connected = True
+            self._reconnect_attempts = 0
+            self._next_reconnect_ts = 0.0
+            self.last_error = ""
+            return True
+        except Exception as exc:
+            self.last_error = f"Reconnect failed: {exc}"
+            self.conn_state = "DISCONNECTED"
+            self.connected = False
+            return False
+
+    def discover_nifty_instruments(self, auto_pcr: bool = True) -> bool:
         if not self.connected or not self.client:
             raise RuntimeError("Kotak Neo not authenticated.")
-
         self.discovery_log.clear()
         try:
-            # 1. Discover Active Near-Month Nifty Future using 'nse_fo'
             res = self.client.search_scrip(exchange_segment="nse_fo", symbol="NIFTY")
             records = record_list(res)
             future_candidates = []
+            now_d = datetime.now().date()
             for r in records:
                 sym = str(r.get("pTrdSymbol", r.get("ts", r.get("symbol", "")))).upper()
                 inst_type = str(r.get("pInstType", r.get("instrument_type", ""))).upper()
                 if "NIFTY" in sym and ("FUT" in sym or "FUTIDX" in inst_type):
                     exp = expiry_from_record(r)
                     tok = token_from_record(r)
-                    if tok and exp and exp >= datetime.now():
+                    if tok and exp and exp.date() >= now_d:
                         future_candidates.append((exp, tok, sym))
-
             if future_candidates:
                 future_candidates.sort(key=lambda x: x[0])
                 self.future_expiry, self.future_token, self.future_symbol = future_candidates[0]
                 self.token_to_symbol[self.future_token] = "NIFTY_FUT"
-                self.discovery_log.append(
-                    f"✓ Discovered Active Nifty Future: {self.future_symbol} (Token: {self.future_token})"
-                )
+                self.discovery_log.append(f"✓ Future: {self.future_symbol} ({self.future_token})")
             else:
-                self.discovery_log.append("✗ No active Nifty Future found in nse_fo.")
+                self.discovery_log.append("✗ No active Nifty Future found.")
 
-            # 2. Discover 10 Heavyweights on NSE Cash
-            for sym in HEAVYWEIGHTS.keys():
+            for sym in HEAVYWEIGHTS:
                 hw_res = self.client.search_scrip(exchange_segment="nse_cm", symbol=sym)
                 for item in record_list(hw_res):
                     tsym = str(item.get("pTrdSymbol", item.get("ts", ""))).upper()
@@ -922,10 +1014,12 @@ class KotakNeoAdapter:
                             self.heavy_tokens[sym] = tok
                             self.token_to_symbol[tok] = sym
                             break
-
             self.token_to_symbol[self.spot_token] = "NIFTY_SPOT"
-            self.discovery_log.append(f"✓ Mapped {len(self.heavy_tokens)}/10 NIFTY Heavyweights on NSE Cash.")
+            self.discovery_log.append(f"✓ Heavyweights mapped: {len(self.heavy_tokens)}/10")
             self.fetch_market_snapshot()
+            if auto_pcr:
+                n = self.discover_pcr_chain()
+                self.discovery_log.append(f"✓ Auto PCR contracts: {n}")
             return True
         except Exception as exc:
             self.discovery_log.append(f"Discovery Error: {exc}")
@@ -934,63 +1028,50 @@ class KotakNeoAdapter:
     def discover_pcr_chain(self, center_strike: Optional[float] = None) -> int:
         if not self.connected or not self.client:
             raise RuntimeError("Kotak Neo not authenticated.")
-
         try:
             if not center_strike or not is_valid_number(center_strike):
-                spot_tick = self.latest.get(self.spot_token, {})
-                center_strike = safe_float(spot_tick.get("ltp") or spot_tick.get("lp") or spot_tick.get("c"), 24000.0)
-
+                with self.lock:
+                    spot_tick = self.latest.get(self.spot_token, {})
+                    center_strike = safe_float(spot_tick.get("ltp") or spot_tick.get("lp") or spot_tick.get("c"), 24000.0)
             step = CONFIG["pcr_strike_step"]
             atm = round(center_strike / step) * step
             count = CONFIG["pcr_strike_count"]
             target_strikes = [atm + (i * step) for i in range(-count, count + 1)]
-
-            # Sahi segment: nse_fo
             res = self.client.search_scrip(exchange_segment="nse_fo", symbol="NIFTY")
             records = record_list(res)
-
-            discovered_tokens = []
+            discovered = []
+            now_d = datetime.now().date()
             for r in records:
                 exp = expiry_from_record(r)
                 strike = strike_from_record(r)
                 op_type = option_type_from_record(r)
                 tok = token_from_record(r)
-
-                if tok and strike in target_strikes and op_type in ["CE", "PE"]:
-                    if not exp or exp >= datetime.now():
-                        discovered_tokens.append(tok)
+                if tok and strike in target_strikes and op_type in ("CE", "PE"):
+                    if not exp or exp.date() >= now_d:
+                        discovered.append(tok)
                         self.pcr_records[tok] = {
-                            "strike": strike,
-                            "option_type": op_type,
-                            "expiry": exp,
-                            "symbol": str(r.get("pTrdSymbol", ""))
+                            "strike": strike, "option_type": op_type,
+                            "expiry": exp, "symbol": str(r.get("pTrdSymbol", ""))
                         }
-
-            self.pcr_tokens = list(set(discovered_tokens))
-            self.discovery_log.append(f"✓ Mapped {len(self.pcr_tokens)} PCR Option Strikes around ATM {atm}.")
+            self.pcr_tokens = list(set(discovered))
+            self.discovery_log.append(f"✓ PCR strikes around ATM {atm}: {len(self.pcr_tokens)}")
             return len(self.pcr_tokens)
         except Exception as exc:
             self.discovery_log.append(f"PCR Discovery Error: {exc}")
             return 0
 
     def fetch_market_snapshot(self):
-        """Fetches latest prices via REST API when WebSocket has no live ticks."""
         if not self.connected or not self.client:
             return
-
-        tokens_to_fetch = [
-            {"instrument_token": self.spot_token, "exchange_segment": "nse_cm"}
-        ]
+        tokens = [{"instrument_token": self.spot_token, "exchange_segment": "nse_cm"}]
         if self.future_token:
-            tokens_to_fetch.append({"instrument_token": self.future_token, "exchange_segment": "nse_fo"})
-        for sym, tok in self.heavy_tokens.items():
-            tokens_to_fetch.append({"instrument_token": str(tok), "exchange_segment": "nse_cm"})
-
+            tokens.append({"instrument_token": self.future_token, "exchange_segment": "nse_fo"})
+        for tok in self.heavy_tokens.values():
+            tokens.append({"instrument_token": str(tok), "exchange_segment": "nse_cm"})
         try:
-            res = self.client.quotes(instrument_tokens=tokens_to_fetch, isIndex=False)
-            records = record_list(res)
+            res = self.client.quotes(instrument_tokens=tokens, isIndex=False)
             with self.lock:
-                for r in records:
+                for r in record_list(res):
                     tok = token_from_record(r)
                     if tok:
                         self.latest[tok] = r
@@ -1000,258 +1081,454 @@ class KotakNeoAdapter:
     def subscribe_live_feed(self) -> int:
         if not self.connected or not self.client:
             raise RuntimeError("Kotak Neo not authenticated.")
-
-        tokens_to_sub = []
-        # Spot Index
-        tokens_to_sub.append({"instrument_token": self.spot_token, "exchange_segment": "nse_cm"})
-
-        # Nifty Future
+        tokens = [{"instrument_token": self.spot_token, "exchange_segment": "nse_cm"}]
         if self.future_token:
-            tokens_to_sub.append({"instrument_token": self.future_token, "exchange_segment": "nse_fo"})
-
-        # Heavyweights
-        for sym, tok in self.heavy_tokens.items():
-            if tok:
-                tokens_to_sub.append({"instrument_token": str(tok), "exchange_segment": "nse_cm"})
-
-        # PCR Options
-        for pcr_tok in self.pcr_tokens:
-            tokens_to_sub.append({"instrument_token": str(pcr_tok), "exchange_segment": "nse_fo"})
-
-        if tokens_to_sub:
-            self.client.subscribe(instrument_tokens=tokens_to_sub)
+            tokens.append({"instrument_token": self.future_token, "exchange_segment": "nse_fo"})
+        for tok in self.heavy_tokens.values():
+            tokens.append({"instrument_token": str(tok), "exchange_segment": "nse_cm"})
+        for tok in self.pcr_tokens:
+            tokens.append({"instrument_token": str(tok), "exchange_segment": "nse_fo"})
+        if tokens:
+            self.client.subscribe(instrument_tokens=tokens)
             self.fetch_market_snapshot()
-            return len(tokens_to_sub)
+            self.conn_state = "SUBSCRIBED"
+            return len(tokens)
         return 0
 
     def _process_live_tick(self, token: str, tick: Dict[str, Any]):
-        now = datetime.now()
-        bar_start = floor_bar_timestamp(now, CONFIG["bar_minutes"])
+        ts = tick.get("_parsed_ts") or parse_tick_timestamp(tick)
+        self._last_tick_wall = time.time()
+        bar_start = floor_bar_timestamp(ts, CONFIG["bar_minutes"])
         if not bar_start:
             return
-
         if self.current_bar_time is None:
             self.current_bar_time = bar_start
-
+            self._bar_deadline = bar_start + timedelta(minutes=CONFIG["bar_minutes"])
         if bar_start > self.current_bar_time:
             self._close_bar(self.current_bar_time)
             self.current_bar_time = bar_start
+            self._bar_deadline = bar_start + timedelta(minutes=CONFIG["bar_minutes"])
             self.current_bar_ticks.clear()
-
         self.current_bar_ticks.append(tick)
 
+    def maybe_flush_bars(self):
+        """No ticks = no candle. Only close current bar if it had ticks."""
+        now = datetime.now()
+        with self.lock:
+            if self.current_bar_time and self._bar_deadline:
+                if now >= self._bar_deadline + timedelta(seconds=CONFIG["bar_close_grace_sec"]):
+                    if self.current_bar_ticks:
+                        self._close_bar(self.current_bar_time)
+                    self.current_bar_ticks.clear()
+                    self.current_bar_time = None
+                    self._bar_deadline = None
+            if CONFIG["session_end_flush"]:
+                end_h, end_m = map(int, CONFIG["session_end"].split(":"))
+                sess_end = now.replace(hour=end_h, minute=end_m, second=0, microsecond=0)
+                if now >= sess_end and self.current_bar_ticks:
+                    self._close_bar(self.current_bar_time or floor_bar_timestamp(now) or now)
+                    self.current_bar_ticks.clear()
+                    self.current_bar_time = None
+                    self._bar_deadline = None
+
     def _close_bar(self, bar_time: datetime):
-        if not self.current_bar_ticks:
+        with self.lock:
+            if not self.current_bar_ticks:
+                return
+
+            def _prices(token):
+                ticks = [t for t in self.current_bar_ticks if str(t.get("tk") or t.get("token")) == token]
+                vals = [safe_float(t.get("ltp") or t.get("lp") or t.get("c")) for t in ticks]
+                vals = [v for v in vals if is_valid_number(v)]
+                return ticks, vals
+
+            _, spot_prices = _prices(self.spot_token)
+            if not spot_prices:
+                last = safe_float(self.latest.get(self.spot_token, {}).get("ltp"), 0.0)
+                spot_o = spot_h = spot_l = spot_c = last
+            else:
+                spot_o, spot_h, spot_l, spot_c = spot_prices[0], max(spot_prices), min(spot_prices), spot_prices[-1]
+
+            fut_ticks, fut_prices = _prices(self.future_token)
+            if not fut_prices:
+                last = safe_float(self.latest.get(self.future_token, {}).get("ltp"), spot_c)
+                fut_o = fut_h = fut_l = fut_c = last
+                fut_vol = 0.0
+                fut_oi = safe_float(self.latest.get(self.future_token, {}).get("oi"), 0.0)
+            else:
+                fut_o, fut_h, fut_l, fut_c = fut_prices[0], max(fut_prices), min(fut_prices), fut_prices[-1]
+                
+                vols = []
+                for t in fut_ticks:
+                    v = safe_float(t.get("v") or t.get("vol") or t.get("volume"), np.nan)
+                    if is_valid_number(v):
+                        vols.append(v)
+
+                fut_vol = 0.0
+                if len(vols) >= 2:
+                    if vols[-1] >= vols[0] and vols[-1] < (vols[0] * 50.0 + 10.0):
+                        fut_vol = max(0.0, vols[-1] - vols[0])
+                    else:
+                        s = sum(vols)
+                        med = float(np.median(vols)) if vols else 0.0
+                        fut_vol = s if s < max(med * len(vols) * 5.0, 1.0) else med * len(vols)
+                elif len(vols) == 1:
+                    fut_vol = 0.0
+
+                fut_oi = safe_float(fut_ticks[-1].get("oi") or fut_ticks[-1].get("open_interest"), 0.0)
+
+            hw_snap = {}
+            bar_end = bar_time + timedelta(minutes=CONFIG["bar_minutes"])
+            for sym, tok in self.heavy_tokens.items():
+                t = self.latest.get(tok, {})
+                qts = t.get("_parsed_ts") or parse_tick_timestamp(t)
+                age = abs((bar_end - qts).total_seconds()) if isinstance(qts, datetime) else 9999
+                if age > CONFIG["hw_max_quote_age_sec"]:
+                    continue
+                c_val = safe_float(t.get("ltp") or t.get("lp") or t.get("c"))
+                o_val = safe_float(t.get("o") or t.get("open"), c_val)
+                hw_snap[sym] = {"o": o_val, "c": c_val, "vwap": safe_float(t.get("vwap"), c_val)}
+
+            total_ce_oi = total_pe_oi = total_ce_vol = total_pe_vol = 0.0
+            atm_ce_oi = atm_pe_oi = np.nan
+            spot_approx = spot_c if is_valid_number(spot_c) and spot_c > 0 else 24000.0
+            step = CONFIG["pcr_strike_step"]
+            atm = round(spot_approx / step) * step
+            for tok in self.pcr_tokens:
+                info = self.pcr_records.get(tok, {})
+                t = self.latest.get(tok, {})
+                oi_raw = t.get("oi")
+                if oi_raw is None or str(oi_raw).strip() == "":
+                    continue
+                oi = safe_float(oi_raw, np.nan)
+                if not is_valid_number(oi):
+                    continue
+                vol = safe_float(t.get("v") or t.get("vol"), 0.0)
+                strike = info.get("strike")
+                if info.get("option_type") == "CE":
+                    total_ce_oi += oi
+                    total_ce_vol += vol
+                    if strike == atm:
+                        atm_ce_oi = oi
+                elif info.get("option_type") == "PE":
+                    total_pe_oi += oi
+                    total_pe_vol += vol
+                    if strike == atm:
+                        atm_pe_oi = oi
+
+            ce_oi_change = total_ce_oi - self._prev_ce_oi if self._prev_ce_oi > 0 else np.nan
+            pe_oi_change = total_pe_oi - self._prev_pe_oi if self._prev_pe_oi > 0 else np.nan
+            self._prev_ce_oi = total_ce_oi
+            self._prev_pe_oi = total_pe_oi
+
+            pcr_chain = {
+                "pcr_oi": total_pe_oi / max(total_ce_oi, 1.0) if total_ce_oi > 0 else np.nan,
+                "pcr_volume": total_pe_vol / max(total_ce_vol, 1.0) if total_ce_vol > 0 else np.nan,
+                "ce_oi_change": ce_oi_change, "pe_oi_change": pe_oi_change,
+                "ce_oi_atm": atm_ce_oi, "pe_oi_atm": atm_pe_oi, "atm_strike": atm,
+                "atm_iv": np.nan, "iv_change": np.nan,
+                "ce_contracts_seen": sum(1 for t in self.pcr_tokens if self.pcr_records.get(t, {}).get("option_type") == "CE"),
+                "pe_contracts_seen": sum(1 for t in self.pcr_tokens if self.pcr_records.get(t, {}).get("option_type") == "PE"),
+            }
+
+            candle = Candle3Min(
+                timestamp=bar_time,
+                spot_o=spot_o, spot_h=spot_h, spot_l=spot_l, spot_c=spot_c,
+                fut_o=fut_o, fut_h=fut_h, fut_l=fut_l, fut_c=fut_c,
+                fut_volume=fut_vol, fut_oi=fut_oi,
+                heavy=hw_snap, option_chain=pcr_chain,
+            )
+            feats = self.feature_engine.compute(candle, self.candles_3m)
+            self.candles_3m.append(candle)
+
+            decision = self.decision_engine.decide(feats)
+            self.last_decision = decision
+            feats["decision_action"] = decision.action
+            feats["decision_regime"] = decision.regime
+            feats["decision_target"] = decision.target_points
+            feats["decision_confidence"] = decision.confidence
+            self.dataset_manager.write_parquet(pd.DataFrame([feats]), name="features_3min")
+
+    def start_bar_watchdog(self):
+        if self._watchdog_thread and self._watchdog_thread.is_alive():
             return
+        self._watchdog_stop.clear()
 
-        # 1. Spot OHLC
-        spot_ticks = [t for t in self.current_bar_ticks if str(t.get("tk") or t.get("token")) == self.spot_token]
-        spot_prices = [safe_float(t.get("ltp") or t.get("lp") or t.get("c")) for t in spot_ticks if is_valid_number(t.get("ltp") or t.get("lp") or t.get("c"))]
-        if not spot_prices:
-            last_spot = safe_float(self.latest.get(self.spot_token, {}).get("ltp"), 0.0)
-            spot_o = spot_h = spot_l = spot_c = last_spot
-        else:
-            spot_o, spot_h, spot_l, spot_c = spot_prices[0], max(spot_prices), min(spot_prices), spot_prices[-1]
+        def _loop():
+            while not self._watchdog_stop.is_set():
+                try:
+                    self.maybe_flush_bars()
+                    silent = time.time() - self._last_tick_wall
+                    if self.conn_state == "SUBSCRIBED" and silent > CONFIG["feed_silence_sec"]:
+                        self.conn_state = "DISCONNECTED"
+                        self.connected = False
 
-        # 2. Future OHLC + Volume + OI
-        fut_ticks = [t for t in self.current_bar_ticks if str(t.get("tk") or t.get("token")) == self.future_token]
-        fut_prices = [safe_float(t.get("ltp") or t.get("lp") or t.get("c")) for t in fut_ticks if is_valid_number(t.get("ltp") or t.get("lp") or t.get("c"))]
-        if not fut_prices:
-            last_fut = safe_float(self.latest.get(self.future_token, {}).get("ltp"), spot_c)
-            fut_o = fut_h = fut_l = fut_c = last_fut
-            fut_vol = 0.0
-            fut_oi = safe_float(self.latest.get(self.future_token, {}).get("oi"), 0.0)
-        else:
-            fut_o, fut_h, fut_l, fut_c = fut_prices[0], max(fut_prices), min(fut_prices), fut_prices[-1]
-            fut_vol = sum([safe_float(t.get("v") or t.get("vol"), 0.0) for t in fut_ticks])
-            fut_oi = safe_float(fut_ticks[-1].get("oi") or fut_ticks[-1].get("open_interest"), 0.0)
+                    if self.conn_state == "DISCONNECTED":
+                        if not self._can_auto_reconnect():
+                            self._reconnect_attempts = self._max_reconnect_attempts
+                            self._next_reconnect_ts = time.time() + 3600
+                        else:
+                            now = time.time()
+                            if (self._reconnect_attempts < self._max_reconnect_attempts and
+                                    now >= self._next_reconnect_ts):
+                                ok = self.try_reconnect_and_resubscribe()
+                                if ok:
+                                    self._reconnect_attempts = 0
+                                    self._next_reconnect_ts = 0.0
+                                else:
+                                    delay = self._backoff_sec[min(self._reconnect_attempts, len(self._backoff_sec) - 1)]
+                                    self._reconnect_attempts += 1
+                                    self._next_reconnect_ts = now + delay
+                except Exception as exc:
+                    self.last_error = f"watchdog: {exc}"
+                self._watchdog_stop.wait(1.0)
 
-        # 3. Heavyweight snapshots
-        hw_snap = {}
-        for sym, tok in self.heavy_tokens.items():
-            t_data = self.latest.get(tok, {})
-            c_val = safe_float(t_data.get("ltp") or t_data.get("lp") or t_data.get("c"))
-            o_val = safe_float(t_data.get("o") or t_data.get("open"), c_val)
-            v_val = safe_float(t_data.get("vwap"), c_val)
-            hw_snap[sym] = {"o": o_val, "c": c_val, "vwap": v_val}
+        self._watchdog_thread = threading.Thread(target=_loop, name="BarWatchdog", daemon=True)
+        self._watchdog_thread.start()
 
-        # 4. PCR Option Chain Snapshot
-        total_ce_oi, total_pe_oi, total_ce_vol, total_pe_vol = 0.0, 0.0, 0.0, 0.0
-        for tok in self.pcr_tokens:
-            info = self.pcr_records.get(tok, {})
-            t_data = self.latest.get(tok, {})
-            oi = safe_float(t_data.get("oi"), 0.0)
-            vol = safe_float(t_data.get("v") or t_data.get("vol"), 0.0)
-            if info.get("option_type") == "CE":
-                total_ce_oi += oi
-                total_ce_vol += vol
-            elif info.get("option_type") == "PE":
-                total_pe_oi += oi
-                total_pe_vol += vol
-
-        pcr_chain = {
-            "pcr_oi": total_pe_oi / max(total_ce_oi, 1.0),
-            "pcr_volume": total_pe_vol / max(total_ce_vol, 1.0),
-            "ce_contracts_seen": len(self.pcr_tokens) // 2,
-            "pe_contracts_seen": len(self.pcr_tokens) // 2,
-        }
-
-        candle = Candle3Min(
-            timestamp=bar_time,
-            spot_o=spot_o, spot_h=spot_h, spot_l=spot_l, spot_c=spot_c,
-            fut_o=fut_o, fut_h=fut_h, fut_l=fut_l, fut_c=fut_c,
-            fut_volume=fut_vol, fut_oi=fut_oi,
-            heavy=hw_snap,
-            option_chain=pcr_chain
-        )
-
-        feats = self.feature_engine.compute(candle, self.candles_3m)
-        self.candles_3m.append(candle)
-
-        # Store to Parquet dataset
-        df_feat = pd.DataFrame([feats])
-        self.dataset_manager.write_parquet(df_feat, name="features_3min")
+    def stop_bar_watchdog(self):
+        self._watchdog_stop.set()
 
 
 # =========================================================
-# STREAMLIT UI APPLICATION
+# UI THEME & LAYOUT
 # =========================================================
+
+def inject_custom_css():
+    st.markdown("""
+        <style>
+            .stApp {
+                background-color: #0b0e14;
+                color: #e1e7ec;
+                font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            }
+            .terminal-card {
+                background: #151a23;
+                border: 1px solid #232b38;
+                border-radius: 8px;
+                padding: 16px;
+                margin-bottom: 12px;
+            }
+            .badge-ce {
+                background-color: #064e3b;
+                color: #34d399;
+                padding: 6px 14px;
+                border-radius: 6px;
+                font-weight: 700;
+                font-size: 1.1rem;
+                display: inline-block;
+                border: 1px solid #059669;
+            }
+            .badge-pe {
+                background-color: #7f1d1d;
+                color: #f87171;
+                padding: 6px 14px;
+                border-radius: 6px;
+                font-weight: 700;
+                font-size: 1.1rem;
+                display: inline-block;
+                border: 1px solid #dc2626;
+            }
+            .badge-neutral {
+                background-color: #374151;
+                color: #9ca3af;
+                padding: 6px 14px;
+                border-radius: 6px;
+                font-weight: 700;
+                font-size: 1.1rem;
+                display: inline-block;
+            }
+            .status-pill {
+                padding: 3px 8px;
+                border-radius: 12px;
+                font-size: 0.75rem;
+                font-weight: 600;
+            }
+            .status-active { background: #064e3b; color: #10b981; }
+            .status-offline { background: #451a1a; color: #ef4444; }
+            div[data-testid="stMetricValue"] {
+                font-size: 1.5rem !important;
+                font-weight: 700 !important;
+                color: #f8fafc;
+            }
+        </style>
+    """, unsafe_allow_html=True)
+
 
 def run_unit_tests() -> bool:
     oe = OpeningRangeEngine(15)
     c1 = Candle3Min(datetime(2026, 1, 1, 9, 15), 100, 110, 95, 105, 100, 110, 95, 105, 1000, 500)
     oe.update(c1)
-    f = oe.features(c1, 10.0)
-    assert "or_width_atr" in f
-
+    assert "or_width_atr" in oe.features(c1, 10.0)
     le = LabelEngine()
-    future = [
-        Candle3Min(datetime(2026, 1, 1, 9, 18), 105, 120, 104, 119, 105, 120, 104, 119, 1000, 500)
-    ]
+    future = [Candle3Min(datetime(2026, 1, 1, 9, 18), 105, 120, 104, 119, 105, 120, 104, 119, 1000, 500)]
     lbl = le.generate(100.0, 10.0, future, direction=1)
     assert lbl["triple_barrier_outcome"] in ["TARGET_FIRST", "STOP_FIRST", "TIMEOUT", "AMBIGUOUS"]
+    de = DecisionEngine()
+    d = de.decide({
+        "data_quality_score": 0.9, "atr_14_prev": 12.0, "normalized_stretch": 0.8,
+        "stretch_slope_3": 0.2, "or_breakout_state": 1, "oi_long_buildup": 1,
+        "twc": 0.002, "breadth_10": 0.7, "hw_symbols_seen": 9, "timestamp": datetime.now(),
+    })
+    assert d.action in ("CE", "PE", "SKIP")
     return True
 
 
 def main():
     if st is None:
-        print("Streamlit is not installed. Running headless mode.")
+        print("Streamlit not installed.")
         return
 
-    st.set_page_config(page_title="NIFTY 3-Min Micro Engine", layout="wide")
-    st.caption("Kotak Neo API v2 • Research-Lock v2.0 • Dynamic Discovery")
-    st.header("Kotak Neo Authentication")
-
-    # Persistent Connection Status Display
-    is_logged_in = "neo" in st.session_state and getattr(st.session_state.neo, "connected", False)
-    adapter: Optional[KotakNeoAdapter] = st.session_state.get("neo")
-
-    if is_logged_in:
-        st.success("✅ Kotak Neo Connected & Active (Session Live)")
-    else:
-        st.info("⚪ Not Connected to Kotak Neo")
-
-    user_live_totp = st.text_input(
-        "Live 6-Digit TOTP (optional if KOTAK_TOTP is a Base32 secret)",
-        type="password",
+    st.set_page_config(
+        page_title="NIFTY 3M | Micro Engine",
+        page_icon="⚡",
+        layout="wide",
+        initial_sidebar_state="expanded"
     )
+    inject_custom_css()
 
-    c1, c2 = st.columns([1, 1])
+    adapter: Optional[KotakNeoAdapter] = st.session_state.get("neo")
+    is_logged_in = adapter is not None and getattr(adapter, "connected", False)
 
-    with c1:
-        if st.button("Connect Kotak Neo", use_container_width=True):
-            try:
-                with st.spinner("Authenticating with Kotak Neo..."):
-                    ad = KotakNeoAdapter()
-                    ad.login(live_totp_override=user_live_totp)
-                    st.session_state.neo = ad
-                    st.success("Kotak Neo API v2 authentication successful.")
+    # =========================================================
+    # SIDEBAR: AUTH & CONTROLS
+    # =========================================================
+    with st.sidebar:
+        st.subheader("⚡ Gateway Controls")
+        
+        if is_logged_in:
+            st.markdown(f'<span class="status-pill status-active">● CONNECTED ({adapter.conn_state})</span>', unsafe_allow_html=True)
+        else:
+            st.markdown('<span class="status-pill status-offline">● DISCONNECTED</span>', unsafe_allow_html=True)
+
+        user_live_totp = st.text_input("Live TOTP (Optional)", type="password", help="Use if secret not in config")
+        
+        col_sb1, col_sb2 = st.columns(2)
+        with col_sb1:
+            if st.button("Connect", use_container_width=True):
+                try:
+                    with st.spinner("Connecting..."):
+                        ad = KotakNeoAdapter()
+                        ad.login(live_totp_override=user_live_totp)
+                        ad.start_bar_watchdog()
+                        st.session_state.neo = ad
+                        st.rerun()
+                except Exception as exc:
+                    st.error(f"{exc}")
+        with col_sb2:
+            if st.button("Reconnect", use_container_width=True, disabled=not adapter):
+                if adapter:
+                    adapter.try_reconnect_and_resubscribe(live_totp_override=user_live_totp)
                     st.rerun()
-            except Exception as exc:
-                st.error(f"Login failed: {exc}")
 
-    with c2:
+        st.markdown("---")
+        st.subheader("🔍 Subscriptions")
+        if st.button("Discover Instruments", use_container_width=True, disabled=not is_logged_in):
+            with st.spinner("Mapping Master..."):
+                adapter.discover_nifty_instruments(auto_pcr=True)
+                st.success("Futures & Heavyweights Mapped!")
+
+        if st.button("Start Live Feed", use_container_width=True, disabled=not is_logged_in):
+            n = adapter.subscribe_live_feed()
+            adapter.start_bar_watchdog()
+            st.success(f"Stream Active ({n} items)")
+
+        if st.button("Refresh Chain (PCR)", use_container_width=True, disabled=not is_logged_in):
+            n = adapter.discover_pcr_chain()
+            adapter.subscribe_live_feed()
+            st.info(f"{n} Option strikes active")
+
+        st.markdown("---")
         if st.button("Run Unit Tests", use_container_width=True):
             try:
-                if run_unit_tests():
-                    st.success("All tests passed.")
+                st.success("Engine Verification Passed" if run_unit_tests() else "Test Failed")
             except Exception as exc:
-                st.error(f"Unit tests failed: {exc}")
+                st.error(str(exc))
 
-    st.divider()
-
-    # =====================================================
-    # INSTRUMENT DISCOVERY
-    # =====================================================
-    st.header("Instrument Discovery")
-    if st.button("Discover NIFTY Instruments", use_container_width=False, disabled=not is_logged_in):
-        if adapter:
-            with st.spinner("Querying Kotak Neo Master for Nifty Futures & Heavyweights..."):
-                adapter.discover_nifty_instruments()
-                for log_line in adapter.discovery_log:
-                    st.write(log_line)
-
-    st.header("Live Market Feed")
-    col_a, col_b = st.columns(2)
-    with col_a:
-        if st.button("Subscribe NIFTY + Heavyweights", use_container_width=True, disabled=not is_logged_in):
-            if adapter:
-                sub_count = adapter.subscribe_live_feed()
-                st.success(f"WebSocket Subscribed to {sub_count} active instruments.")
-    with col_b:
-        if st.button("Auto Discover + Subscribe PCR", use_container_width=True, disabled=not is_logged_in):
-            if adapter:
-                pcr_count = adapter.discover_pcr_chain()
-                adapter.subscribe_live_feed()
-                st.success(f"PCR Dynamic Chain Subscribed ({pcr_count} contracts).")
-
-    st.divider()
-
-    # =====================================================
-    # REAL-TIME MARKET DASHBOARD & METRICS
-    # =====================================================
-    st.subheader("Live Market Rates & Research Metrics")
-
+    # =========================================================
+    # TOP METRICS STRIP: NIFTY LIVE RATES
+    # =========================================================
     spot_val, fut_val, fut_oi, ticks_count = "-", "-", "-", 0
     if adapter and adapter.latest:
         with adapter.lock:
-            spot_tick = adapter.latest.get(adapter.spot_token, {})
-            if spot_tick:
-                spot_val = spot_tick.get("ltp") or spot_tick.get("lp") or spot_tick.get("c", "-")
-
-            fut_tick = adapter.latest.get(adapter.future_token, {})
-            if fut_tick:
-                fut_val = fut_tick.get("ltp") or fut_tick.get("lp") or fut_tick.get("c", "-")
-                fut_oi = fut_tick.get("oi") or fut_tick.get("open_interest", "-")
-
+            s = adapter.latest.get(adapter.spot_token, {})
+            spot_val = s.get("ltp") or s.get("lp") or s.get("c", "-")
+            f = adapter.latest.get(adapter.future_token, {})
+            fut_val = f.get("ltp") or f.get("lp") or f.get("c", "-")
+            fut_oi = f.get("oi") or f.get("open_interest", "-")
             ticks_count = len(adapter.tick_buffer)
 
-    m1, m2, m3, m4 = st.columns(4)
-    m1.metric("NIFTY Spot LTP", str(spot_val))
-    m2.metric("NIFTY Future LTP", str(fut_val))
-    m3.metric("Future Open Interest", str(fut_oi))
-    m4.metric("Ticks Received", ticks_count)
+    t1, t2, t3, t4 = st.columns(4)
+    t1.metric("NIFTY SPOT", f"₹{spot_val}")
+    t2.metric("NIFTY FUT", f"₹{fut_val}")
+    t3.metric("FUT OPEN INTEREST", f"{fut_oi:,}" if isinstance(fut_oi, (int, float)) else str(fut_oi))
+    t4.metric("TICKS INGESTED", f"{ticks_count:,}")
 
-    # Heavyweight Monitor
-    if adapter and adapter.heavy_tokens:
-        st.write("**Heavyweights 10 Snapshot (NSE Cash)**")
-        hw_rows = []
-        with adapter.lock:
-            for sym, tok in adapter.heavy_tokens.items():
-                t = adapter.latest.get(tok, {})
-                ltp = t.get("ltp") or t.get("lp") or t.get("c", np.nan)
-                hw_rows.append({"Symbol": sym, "Token": tok, "LTP": ltp, "Weight": HEAVYWEIGHTS.get(sym)})
-        st.dataframe(pd.DataFrame(hw_rows), use_container_width=True)
+    # =========================================================
+    # MAIN STAGE: SIGNAL HUD + REGIME CARD
+    # =========================================================
+    st.markdown('<div class="terminal-card">', unsafe_allow_html=True)
+    
+    col_hud1, col_hud2, col_hud3, col_hud4, col_hud5 = st.columns([1.5, 1.2, 1, 1, 2])
+    
+    if adapter and adapter.last_decision:
+        d = adapter.last_decision
+        badge_cls = "badge-ce" if d.action == "CE" else ("badge-pe" if d.action == "PE" else "badge-neutral")
+        
+        with col_hud1:
+            st.caption("TACTICAL SIGNAL")
+            st.markdown(f'<div class="{badge_cls}">{d.action}</div>', unsafe_allow_html=True)
+        with col_hud2:
+            st.metric("Regime", d.regime)
+        with col_hud3:
+            st.metric("Target / SL", f"+{d.target_points} / -{d.stop_points} pt")
+        with col_hud4:
+            st.metric("Confidence", f"{d.confidence * 100:.0f}%")
+        with col_hud5:
+            st.caption("Engine Rationale")
+            st.write(f"_{d.reason}_")
+    else:
+        st.info("Awaiting first completed 3-minute bar to establish baseline regime and signal...")
 
-    # Feature & 3-Min Bar Engine Status
-    if adapter and adapter.feature_engine.history:
-        st.write("**Latest 3-Min Feature Vector**")
-        latest_feat = pd.DataFrame([adapter.feature_engine.history[-1]])
-        st.dataframe(latest_feat, use_container_width=True)
+    st.markdown('</div>', unsafe_allow_html=True)
 
-    # Auto-refresh UI when streaming
+    # =========================================================
+    # ANALYTICS & MARKET BREADTH (2-COLUMN GRID)
+    # =========================================================
+    grid_left, grid_right = st.columns([1.2, 0.8])
+
+    with grid_left:
+        st.markdown("**Core Feature Vector (3-Min)**")
+        if adapter:
+            with adapter.lock:
+                latest_row = dict(adapter.feature_engine.history[-1]) if adapter.feature_engine.history else None
+            if latest_row:
+                f1, f2, f3, f4 = st.columns(4)
+                f1.metric("VWAP Stretch", f"{latest_row.get('normalized_stretch', 0.0):.2f}σ")
+                f2.metric("Slope (3B)", f"{latest_row.get('stretch_slope_3', 0.0):.3f}")
+                f3.metric("ATR (14)", f"{latest_row.get('atr_14_prev', 0.0):.1f}")
+                f4.metric("Data Quality", f"{latest_row.get('data_quality_score', 0.0) * 100:.0f}%")
+                
+                with st.expander("Inspect Raw Vector Properties", expanded=False):
+                    st.json(latest_row)
+            else:
+                st.caption("Feature extraction initializing...")
+
+    with grid_right:
+        st.markdown("**Heavyweights Breadth (Top 10 NSE Cash)**")
+        if adapter and adapter.heavy_tokens:
+            hw_list = []
+            with adapter.lock:
+                for sym, tok in adapter.heavy_tokens.items():
+                    t = adapter.latest.get(tok, {})
+                    ltp = safe_float(t.get("ltp") or t.get("lp") or t.get("c"))
+                    hw_list.append({"Symbol": sym, "LTP": ltp, "Weight": f"{HEAVYWEIGHTS.get(sym, 0)*100:.1f}%"})
+            st.dataframe(pd.DataFrame(hw_list), height=210, use_container_width=True, hide_index=True)
+        else:
+            st.caption("Heavyweights mapping pending discovery...")
+
     if is_logged_in:
-        time.sleep(3)
+        time.sleep(CONFIG["ui_refresh_sec"])
         st.rerun()
 
 
