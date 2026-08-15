@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
 NIFTY 3-Min Micro Engine
-Kotak Neo Integrated Research-Lock v2.6 (Zero-Lag Discovery + Pro UI)
-- Instant hardcoded token mapping for NSE Cash Heavyweights & Spot
-- Lightweight F&O future discovery with dynamic fallback
+Kotak Neo Integrated Research-Lock v2.7 (Visible Status + Pro UI)
+- Instant token discovery with persistent UI status
+- Dedicated discovery logs in Sidebar & Main Screen
 - RLock protection across async ticks, bar closes, parquet writes & UI reads
 - Safe cumulative delta volume calculation with spike guard
 - Expiry date-only comparisons
@@ -95,7 +95,7 @@ def is_base32_totp_secret(value: str) -> bool:
 # =========================================================
 
 CONFIG = {
-    "app_version": "v2.6_zero_lag_ui",
+    "app_version": "v2.7_status_ui",
     "feature_version": "v2.0_research_lock",
     "label_version": "TB_v1.6_lock",
     "schema_version": "2.0",
@@ -124,7 +124,7 @@ CONFIG = {
     "pcr_strike_step": float(os.getenv("PCR_STRIKE_STEP", "50")),
     "min_data_quality_to_trade": 0.45,
     "signal_min_hold_bars": 2,
-    "ui_refresh_sec": 2,
+    "ui_refresh_sec": 3,
     "bar_close_grace_sec": 2,
     "session_end_flush": True,
     "hw_max_quote_age_sec": 240,
@@ -149,7 +149,6 @@ HEAVYWEIGHTS = {
     "AXISBANK": 0.033, "KOTAKBANK": 0.029, "SBIN": 0.028,
 }
 
-# Standard NSE Cash Token Mapping for Instant Fast Lookup
 NSE_CASH_TOKENS = {
     "HDFCBANK": "1333",
     "RELIANCE": "2885",
@@ -998,11 +997,11 @@ class KotakNeoAdapter:
             raise RuntimeError("Kotak Neo not authenticated.")
         self.discovery_log.clear()
         
-        # 1. Instant static mappings (Zero network delay)
+        # 1. Instant Static Heavyweights Mapping
         self.heavy_tokens = dict(NSE_CASH_TOKENS)
         self.token_to_symbol = {v: k for k, v in NSE_CASH_TOKENS.items()}
         self.token_to_symbol[self.spot_token] = "NIFTY_SPOT"
-        self.discovery_log.append(f"✓ Mapped {len(self.heavy_tokens)} Heavyweights & Spot.")
+        self.discovery_log.append(f"✓ 10 Nifty Heavyweights & Spot Mapped.")
 
         # 2. Fast Near-Month Nifty Future discovery
         try:
@@ -1022,15 +1021,15 @@ class KotakNeoAdapter:
                 future_candidates.sort(key=lambda x: x[0])
                 self.future_expiry, self.future_token, self.future_symbol = future_candidates[0]
                 self.token_to_symbol[self.future_token] = "NIFTY_FUT"
-                self.discovery_log.append(f"✓ Future: {self.future_symbol} ({self.future_token})")
+                self.discovery_log.append(f"✓ Future: {self.future_symbol} (Token {self.future_token})")
             else:
                 self.future_token = CONFIG.get("nifty_future_token", "45450")
                 self.token_to_symbol[self.future_token] = "NIFTY_FUT"
-                self.discovery_log.append(f"✓ Future Fallback Set ({self.future_token})")
+                self.discovery_log.append(f"✓ Future Fallback: Token {self.future_token}")
         except Exception:
             self.future_token = CONFIG.get("nifty_future_token", "45450")
             self.token_to_symbol[self.future_token] = "NIFTY_FUT"
-            self.discovery_log.append("✓ Using configured NIFTY Future Token.")
+            self.discovery_log.append(f"✓ Configured Future Token: {self.future_token}")
 
         if auto_pcr:
             self.discover_pcr_chain()
@@ -1067,7 +1066,7 @@ class KotakNeoAdapter:
                             "expiry": exp, "symbol": str(r.get("pTrdSymbol", ""))
                         }
             self.pcr_tokens = list(set(discovered))
-            self.discovery_log.append(f"✓ PCR strikes around ATM {atm}: {len(self.pcr_tokens)}")
+            self.discovery_log.append(f"✓ PCR Strikes Mapped: {len(self.pcr_tokens)}")
             return len(self.pcr_tokens)
         except Exception:
             return 0
@@ -1422,26 +1421,31 @@ def main():
                         ad.login(live_totp_override=user_live_totp)
                         ad.start_bar_watchdog()
                         st.session_state.neo = ad
+                        st.session_state.discovered = False
                         st.success("Login OK")
-                        st.rerun()
                 except Exception as exc:
                     st.error(f"{exc}")
         with col_sb2:
             if st.button("Reconnect", use_container_width=True, disabled=not adapter):
                 if adapter:
                     adapter.try_reconnect_and_resubscribe(live_totp_override=user_live_totp)
-                    st.rerun()
 
         st.markdown("---")
         st.subheader("🔍 Subscriptions")
+        
         if st.button("Discover Instruments", use_container_width=True, disabled=not is_logged_in):
             adapter.discover_nifty_instruments(auto_pcr=False)
-            st.success("Futures & Heavyweights Mapped!")
-            st.rerun()
+            st.session_state.discovered = True
+
+        if st.session_state.get("discovered"):
+            st.success("✓ Instruments Mapped!")
+            for l in adapter.discovery_log:
+                st.caption(l)
 
         if st.button("Start Live Feed", use_container_width=True, disabled=not is_logged_in):
             n = adapter.subscribe_live_feed()
             adapter.start_bar_watchdog()
+            st.session_state.stream_active = True
             st.success(f"Stream Active ({n} items)")
 
         if st.button("Refresh Chain (PCR)", use_container_width=True, disabled=not is_logged_in):
@@ -1538,7 +1542,8 @@ def main():
         else:
             st.caption("Heavyweights mapping pending discovery...")
 
-    if is_logged_in:
+    # Auto refresh UI loop tabhi chale jab live stream active ho
+    if is_logged_in and st.session_state.get("stream_active", False):
         time.sleep(CONFIG["ui_refresh_sec"])
         st.rerun()
 
