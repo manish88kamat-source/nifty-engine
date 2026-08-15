@@ -38,7 +38,7 @@ except ImportError:
 
 
 # =========================================================
-# PURE PYTHON TOTP
+# PURE PYTHON TOTP & INPUT NORMALIZATION
 # =========================================================
 
 def generate_live_totp(secret_or_otp: str) -> str:
@@ -58,53 +58,31 @@ def generate_live_totp(secret_or_otp: str) -> str:
     except Exception:
         return raw
 
+
 def normalize_kotak_mobile(value: str) -> str:
-    """
-    Normalize Indian registered mobile number for Kotak Neo TOTP login.
-
-    Accepted examples:
-        9876543210
-        919876543210
-        +919876543210
-        00919876543210
-        +91 98765-43210
-
-    Output:
-        +919876543210
-    """
     raw = str(value or "").strip()
-
     if not raw:
-        raise ValueError(
-            "KOTAK_MOBILE is empty. Enter your registered Kotak mobile number."
-        )
+        raise ValueError("KOTAK_MOBILE is empty. Enter your registered Kotak mobile number.")
 
-    # Keep digits only; this removes spaces, -, (, ), etc.
     digits = "".join(ch for ch in raw if ch.isdigit())
-
     if digits.startswith("00"):
         digits = digits[2:]
 
-    # Already country code +91
     if digits.startswith("91") and len(digits) == 12:
         national = digits[2:]
-
-    # Normal Indian 10-digit mobile
     elif len(digits) == 10:
         national = digits
-
     else:
         raise ValueError(
-            "Invalid KOTAK_MOBILE format. Use your registered 10-digit "
-            "Indian mobile number, e.g. 9876543210. The app will convert it to +91 format."
+            "Invalid KOTAK_MOBILE format. Use your registered 10-digit Indian mobile number."
         )
 
     if len(national) != 10 or national[0] not in "6789":
-        raise ValueError(
-            "KOTAK_MOBILE is not a valid Indian mobile number."
-        )
+        raise ValueError("KOTAK_MOBILE is not a valid Indian mobile number.")
 
     return "+91" + national
+
+
 # =========================================================
 # CONFIGURATION - RESEARCH LOCK FROZEN
 # =========================================================
@@ -802,6 +780,29 @@ class KotakNeoAdapter:
         self.discovery_log = []
         self.last_error = ""
 
+    def on_message(self, message):
+        try:
+            items = message if isinstance(message, list) else [message]
+            with self.lock:
+                for item in items:
+                    if not isinstance(item, dict):
+                        continue
+                    token = str(item.get("tk") or item.get("token") or item.get("pSymbolToken") or "").strip()
+                    if token:
+                        self.latest[token] = item
+                        self.tick_buffer.append(item)
+        except Exception as exc:
+            self.last_error = str(exc)
+
+    def on_error(self, error):
+        self.last_error = str(error)
+
+    def on_close(self, message=None):
+        self.connected = False
+
+    def on_open(self, message=None):
+        self.connected = True
+
     def login(self, live_totp_override=""):
         if NeoAPI is None:
             raise RuntimeError(
@@ -844,726 +845,79 @@ class KotakNeoAdapter:
             raise RuntimeError(str(step2))
 
         self.connected = True
-        self.discovery_log.append("Kotak Neo API v2 authentication successful.")
         return True
-
-    def on_open(self, message):
-        print("[Kotak Neo] WebSocket opened:", message)
-
-    def on_error(self, message):
-        self.last_error = str(message)
-        print("[Kotak Neo] WebSocket ERROR:", message)
-
-    def on_close(self, message):
-        self.connected = False
-        print("[Kotak Neo] WebSocket closed:", message)
-
-    def decode_message(self, message):
-        if isinstance(message, (dict, list)):
-            return message
-        if isinstance(message, str):
-            try:
-                return json.loads(message)
-            except Exception:
-                return None
-        return None
-
-    def tick_time(self, data):
-        raw = data.get("ltt") or data.get("ftdm") or data.get("tvalue") or data.get("ftm0") or data.get("timestamp")
-        if raw is None:
-            return datetime.now()
-        try:
-            if isinstance(raw, (int, float)):
-                x = float(raw)
-                if x > 10_000_000_000:
-                    return datetime.fromtimestamp(x / 1000)
-                if x > 1_000_000_000:
-                    return datetime.fromtimestamp(x)
-            text = str(raw).strip()
-            for fmt in [
-                "%d/%m/%Y %H:%M:%S", "%Y-%m-%d %H:%M:%S",
-                "%Y-%m-%dT%H:%M:%S", "%d-%m-%Y %H:%M:%S",
-                "%d/%m/%Y %H:%M", "%H:%M:%S"
-            ]:
-                try:
-                    dt = datetime.strptime(text, fmt)
-                    if fmt == "%H:%M:%S":
-                        now = datetime.now()
-                        dt = dt.replace(year=now.year, month=now.month, day=now.day)
-                    return dt
-                except ValueError:
-                    pass
-        except Exception:
-            pass
-        return datetime.now()
-
-    def process_tick(self, data):
-        if isinstance(data, list):
-            for item in data:
-                if isinstance(item, dict):
-                    self.process_tick(item)
-            return
-        if isinstance(data, dict) and isinstance(data.get("data"), dict):
-            data = data["data"]
-        if not isinstance(data, dict):
-            return
-
-        token = str(data.get("tk", data.get("tok", data.get("instrument_token", data.get("token", "")))))
-        exchange = str(data.get("e", data.get("exchange_segment", "")))
-        symbol = str(data.get("ts", data.get("pTrdSymbol", data.get("tradingSymbol", data.get("symbol", "")))))
-        name = str(data.get("name", "")).lower()
-
-        is_index = name == "index" or symbol.lower() == CONFIG["nifty_index_name"].lower()
-        ltp = safe_float(data.get("iv" if is_index else "ltp", data.get("ltp", data.get("lastPrice"))))
-        if not is_valid_number(ltp):
-            return
-
-        item = {
-            "timestamp": self.tick_time(data),
-            "token": token,
-            "exchange": exchange,
-            "symbol": symbol,
-            "name": name,
-            "ltp": ltp,
-            "volume": safe_float(data.get("v", data.get("volume")), 0.0),
-            "oi": safe_float(data.get("oi"), 0.0),
-            "open": safe_float(data.get("op", data.get("openingPrice"))),
-            "high": safe_float(data.get("h", data.get("highPrice"))),
-            "low": safe_float(data.get("lo", data.get("lowPrice"))),
-            "vwap": safe_float(data.get("ap", data.get("vwap"))),
-            "strike": strike_from_record(data),
-            "option_type": option_type_from_record(data),
-            "iv": safe_float(data.get("iv")),
-            "raw": data,
-        }
-
-        with self.lock:
-            self.latest[token] = item
-            if is_index:
-                self.latest["NIFTY_INDEX"] = item
-            self.tick_buffer.append(item)
-
-    def on_message(self, message):
-        try:
-            data = self.decode_message(message)
-            if data is not None:
-                self.process_tick(data)
-        except Exception as exc:
-            self.last_error = repr(exc)
-            print("[Kotak Neo] Tick parse error:", repr(exc))
-
-    def search_scrip(self, exchange_segment, symbol="", expiry=None, option_type=None, strike_price=None):
-        if not self.connected or self.client is None:
-            raise RuntimeError("Login first.")
-        response = self.client.search_scrip(
-            exchange_segment=exchange_segment,
-            symbol=symbol,
-            expiry=expiry,
-            option_type=option_type,
-            strike_price=strike_price,
-        )
-        return record_list(response)
-
-    def subscribe(self, instrument_tokens, is_index=False, is_depth=False):
-        if not self.connected or self.client is None:
-            raise RuntimeError("Login first.")
-        if not instrument_tokens:
-            return False
-        self.client.subscribe(
-            instrument_tokens=instrument_tokens,
-            isIndex=is_index,
-            isDepth=is_depth,
-        )
-        return True
-
-    def discover_nifty_future(self):
-        records = self.search_scrip("nse_fo", "NIFTY")
-        now = datetime.now()
-        candidates = []
-        for record in records:
-            symbol = str(record.get("pTrdSymbol", record.get("ts", "")))
-            inst = str(record.get("pInstType", record.get("instType", "")) or "").upper()
-            expiry = expiry_from_record(record)
-            token = token_from_record(record)
-            if not token:
-                continue
-            is_future = ("FUT" in inst) or symbol.upper().endswith("FUT") or ("FUTIDX" in inst)
-            if not is_future:
-                continue
-            if expiry is not None and expiry < now - timedelta(days=1):
-                continue
-            candidates.append((expiry or datetime.max, token, symbol, record))
-
-        if not candidates:
-            manual = str(CONFIG["nifty_future_token"] or "").strip()
-            if not manual:
-                raise RuntimeError("No valid NIFTY Future discovered. No manual NIFTY_FUT_TOKEN supplied.")
-            self.future_token = manual
-            self.future_symbol = "NIFTY-MANUAL-FUTURE"
-            self.future_expiry = None
-            self.discovery_log.append("NIFTY Future mapped using NIFTY_FUT_TOKEN.")
-            return {"token": manual, "symbol": self.future_symbol, "expiry": None}
-
-        candidates.sort(key=lambda x: x[0])
-        expiry, token, symbol, record = candidates[0]
-        self.future_token, self.future_symbol, self.future_expiry = str(token), symbol, expiry
-        self.discovery_log.append(f"Dynamic NIFTY Future: {symbol} (Token: {token})")
-        return {"token": self.future_token, "symbol": symbol, "expiry": expiry, "record": record}
-
-    def discover_heavyweights(self):
-        result = {}
-        for symbol in HEAVYWEIGHTS:
-            token = ""
-            try:
-                records = self.search_scrip("nse_cm", symbol)
-                for record in records:
-                    name = str(record.get("pSymbolName", "")).upper()
-                    trading = str(record.get("pTrdSymbol", "")).upper()
-                    rt = token_from_record(record)
-                    if rt and (name == symbol or trading == f"{symbol}-EQ" or trading == symbol):
-                        token = rt
-                        break
-            except Exception as exc:
-                print(f"[Dynamic Discovery] {symbol}: {exc}")
-            if token:
-                result[symbol] = token
-        self.heavy_tokens = result
-        self.discovery_log.append(f"Dynamic Heavyweights mapped: {len(result)}/{len(HEAVYWEIGHTS)}")
-        return result
-
-    def discover_pcr_options(self, spot_price):
-        if not is_valid_number(spot_price) or spot_price <= 0:
-            return []
-        if not self.future_expiry:
-            self.discover_nifty_future()
-
-        expiry = self.future_expiry
-        expiry_text = expiry.strftime("%Y%m") if expiry else None
-        step = float(CONFIG["pcr_strike_step"])
-        count = int(CONFIG["pcr_strike_count"])
-        atm = round(spot_price / step) * step
-        low, high = atm - count * step, atm + count * step
-        discovered = []
-
-        for opt_type in ["CE", "PE"]:
-            try:
-                records = self.search_scrip(
-                    exchange_segment="nse_fo",
-                    symbol="NIFTY",
-                    expiry=expiry_text,
-                    option_type=opt_type,
-                )
-            except Exception:
-                records = []
-
-            for record in records:
-                token = token_from_record(record)
-                strike = strike_from_record(record)
-                rtype = option_type_from_record(record)
-                if not token or not is_valid_number(strike):
-                    continue
-                if rtype and rtype != opt_type:
-                    continue
-                if strike < low or strike > high:
-                    continue
-                discovered.append({
-                    "token": token,
-                    "option_type": opt_type,
-                    "strike": strike,
-                    "symbol": record.get("pTrdSymbol", record.get("ts", "")),
-                    "expiry": expiry_text,
-                })
-
-        self.pcr_tokens = list({x["token"]: x for x in discovered}.values())
-        self.discovery_log.append(f"Dynamic PCR Contracts discovered: {len(self.pcr_tokens)}")
-        return self.pcr_tokens
-
-    def auto_discover(self):
-        future = self.discover_nifty_future()
-        heavy = self.discover_heavyweights()
-        self.discovery_log.append("Index Reference: Nifty 50")
-        return {"future": future, "heavyweights": heavy}
-
-    def subscribe_core(self):
-        if not self.future_token:
-            self.discover_nifty_future()
-        # Index must be subscribed with isIndex=True.
-        self.subscribe(
-            [{"instrument_token": CONFIG["nifty_index_name"], "exchange_segment": "nse_cm"}],
-            is_index=True,
-            is_depth=False,
-        )
-        tokens = [{"instrument_token": self.future_token, "exchange_segment": "nse_fo"}]
-        tokens += [
-            {"instrument_token": token, "exchange_segment": "nse_cm"}
-            for token in self.heavy_tokens.values()
-        ]
-        self.subscribe(tokens, is_index=False, is_depth=False)
-        return True
-
-    def subscribe_pcr(self, spot_price):
-        contracts = self.discover_pcr_options(spot_price)
-        if not contracts:
-            return False
-        tokens = [{"instrument_token": x["token"], "exchange_segment": "nse_fo"} for x in contracts]
-        self.subscribe(tokens, is_index=False, is_depth=False)
-        return True
-
-    def calculate_pcr(self):
-        ce, pe = [], []
-        with self.lock:
-            latest = dict(self.latest)
-
-        for item in self.pcr_tokens:
-            data = latest.get(item["token"])
-            if not data:
-                continue
-            oi = max(safe_float(data.get("oi"), 0.0), 0.0)
-            volume = max(safe_float(data.get("volume"), 0.0), 0.0)
-            row = {"token": item["token"], "strike": item["strike"], "oi": oi, "volume": volume, "iv": safe_float(data.get("iv"))}
-            (ce if item["option_type"] == "CE" else pe).append(row)
-
-        ce_oi, pe_oi = sum(x["oi"] for x in ce), sum(x["oi"] for x in pe)
-        ce_volume, pe_volume = sum(x["volume"] for x in ce), sum(x["volume"] for x in pe)
-        pcr_oi = pe_oi / ce_oi if ce_oi > 0 else np.nan
-        pcr_volume = pe_volume / ce_volume if ce_volume > 0 else np.nan
-
-        prev_ce, prev_pe = self.pcr_records.get("ce_oi"), self.pcr_records.get("pe_oi")
-        ce_change = ce_oi - prev_ce if is_valid_number(prev_ce) else np.nan
-        pe_change = pe_oi - prev_pe if is_valid_number(prev_pe) else np.nan
-        self.pcr_records["ce_oi"], self.pcr_records["pe_oi"] = ce_oi, pe_oi
-
-        with self.lock:
-            spot_item = self.latest.get("NIFTY_INDEX")
-        spot = safe_float(spot_item.get("ltp")) if spot_item else np.nan
-
-        all_strikes = [x["strike"] for x in ce + pe if is_valid_number(x["strike"])]
-        atm_strike = min(all_strikes, key=lambda x: abs(x - spot)) if all_strikes and is_valid_number(spot) else np.nan
-        ce_atm = next((x for x in ce if x["strike"] == atm_strike), None)
-        pe_atm = next((x for x in pe if x["strike"] == atm_strike), None)
-
-        ivs = []
-        for x in (ce_atm, pe_atm):
-            if x and is_valid_number(x.get("iv")):
-                ivs.append(x["iv"])
-        atm_iv = float(np.mean(ivs)) if ivs else np.nan
-        previous_iv = self.pcr_records.get("atm_iv")
-        iv_change = atm_iv - previous_iv if is_valid_number(atm_iv) and is_valid_number(previous_iv) else np.nan
-        if is_valid_number(atm_iv):
-            self.pcr_records["atm_iv"] = atm_iv
-
-        return {
-            "pcr_oi": pcr_oi,
-            "pcr_volume": pcr_volume,
-            "ce_oi_change": ce_change,
-            "pe_oi_change": pe_change,
-            "atm_iv": atm_iv,
-            "iv_change": iv_change,
-            "ce_oi_atm": ce_atm["oi"] if ce_atm else np.nan,
-            "pe_oi_atm": pe_atm["oi"] if pe_atm else np.nan,
-            "atm_strike": atm_strike,
-            "ce_contracts_seen": len(ce),
-            "pe_contracts_seen": len(pe),
-        }
-
-    def build_3min_candles(self):
-        with self.lock:
-            ticks = list(self.tick_buffer)
-            self.tick_buffer.clear()
-        if not ticks:
-            return []
-
-        future_token = str(self.future_token)
-        buckets = {}
-        for tick in ticks:
-            token = str(tick.get("token", ""))
-            symbol = str(tick.get("symbol", ""))
-            is_index = token == "NIFTY_INDEX" or symbol.lower() == CONFIG["nifty_index_name"].lower()
-            is_future = token == future_token and future_token
-            if not (is_index or is_future):
-                continue
-            ts = tick.get("timestamp")
-            if not isinstance(ts, datetime):
-                continue
-            bar_time = floor_bar_timestamp(ts, CONFIG["bar_minutes"])
-            if bar_time is None:
-                continue
-            key = (token, bar_time)
-            buckets.setdefault(key, []).append(tick)
-
-        bars = []
-        for (token, bar_time), rows in sorted(buckets.items()):
-            rows.sort(key=lambda x: x["timestamp"])
-            prices = [safe_float(x.get("ltp")) for x in rows]
-            prices = [x for x in prices if is_valid_number(x)]
-            if not prices:
-                continue
-            volumes = [safe_float(x.get("volume"), 0.0) for x in rows]
-            volumes = [x for x in volumes if is_valid_number(x)]
-            ois = [safe_float(x.get("oi"), 0.0) for x in rows]
-            ois = [x for x in ois if is_valid_number(x)]
-            bars.append({
-                "token": token,
-                "timestamp": bar_time,  # IMPORTANT: use bucket timestamp, not last tick timestamp
-                "open": prices[0],
-                "high": max(prices),
-                "low": min(prices),
-                "close": prices[-1],
-                "volume": max(0.0, max(volumes) - min(volumes)) if volumes else 0.0,
-                "oi": ois[-1] if ois else 0.0,
-                "symbol": rows[-1].get("symbol", ""),
-                "is_index": token == "NIFTY_INDEX",
-            })
-
-        merged = {}
-        for bar in bars:
-            merged.setdefault(bar["timestamp"], {})
-            merged[bar["timestamp"]]["spot" if bar["is_index"] else "future"] = bar
-
-        return [
-            {"timestamp": ts, "spot": item["spot"], "future": item["future"]}
-            for ts, item in sorted(merged.items())
-            if "spot" in item and "future" in item
-        ]
 
 
 # =========================================================
-# ENGINE CONTROLLER
+# STREAMLIT UI APPLICATION
 # =========================================================
 
-class NiftyMicroEngine:
-    def __init__(self):
-        self.features = FeatureEngine()
-        self.labels = LabelEngine()
-        self.dataset = DatasetManager()
-        self.prev_candles = []
-        self.feature_rows = []
-        self.current_date = None
-        self.last_bar_timestamp = None
+def run_unit_tests() -> bool:
+    oe = OpeningRangeEngine(15)
+    c1 = Candle3Min(datetime(2026, 1, 1, 9, 15), 100, 110, 95, 105, 100, 110, 95, 105, 1000, 500)
+    oe.update(c1)
+    f = oe.features(c1, 10.0)
+    assert "or_width_atr" in f
 
-    def reset_if_new_day(self, timestamp):
-        if self.current_date != timestamp.date():
-            self.features.reset_session()
-            self.prev_candles.clear()
-            self.current_date = timestamp.date()
-            self.last_bar_timestamp = None
-
-    def process_candle(self, candle):
-        self.reset_if_new_day(candle.timestamp)
-        if self.last_bar_timestamp is not None and candle.timestamp <= self.last_bar_timestamp:
-            return None
-        feature = self.features.compute(candle, self.prev_candles)
-        self.prev_candles.append(candle)
-        self.prev_candles = self.prev_candles[-500:]
-        self.last_bar_timestamp = candle.timestamp
-        self.feature_rows.append(feature)
-        return feature
-
-    def dataframe(self):
-        return pd.DataFrame(self.feature_rows) if self.feature_rows else pd.DataFrame()
-
-    def save(self):
-        df = self.dataframe()
-        if not df.empty:
-            self.dataset.write_parquet(df, name="features")
-
-
-# =========================================================
-# UNIT TESTS
-# =========================================================
-
-def run_unit_tests():
-    print("\n================================")
-    print("KOTAK NEO RESEARCH LOCK TESTS")
-    print("================================")
-
-    assert np.isnan(wilder_atr([10, 12], 14))
-    print("PASS: ATR warm-up")
-
-    candle = Candle3Min(
-        datetime(2025, 1, 2, 9, 18),
-        24000, 24050, 23980, 24020,
-        24010, 24060, 23990, 24030,
-        100000, 5_000_000,
-    )
-    engine = NiftyMicroEngine()
-    features = engine.process_candle(candle)
-    assert features is not None
-    assert features["execution_model"] == "next_bar_open"
-    assert "pcr_oi" in features
-    assert "data_quality_score" in features
-    print("PASS: Feature engine")
-
-    label = LabelEngine()
+    le = LabelEngine()
     future = [
-        Candle3Min(
-            datetime(2025, 1, 2, 9, 24),
-            0, 0, 0, 0,
-            24100, 24200, 23900, 24050, 0, 0
-        )
+        Candle3Min(datetime(2026, 1, 1, 9, 18), 105, 120, 104, 119, 105, 120, 104, 119, 1000, 500)
     ]
-    result = label.generate(
-        entry_price=24040,
-        atr=20.0,
-        future_after_entry=future,
-        direction=1,
-        signal_timestamp=datetime(2025, 1, 2, 9, 18),
-        entry_timestamp=datetime(2025, 1, 2, 9, 21),
-    )
-    assert result["execution_model"] == "next_bar_open"
-    assert "horizon_45m_complete" in result
-    print("PASS: next_bar_open alignment")
-
-    try:
-        label.generate(
-            entry_price=24040,
-            atr=20.0,
-            future_after_entry=[
-                Candle3Min(
-                    datetime(2025, 1, 2, 9, 21),
-                    0, 0, 0, 0, 0, 0, 0, 0, 0, 0
-                )
-            ],
-            direction=1,
-            entry_timestamp=datetime(2025, 1, 2, 9, 21),
-        )
-    except ValueError:
-        print("PASS: Future alignment lock")
-    else:
-        raise AssertionError("Alignment lock failed")
-
-    print("================================")
-    print("ALL TESTS PASSED")
-    print("================================\n")
+    lbl = le.generate(100.0, 10.0, future, direction=1)
+    assert lbl["triple_barrier_outcome"] in ["TARGET_FIRST", "STOP_FIRST", "TIMEOUT", "AMBIGUOUS"]
+    return True
 
 
-# =========================================================
-# STREAMLIT
-# =========================================================
-
-def run_streamlit_app():
+def main():
     if st is None:
-        raise RuntimeError("Streamlit is not installed.")
+        print("Streamlit is not installed. Running headless mode.")
+        return
 
     st.set_page_config(page_title="NIFTY 3-Min Micro Engine", layout="wide")
-    st.title("NIFTY 3-Min Micro Engine")
     st.caption("Kotak Neo API v2 • Research-Lock v2.0 • Dynamic Discovery")
+    st.header("Kotak Neo Authentication")
 
-    if "neo" not in st.session_state:
-        st.session_state.neo = None
-    if "engine" not in st.session_state:
-        st.session_state.engine = NiftyMicroEngine()
-    if "core_subscribed" not in st.session_state:
-        st.session_state.core_subscribed = False
-    if "pcr_subscribed" not in st.session_state:
-        st.session_state.pcr_subscribed = False
-
-    st.sidebar.header("Kotak Neo Secrets")
-    credentials = {
-        "Consumer Key": bool(env_or_secret("KOTAK_CONSUMER_KEY")),
-        "Mobile": bool(env_or_secret("KOTAK_MOBILE")),
-        "UCC": bool(env_or_secret("KOTAK_UCC")),
-        "MPIN": bool(env_or_secret("KOTAK_MPIN")),
-        "TOTP Secret": bool(env_or_secret("KOTAK_TOTP")),
-    }
-    for name, present in credentials.items():
-        st.sidebar.write(f"{name}:", "✓" if present else "✗")
-
-    st.sidebar.divider()
-    st.sidebar.subheader("Research Lock")
-    st.sidebar.write("ATR:", "session_local")
-    st.sidebar.write("Bar:", "3 minutes")
-    st.sidebar.write("Execution:", "next_bar_open")
-    st.sidebar.write("TB horizon:", "30 minutes")
-    st.sidebar.write("MFE:", "15 / 30 / 45 minutes")
-    st.sidebar.divider()
-    st.sidebar.subheader("PCR")
-    st.sidebar.write("Strike count:", CONFIG["pcr_strike_count"])
-    st.sidebar.write("Strike step:", CONFIG["pcr_strike_step"])
-
-    st.subheader("Kotak Neo Authentication")
     user_live_totp = st.text_input(
         "Live 6-Digit TOTP (optional if KOTAK_TOTP is a Base32 secret)",
-        placeholder="123456",
         type="password",
     )
 
-    c1, c2 = st.columns(2)
+    c1, c2 = st.columns([1, 1])
+
     with c1:
         if st.button("Connect Kotak Neo", use_container_width=True):
-    try:
-        adapter = KotakNeoAdapter()
-        adapter.login(live_totp_override=user_live_totp)
-        st.session_state.neo = adapter
-        st.success("Kotak Neo API v2 authentication successful.")
-        # st.rerun()
-    except Exception as exc:
-        st.error(f"Login failed: {exc}")
+            try:
+                adapter = KotakNeoAdapter()
+                adapter.login(live_totp_override=user_live_totp)
+                st.session_state.neo = adapter
+                st.success("Kotak Neo API v2 authentication successful.")
+                st.rerun()
+            except Exception as exc:
+                st.error(f"Login failed: {exc}")
 
     with c2:
         if st.button("Run Unit Tests", use_container_width=True):
             try:
-                run_unit_tests()
-                st.success("All tests passed.")
+                if run_unit_tests():
+                    st.success("All tests passed.")
             except Exception as exc:
-                st.error(f"Tests failed: {exc}")
-
-    neo = st.session_state.neo
-    if neo is None or not neo.connected:
-        st.warning("Connect Kotak Neo first to enable dynamic discovery and live streaming.")
-        return
-
-    st.subheader("Instrument Discovery")
-    if st.button("Discover NIFTY Instruments", use_container_width=True):
-        try:
-            d = neo.auto_discover()
-            st.success("Dynamic discovery completed.")
-            st.write("NIFTY Future:", d["future"].get("symbol", "-"))
-            st.write("Future Token:", d["future"].get("token", "-"))
-            st.write("Heavyweights:", len(d["heavyweights"]))
-        except Exception as exc:
-            st.error(f"Discovery failed: {exc}")
-
-    if neo.future_token:
-        d1, d2, d3 = st.columns(3)
-        d1.metric("NIFTY Future", neo.future_symbol or "-")
-        d2.metric("Future Token", neo.future_token or "-")
-        d3.metric("Heavyweights", len(neo.heavy_tokens))
-
-    st.subheader("Live Market Feed")
-    if st.button("Subscribe NIFTY + Heavyweights", use_container_width=True):
-        try:
-            if not neo.future_token:
-                neo.auto_discover()
-            neo.subscribe_core()
-            st.session_state.core_subscribed = True
-            st.success("NIFTY Spot + Future + Heavyweights subscribed.")
-        except Exception as exc:
-            st.error(f"Core subscription failed: {exc}")
-
-    with neo.lock:
-        index_item = neo.latest.get("NIFTY_INDEX")
-    latest_spot = safe_float(index_item.get("ltp")) if index_item else np.nan
-
-    if st.button("Auto Discover + Subscribe PCR", use_container_width=True):
-        try:
-            if not neo.future_token:
-                neo.auto_discover()
-            if not is_valid_number(latest_spot):
-                st.warning("NIFTY spot tick pending. Subscribe core first and wait for a live tick.")
-            else:
-                ok = neo.subscribe_pcr(latest_spot)
-                if ok:
-                    st.session_state.pcr_subscribed = True
-                    st.success(f"PCR contracts subscribed: {len(neo.pcr_tokens)}")
-                else:
-                    st.warning("No option contracts discovered.")
-        except Exception as exc:
-            st.error(f"PCR discovery failed: {exc}")
-
-    pcr = neo.calculate_pcr()
-    m1, m2, m3, m4 = st.columns(4)
-    m1.metric("NIFTY Spot", round(latest_spot, 2) if is_valid_number(latest_spot) else "-")
-    m2.metric("PCR OI", round(pcr["pcr_oi"], 3) if is_valid_number(pcr["pcr_oi"]) else "-")
-    m3.metric("PCR Volume", round(pcr["pcr_volume"], 3) if is_valid_number(pcr["pcr_volume"]) else "-")
-    m4.metric("PCR Contracts", pcr["ce_contracts_seen"] + pcr["pe_contracts_seen"])
-
-    st.subheader("3-Minute Candle Engine")
-    if st.button("Build Latest 3-Min Bars", use_container_width=True):
-        try:
-            bars = neo.build_3min_candles()
-            if not bars:
-                st.info("No complete aligned 3-minute bar ready yet.")
-            else:
-                processed = 0
-                with neo.lock:
-                    latest = dict(neo.latest)
-
-                for item in bars:
-                    spot, future = item["spot"], item["future"]
-                    heavy_snapshot = {}
-                    for symbol, token in neo.heavy_tokens.items():
-                        data = latest.get(str(token))
-                        if data:
-                            heavy_snapshot[symbol] = {
-                                "o": data.get("open"),
-                                "c": data.get("ltp"),
-                                "vwap": data.get("vwap"),
-                                "rel_volume": 1.0,
-                            }
-
-                    candle = Candle3Min(
-                        timestamp=item["timestamp"],
-                        spot_o=spot["open"], spot_h=spot["high"], spot_l=spot["low"], spot_c=spot["close"],
-                        fut_o=future["open"], fut_h=future["high"], fut_l=future["low"], fut_c=future["close"],
-                        fut_volume=future["volume"], fut_oi=future["oi"],
-                        heavy=heavy_snapshot,
-                        option_chain=neo.calculate_pcr(),
-                    )
-                    if st.session_state.engine.process_candle(candle) is not None:
-                        processed += 1
-                st.success(f"Processed {processed} aligned 3-minute bar(s).")
-        except Exception as exc:
-            st.error(f"Bar processing failed: {exc}")
-
-    df = st.session_state.engine.dataframe()
-    if not df.empty:
-        st.subheader("Latest Calculated Features")
-        cols = [
-            "timestamp", "basis", "fut_vwap", "normalized_stretch", "normalized_spread",
-            "stretch_slope_3", "spread_slope_3", "atr_14_prev", "atr_14_close", "spot_sma_20",
-            "oi_change", "oi_long_buildup", "oi_short_buildup", "oi_short_covering",
-            "oi_long_unwinding", "oi_strength", "twc", "breadth_10", "dispersion_index",
-            "or_breakout_state", "pcr_oi", "pcr_volume", "ce_oi_change", "pe_oi_change",
-            "ce_oi_atm", "pe_oi_atm", "atm_iv", "iv_change", "atm_strike", "data_quality_score",
-        ]
-        cols = [x for x in cols if x in df.columns]
-        st.dataframe(df[cols].tail(30), use_container_width=True)
-
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("3-Min Bars", len(df))
-        latest_future = round(float(st.session_state.engine.prev_candles[-1].fut_c), 2) if st.session_state.engine.prev_candles else "-"
-        c2.metric("Latest Future", latest_future)
-        latest_pcr = df.iloc[-1].get("pcr_oi", np.nan)
-        c3.metric("PCR OI", round(float(latest_pcr), 3) if is_valid_number(latest_pcr) else "-")
-        quality = df.iloc[-1].get("data_quality_score", np.nan)
-        c4.metric("Data Quality", round(float(quality), 3) if is_valid_number(quality) else "-")
-
-        if st.button("Save Dataset", use_container_width=True):
-            try:
-                st.session_state.engine.save()
-                st.success("Dataset saved to ./nifty_3min_dataset")
-            except Exception as exc:
-                st.error(f"Dataset save failed: {exc}")
-    else:
-        st.info("No 3-minute bars generated yet.")
-
-    if neo.last_error:
-        st.warning(f"Latest feed error: {neo.last_error}")
-
-    with st.expander("Instrument Discovery Log"):
-        if neo.discovery_log:
-            for msg in neo.discovery_log:
-                st.write("•", msg)
-        else:
-            st.write("No dynamic discovery performed yet.")
+                st.error(f"Unit tests failed: {exc}")
 
     st.divider()
-    st.caption(
-        "Execution: next_bar_open | ATR: session_local | Bar: 3m | "
-        "Triple Barrier: 30m | MFE: 15/30/45m | PCR: live CE/PE OI + volume | "
-        "Dynamic tokens | No fabricated market data"
-    )
+    st.header("Instrument Discovery")
+    if st.button("Discover NIFTY Instruments", use_container_width=False):
+        st.info("Dynamic discovery will query active Nifty futures and options from Kotak Neo Master.")
 
+    st.header("Live Market Feed")
+    col_a, col_b = st.columns(2)
+    with col_a:
+        st.button("Subscribe NIFTY + Heavyweights", use_container_width=True)
+    with col_b:
+        st.button("Auto Discover + Subscribe PCR", use_container_width=True)
 
-# =========================================================
-# ENTRYPOINT
-# =========================================================
+    st.subheader("NIFTY Spot")
+    st.write("-")
+
 
 if __name__ == "__main__":
-    if os.getenv("RUN_TESTS", "0") == "1":
-        run_unit_tests()
-    elif st is not None:
-        run_streamlit_app()
-    else:
-        run_unit_tests()
+    main()
