@@ -806,7 +806,7 @@ class KotakNeoAdapter:
         self.discovery_log: List[str] = []
         self.last_error = ""
 
-        # Real-time Micro Engine Components
+        # Micro Engine Aggregator Components
         self.feature_engine = FeatureEngine()
         self.label_engine = LabelEngine()
         self.dataset_manager = DatasetManager()
@@ -888,13 +888,14 @@ class KotakNeoAdapter:
 
         self.discovery_log.clear()
         try:
-            # 1. Discover Active Near-Month Nifty Future
-            res = self.client.search_scrip(exchange_segment="nfo", symbol="NIFTY")
+            # 1. Discover Active Near-Month Nifty Future using 'nse_fo'
+            res = self.client.search_scrip(exchange_segment="nse_fo", symbol="NIFTY")
             records = record_list(res)
             future_candidates = []
             for r in records:
-                sym = str(r.get("pTrdSymbol", r.get("ts", ""))).upper()
-                if sym.startswith("NIFTY") and ("FUT" in sym or r.get("pInstType") == "FUTIDX"):
+                sym = str(r.get("pTrdSymbol", r.get("ts", r.get("symbol", "")))).upper()
+                inst_type = str(r.get("pInstType", r.get("instrument_type", ""))).upper()
+                if "NIFTY" in sym and ("FUT" in sym or "FUTIDX" in inst_type):
                     exp = expiry_from_record(r)
                     tok = token_from_record(r)
                     if tok and exp and exp >= datetime.now():
@@ -908,14 +909,14 @@ class KotakNeoAdapter:
                     f"✓ Discovered Active Nifty Future: {self.future_symbol} (Token: {self.future_token})"
                 )
             else:
-                self.discovery_log.append("✗ No active Nifty Future found in master search.")
+                self.discovery_log.append("✗ No active Nifty Future found in nse_fo.")
 
             # 2. Discover 10 Heavyweights on NSE Cash
             for sym in HEAVYWEIGHTS.keys():
                 hw_res = self.client.search_scrip(exchange_segment="nse_cm", symbol=sym)
                 for item in record_list(hw_res):
                     tsym = str(item.get("pTrdSymbol", item.get("ts", ""))).upper()
-                    if tsym in [f"{sym}-EQ", sym]:
+                    if tsym in [f"{sym}-EQ", sym, f"{sym}-BE"]:
                         tok = token_from_record(item)
                         if tok:
                             self.heavy_tokens[sym] = tok
@@ -924,6 +925,7 @@ class KotakNeoAdapter:
 
             self.token_to_symbol[self.spot_token] = "NIFTY_SPOT"
             self.discovery_log.append(f"✓ Mapped {len(self.heavy_tokens)}/10 NIFTY Heavyweights on NSE Cash.")
+            self.fetch_market_snapshot()
             return True
         except Exception as exc:
             self.discovery_log.append(f"Discovery Error: {exc}")
@@ -943,7 +945,8 @@ class KotakNeoAdapter:
             count = CONFIG["pcr_strike_count"]
             target_strikes = [atm + (i * step) for i in range(-count, count + 1)]
 
-            res = self.client.search_scrip(exchange_segment="nfo", symbol="NIFTY")
+            # Sahi segment: nse_fo
+            res = self.client.search_scrip(exchange_segment="nse_fo", symbol="NIFTY")
             records = record_list(res)
 
             discovered_tokens = []
@@ -953,14 +956,15 @@ class KotakNeoAdapter:
                 op_type = option_type_from_record(r)
                 tok = token_from_record(r)
 
-                if tok and strike in target_strikes and op_type in ["CE", "PE"] and exp and exp >= datetime.now():
-                    discovered_tokens.append(tok)
-                    self.pcr_records[tok] = {
-                        "strike": strike,
-                        "option_type": op_type,
-                        "expiry": exp,
-                        "symbol": str(r.get("pTrdSymbol", ""))
-                    }
+                if tok and strike in target_strikes and op_type in ["CE", "PE"]:
+                    if not exp or exp >= datetime.now():
+                        discovered_tokens.append(tok)
+                        self.pcr_records[tok] = {
+                            "strike": strike,
+                            "option_type": op_type,
+                            "expiry": exp,
+                            "symbol": str(r.get("pTrdSymbol", ""))
+                        }
 
             self.pcr_tokens = list(set(discovered_tokens))
             self.discovery_log.append(f"✓ Mapped {len(self.pcr_tokens)} PCR Option Strikes around ATM {atm}.")
@@ -968,6 +972,30 @@ class KotakNeoAdapter:
         except Exception as exc:
             self.discovery_log.append(f"PCR Discovery Error: {exc}")
             return 0
+
+    def fetch_market_snapshot(self):
+        """Fetches latest prices via REST API when WebSocket has no live ticks."""
+        if not self.connected or not self.client:
+            return
+
+        tokens_to_fetch = [
+            {"instrument_token": self.spot_token, "exchange_segment": "nse_cm"}
+        ]
+        if self.future_token:
+            tokens_to_fetch.append({"instrument_token": self.future_token, "exchange_segment": "nse_fo"})
+        for sym, tok in self.heavy_tokens.items():
+            tokens_to_fetch.append({"instrument_token": str(tok), "exchange_segment": "nse_cm"})
+
+        try:
+            res = self.client.quotes(instrument_tokens=tokens_to_fetch, isIndex=False)
+            records = record_list(res)
+            with self.lock:
+                for r in records:
+                    tok = token_from_record(r)
+                    if tok:
+                        self.latest[tok] = r
+        except Exception as exc:
+            self.last_error = f"Quote Fetch Error: {exc}"
 
     def subscribe_live_feed(self) -> int:
         if not self.connected or not self.client:
@@ -979,7 +1007,7 @@ class KotakNeoAdapter:
 
         # Nifty Future
         if self.future_token:
-            tokens_to_sub.append({"instrument_token": self.future_token, "exchange_segment": "nfo"})
+            tokens_to_sub.append({"instrument_token": self.future_token, "exchange_segment": "nse_fo"})
 
         # Heavyweights
         for sym, tok in self.heavy_tokens.items():
@@ -988,10 +1016,11 @@ class KotakNeoAdapter:
 
         # PCR Options
         for pcr_tok in self.pcr_tokens:
-            tokens_to_sub.append({"instrument_token": str(pcr_tok), "exchange_segment": "nfo"})
+            tokens_to_sub.append({"instrument_token": str(pcr_tok), "exchange_segment": "nse_fo"})
 
         if tokens_to_sub:
             self.client.subscribe(instrument_tokens=tokens_to_sub)
+            self.fetch_market_snapshot()
             return len(tokens_to_sub)
         return 0
 
