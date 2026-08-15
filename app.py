@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
 NIFTY 3-Min Micro Engine
-Kotak Neo Integrated Research-Lock v2.7 (Visible Status + Pro UI)
-- Instant token discovery with persistent UI status
-- Dedicated discovery logs in Sidebar & Main Screen
+Kotak Neo Integrated Research-Lock v2.8 (Auth State Fixed + Pro UI)
+- Instant state sync on Login & Stream activation
+- Clear visual badges (AUTHENTICATED / STREAMING / DISCONNECTED)
 - RLock protection across async ticks, bar closes, parquet writes & UI reads
 - Safe cumulative delta volume calculation with spike guard
 - Expiry date-only comparisons
@@ -95,7 +95,7 @@ def is_base32_totp_secret(value: str) -> bool:
 # =========================================================
 
 CONFIG = {
-    "app_version": "v2.7_status_ui",
+    "app_version": "v2.8_auth_fixed_ui",
     "feature_version": "v2.0_research_lock",
     "label_version": "TB_v1.6_lock",
     "schema_version": "2.0",
@@ -329,7 +329,7 @@ def record_list(response):
 
 
 # =========================================================
-# RESEARCH ENGINES (CORE PRESERVED)
+# RESEARCH ENGINES
 # =========================================================
 
 @dataclass
@@ -980,7 +980,7 @@ class KotakNeoAdapter:
                 has_spot = bool(self.latest.get(self.spot_token))
             if not (has_fut and has_spot):
                 raise RuntimeError("Feed validate failed: both Spot + Future required")
-            self.conn_state = "SUBSCRIBED"
+            self.conn_state = "STREAMING"
             self.connected = True
             self._reconnect_attempts = 0
             self._next_reconnect_ts = 0.0
@@ -997,13 +997,11 @@ class KotakNeoAdapter:
             raise RuntimeError("Kotak Neo not authenticated.")
         self.discovery_log.clear()
         
-        # 1. Instant Static Heavyweights Mapping
         self.heavy_tokens = dict(NSE_CASH_TOKENS)
         self.token_to_symbol = {v: k for k, v in NSE_CASH_TOKENS.items()}
         self.token_to_symbol[self.spot_token] = "NIFTY_SPOT"
         self.discovery_log.append(f"✓ 10 Nifty Heavyweights & Spot Mapped.")
 
-        # 2. Fast Near-Month Nifty Future discovery
         try:
             res = self.client.search_scrip(exchange_segment="nse_fo", symbol="NIFTY")
             records = record_list(res)
@@ -1101,7 +1099,7 @@ class KotakNeoAdapter:
             tokens.append({"instrument_token": str(tok), "exchange_segment": "nse_fo"})
         if tokens:
             self.client.subscribe(instrument_tokens=tokens)
-            self.conn_state = "SUBSCRIBED"
+            self.conn_state = "STREAMING"
             return len(tokens)
         return 0
 
@@ -1268,7 +1266,7 @@ class KotakNeoAdapter:
                 try:
                     self.maybe_flush_bars()
                     silent = time.time() - self._last_tick_wall
-                    if self.conn_state == "SUBSCRIBED" and silent > CONFIG["feed_silence_sec"]:
+                    if self.conn_state == "STREAMING" and silent > CONFIG["feed_silence_sec"]:
                         self.conn_state = "DISCONNECTED"
                         self.connected = False
 
@@ -1354,6 +1352,7 @@ def inject_custom_css():
                 font-weight: 600;
             }
             .status-active { background: #064e3b; color: #10b981; }
+            .status-auth { background: #1e3a5f; color: #60a5fa; }
             .status-offline { background: #451a1a; color: #ef4444; }
             div[data-testid="stMetricValue"] {
                 font-size: 1.5rem !important;
@@ -1406,7 +1405,11 @@ def main():
         st.subheader("⚡ Gateway Controls")
         
         if is_logged_in:
-            st.markdown(f'<span class="status-pill status-active">● CONNECTED ({adapter.conn_state})</span>', unsafe_allow_html=True)
+            conn_txt = getattr(adapter, "conn_state", "AUTHENTICATED")
+            if conn_txt == "STREAMING":
+                st.markdown(f'<span class="status-pill status-active">● STREAMING (LIVE)</span>', unsafe_allow_html=True)
+            else:
+                st.markdown(f'<span class="status-pill status-auth">● CONNECTED (AUTHENTICATED)</span>', unsafe_allow_html=True)
         else:
             st.markdown('<span class="status-pill status-offline">● DISCONNECTED</span>', unsafe_allow_html=True)
 
@@ -1422,13 +1425,14 @@ def main():
                         ad.start_bar_watchdog()
                         st.session_state.neo = ad
                         st.session_state.discovered = False
-                        st.success("Login OK")
+                        st.rerun()
                 except Exception as exc:
                     st.error(f"{exc}")
         with col_sb2:
             if st.button("Reconnect", use_container_width=True, disabled=not adapter):
                 if adapter:
                     adapter.try_reconnect_and_resubscribe(live_totp_override=user_live_totp)
+                    st.rerun()
 
         st.markdown("---")
         st.subheader("🔍 Subscriptions")
@@ -1436,8 +1440,9 @@ def main():
         if st.button("Discover Instruments", use_container_width=True, disabled=not is_logged_in):
             adapter.discover_nifty_instruments(auto_pcr=False)
             st.session_state.discovered = True
+            st.rerun()
 
-        if st.session_state.get("discovered"):
+        if st.session_state.get("discovered") and adapter:
             st.success("✓ Instruments Mapped!")
             for l in adapter.discovery_log:
                 st.caption(l)
@@ -1446,7 +1451,7 @@ def main():
             n = adapter.subscribe_live_feed()
             adapter.start_bar_watchdog()
             st.session_state.stream_active = True
-            st.success(f"Stream Active ({n} items)")
+            st.rerun()
 
         if st.button("Refresh Chain (PCR)", use_container_width=True, disabled=not is_logged_in):
             n = adapter.discover_pcr_chain()
@@ -1542,7 +1547,7 @@ def main():
         else:
             st.caption("Heavyweights mapping pending discovery...")
 
-    # Auto refresh UI loop tabhi chale jab live stream active ho
+    # Auto refresh tabhi trigger ho jab WebSocket actively stream kar raha ho
     if is_logged_in and st.session_state.get("stream_active", False):
         time.sleep(CONFIG["ui_refresh_sec"])
         st.rerun()
