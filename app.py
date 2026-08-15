@@ -60,25 +60,50 @@ def generate_live_totp(secret_or_otp: str) -> str:
 
 
 def normalize_kotak_mobile(value: str) -> str:
-    raw = str(value or "").strip()
-    if not raw:
-        raise ValueError("KOTAK_MOBILE is empty. Enter your registered Kotak mobile number.")
+    """
+    Normalize Indian registered mobile number for Kotak Neo TOTP login.
 
+    Accepted examples:
+        9876543210
+        919876543210
+        +919876543210
+        00919876543210
+        +91 98765-43210
+
+    Output:
+        +919876543210
+    """
+    raw = str(value or "").strip()
+
+    if not raw:
+        raise ValueError(
+            "KOTAK_MOBILE is empty. Enter your registered Kotak mobile number."
+        )
+
+    # Keep digits only; this removes spaces, -, (, ), etc.
     digits = "".join(ch for ch in raw if ch.isdigit())
+
     if digits.startswith("00"):
         digits = digits[2:]
 
+    # Already country code +91
     if digits.startswith("91") and len(digits) == 12:
         national = digits[2:]
+
+    # Normal Indian 10-digit mobile
     elif len(digits) == 10:
         national = digits
+
     else:
         raise ValueError(
-            "Invalid KOTAK_MOBILE format. Use your registered 10-digit Indian mobile number."
+            "Invalid KOTAK_MOBILE format. Use your registered 10-digit "
+            "Indian mobile number, e.g. 9876543210. The app will convert it to +91 format."
         )
 
     if len(national) != 10 or national[0] not in "6789":
-        raise ValueError("KOTAK_MOBILE is not a valid Indian mobile number.")
+        raise ValueError(
+            "KOTAK_MOBILE is not a valid Indian mobile number."
+        )
 
     return "+91" + national
 
@@ -877,6 +902,14 @@ def main():
     st.caption("Kotak Neo API v2 • Research-Lock v2.0 • Dynamic Discovery")
     st.header("Kotak Neo Authentication")
 
+    # Persistent Connection Status Display
+    is_logged_in = "neo" in st.session_state and getattr(st.session_state.neo, "connected", False)
+    
+    if is_logged_in:
+        st.success("✅ Kotak Neo Connected & Active (Session Live)")
+    else:
+        st.info("⚪ Not Connected to Kotak Neo")
+
     user_live_totp = st.text_input(
         "Live 6-Digit TOTP (optional if KOTAK_TOTP is a Base32 secret)",
         type="password",
@@ -887,11 +920,12 @@ def main():
     with c1:
         if st.button("Connect Kotak Neo", use_container_width=True):
             try:
-                adapter = KotakNeoAdapter()
-                adapter.login(live_totp_override=user_live_totp)
-                st.session_state.neo = adapter
-                st.success("Kotak Neo API v2 authentication successful.")
-                st.rerun()
+                with st.spinner("Authenticating with Kotak Neo..."):
+                    adapter = KotakNeoAdapter()
+                    adapter.login(live_totp_override=user_live_totp)
+                    st.session_state.neo = adapter
+                    st.success("Kotak Neo API v2 authentication successful.")
+                    st.rerun()
             except Exception as exc:
                 st.error(f"Login failed: {exc}")
 
@@ -905,15 +939,15 @@ def main():
 
     st.divider()
     st.header("Instrument Discovery")
-    if st.button("Discover NIFTY Instruments", use_container_width=False):
+    if st.button("Discover NIFTY Instruments", use_container_width=False, disabled=not is_logged_in):
         st.info("Dynamic discovery will query active Nifty futures and options from Kotak Neo Master.")
 
     st.header("Live Market Feed")
     col_a, col_b = st.columns(2)
     with col_a:
-        st.button("Subscribe NIFTY + Heavyweights", use_container_width=True)
+        st.button("Subscribe NIFTY + Heavyweights", use_container_width=True, disabled=not is_logged_in)
     with col_b:
-        st.button("Auto Discover + Subscribe PCR", use_container_width=True)
+        st.button("Auto Discover + Subscribe PCR", use_container_width=True, disabled=not is_logged_in)
 
     st.subheader("NIFTY Spot")
     st.write("-")
