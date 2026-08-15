@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """
 NIFTY 3-Min Micro Engine
-Kotak Neo Integrated Research-Lock v2.4 (Hardened + Pro Terminal UI)
-- RLock protection across async ticks, bar closes, parquet writes & Streamlit UI reads
+Kotak Neo Integrated Research-Lock v2.5 (Fast Discovery + Hardened Pro UI)
+- Fast non-blocking instrument discovery & immediate Streamlit refresh
+- RLock protection across async ticks, bar closes, parquet writes & UI reads
 - Safe cumulative delta volume calculation with spike guard
 - Expiry date-only comparisons (expiry day / roll safe)
 - TOTP auto-reconnect abort guard to prevent Kotak account lockout
@@ -95,7 +96,7 @@ def is_base32_totp_secret(value: str) -> bool:
 # =========================================================
 
 CONFIG = {
-    "app_version": "v2.4_hardened_pro_ui",
+    "app_version": "v2.5_fast_discovery_ui",
     "feature_version": "v2.0_research_lock",
     "label_version": "TB_v1.6_lock",
     "schema_version": "2.0",
@@ -643,7 +644,7 @@ class LabelEngine:
                 mfe_tb = max(mfe_tb, entry_price - candle.fut_l)
                 mae_tb = max(mae_tb, candle.fut_h - entry_price)
                 hit_target = not np.isnan(upper) and candle.fut_l <= upper
-                hit_stop = not np.isnan(lower) and candle.fut_h >= lower
+                hit_stop = not np.isnan(lower) and candle.fut_l <= lower
             if mfe_tb > 0 and time_to_mfe == 0:
                 time_to_mfe = bars
             if hit_target and hit_stop:
@@ -984,6 +985,7 @@ class KotakNeoAdapter:
             raise RuntimeError("Kotak Neo not authenticated.")
         self.discovery_log.clear()
         try:
+            # 1. Active NIFTY Future
             res = self.client.search_scrip(exchange_segment="nse_fo", symbol="NIFTY")
             records = record_list(res)
             future_candidates = []
@@ -1004,19 +1006,25 @@ class KotakNeoAdapter:
             else:
                 self.discovery_log.append("✗ No active Nifty Future found.")
 
+            # 2. Heavyweights on NSE Cash
             for sym in HEAVYWEIGHTS:
-                hw_res = self.client.search_scrip(exchange_segment="nse_cm", symbol=sym)
-                for item in record_list(hw_res):
-                    tsym = str(item.get("pTrdSymbol", item.get("ts", ""))).upper()
-                    if tsym in [f"{sym}-EQ", sym, f"{sym}-BE"]:
-                        tok = token_from_record(item)
-                        if tok:
-                            self.heavy_tokens[sym] = tok
-                            self.token_to_symbol[tok] = sym
-                            break
+                try:
+                    hw_res = self.client.search_scrip(exchange_segment="nse_cm", symbol=sym)
+                    for item in record_list(hw_res):
+                        tsym = str(item.get("pTrdSymbol", item.get("ts", ""))).upper()
+                        if tsym in [f"{sym}-EQ", sym, f"{sym}-BE"]:
+                            tok = token_from_record(item)
+                            if tok:
+                                self.heavy_tokens[sym] = tok
+                                self.token_to_symbol[tok] = sym
+                                break
+                except Exception:
+                    continue
+
             self.token_to_symbol[self.spot_token] = "NIFTY_SPOT"
             self.discovery_log.append(f"✓ Heavyweights mapped: {len(self.heavy_tokens)}/10")
-            self.fetch_market_snapshot()
+            
+            # 3. PCR Chain
             if auto_pcr:
                 n = self.discover_pcr_chain()
                 self.discovery_log.append(f"✓ Auto PCR contracts: {n}")
@@ -1412,6 +1420,7 @@ def main():
                         ad.login(live_totp_override=user_live_totp)
                         ad.start_bar_watchdog()
                         st.session_state.neo = ad
+                        st.success("Login OK")
                         st.rerun()
                 except Exception as exc:
                     st.error(f"{exc}")
@@ -1426,7 +1435,7 @@ def main():
         if st.button("Discover Instruments", use_container_width=True, disabled=not is_logged_in):
             with st.spinner("Mapping Master..."):
                 adapter.discover_nifty_instruments(auto_pcr=True)
-                st.success("Futures & Heavyweights Mapped!")
+            st.rerun()
 
         if st.button("Start Live Feed", use_container_width=True, disabled=not is_logged_in):
             n = adapter.subscribe_live_feed()
