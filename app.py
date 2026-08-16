@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
 NIFTY 3-Min Micro Engine
-Kotak Neo Integrated Research-Lock v3.2 (Production Unified & Hardened)
-- Single Unified File Architecture
+Kotak Neo Integrated Research-Lock v3.3 (Production Unified + Heatmap UI)
+- Single Self-Contained File Architecture
 - Correct Short-Side Barrier Logic (Fixed Upper/Lower Stop)
 - Single Nearest-Expiry PCR Filtration (Zero Expiry Contamination)
 - True 3-Bar Linear Slope (Continuous Trajectory)
 - Clean SMA-20 / ATR-14 Warmup Injection
 - Mutually Exclusive Missing vs Zero DQ Gating
-- Pro Dark Trading Terminal Layout
+- Traffic Light Heatmap Visuals (Green = Bullish, Red = Bearish, Brown = Neutral)
 """
 
 from __future__ import annotations
@@ -46,7 +46,7 @@ except ImportError:
 # =========================================================
 
 CONFIG = {
-    "app_version": "v3.2_unified_prod",
+    "app_version": "v3.3_unified_heatmap",
     "feature_version": "v2.1_research_clean",
     "label_version": "TB_v1.7_clean",
     "schema_version": "2.1",
@@ -851,7 +851,7 @@ class DecisionEngine:
 
 
 # =========================================================
-# 5. DATASET MANAGER & ADAPTER
+# 5. DATASET MANAGER & KOTAK NEO ADAPTER
 # =========================================================
 
 class DatasetManager:
@@ -1345,7 +1345,7 @@ class KotakNeoAdapter:
 
 
 # =========================================================
-# 6. STREAMLIT UI & MAIN ENTRY
+# 6. STREAMLIT UI & MAIN ENTRY (HEATMAP TERMINAL)
 # =========================================================
 
 def inject_custom_css():
@@ -1392,6 +1392,9 @@ def inject_custom_css():
                 font-size: 1.1rem;
                 display: inline-block;
             }
+            .color-green { color: #34d399 !important; font-weight: bold; font-size: 1.25rem; }
+            .color-red { color: #f87171 !important; font-weight: bold; font-size: 1.25rem; }
+            .color-brown { color: #d97706 !important; font-weight: bold; font-size: 1.25rem; }
             .status-pill {
                 padding: 3px 8px;
                 border-radius: 12px;
@@ -1408,6 +1411,25 @@ def inject_custom_css():
             }
         </style>
     """, unsafe_allow_html=True)
+
+
+def get_colored_text(value, feature_name):
+    if not is_valid_number(value):
+        return f'<span style="color:#6b7280; font-size:1.25rem;">{value:.2f}</span>'
+    color = "brown"
+    if feature_name == "normalized_stretch":
+        if value > 0.3: color = "green"
+        elif value < -0.3: color = "red"
+    elif feature_name == "stretch_slope_3":
+        if value > 0.02: color = "green"
+        elif value < -0.02: color = "red"
+    elif feature_name == "pcr_oi":
+        if value > 1.05: color = "green"
+        elif value < 0.95: color = "red"
+    elif feature_name == "breadth_10":
+        if value > 0.55: color = "green"
+        elif value < 0.45: color = "red"
+    return f'<span class="color-{color}">{value:.2f}</span>'
 
 
 def run_unit_tests() -> bool:
@@ -1442,6 +1464,7 @@ def main():
     adapter: Optional[KotakNeoAdapter] = st.session_state.get("neo")
     is_logged_in = adapter is not None and getattr(adapter, "connected", False)
 
+    # Sidebar: Auth & Controls
     with st.sidebar:
         st.subheader("⚡ Gateway Controls")
         
@@ -1543,19 +1566,27 @@ def main():
         st.info("Awaiting first completed 3-minute bar to establish baseline regime and signal...")
     st.markdown('</div>', unsafe_allow_html=True)
 
-    # 2-Column Analytics Grid
+    # 2-Column Analytics Grid: Heatmap Feature Vector + Heavyweights
     grid_left, grid_right = st.columns([1.2, 0.8])
     with grid_left:
-        st.markdown("**Core Feature Vector (3-Min)**")
+        st.markdown("**Core Feature Vector (Heatmap Traffic Light)**")
         if adapter:
             with adapter.lock:
                 latest_row = dict(adapter.feature_engine.history[-1]) if adapter.feature_engine.history else None
             if latest_row:
                 f1, f2, f3, f4 = st.columns(4)
-                f1.metric("VWAP Stretch", f"{latest_row.get('normalized_stretch', 0.0):.2f}σ")
-                f2.metric("Slope (3-Bar)", f"{latest_row.get('stretch_slope_3', 0.0):.3f}")
-                f3.metric("ATR (14)", f"{latest_row.get('atr_14_prev', 0.0):.1f}")
-                f4.metric("Data Quality", f"{latest_row.get('data_quality_score', 0.0) * 100:.0f}%")
+                
+                val_stretch = latest_row.get("normalized_stretch", 0.0)
+                f1.markdown(f"**VWAP Stretch**<br>{get_colored_text(val_stretch, 'normalized_stretch')}", unsafe_allow_html=True)
+                
+                val_slope = latest_row.get("stretch_slope_3", 0.0)
+                f2.markdown(f"**Slope (3-Bar)**<br>{get_colored_text(val_slope, 'stretch_slope_3')}", unsafe_allow_html=True)
+                
+                val_pcr = latest_row.get("pcr_oi", 1.0)
+                f3.markdown(f"**PCR (OI)**<br>{get_colored_text(val_pcr, 'pcr_oi')}", unsafe_allow_html=True)
+                
+                val_breadth = latest_row.get("breadth_10", 0.5)
+                f4.markdown(f"**Breadth (10)**<br>{get_colored_text(val_breadth, 'breadth_10')}", unsafe_allow_html=True)
                 
                 with st.expander("Inspect Raw Vector Properties", expanded=False):
                     st.json(latest_row)
