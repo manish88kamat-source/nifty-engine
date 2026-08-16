@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
 """
-NIFTY 3-Min Micro Engine
-Kotak Neo Integrated Research-Lock v3.3 (Production Unified + Heatmap UI)
+NIFTY 3-Min Micro Engine | v4.1 Trade Journal Persistence & Colored PnL
 - Single Self-Contained File Architecture
-- Correct Short-Side Barrier Logic (Fixed Upper/Lower Stop)
-- Single Nearest-Expiry PCR Filtration (Zero Expiry Contamination)
-- True 3-Bar Linear Slope (Continuous Trajectory)
-- Clean SMA-20 / ATR-14 Warmup Injection
-- Mutually Exclusive Missing vs Zero DQ Gating
-- Traffic Light Heatmap Visuals (Green = Bullish, Red = Bearish, Brown = Neutral)
+- Real-Time Trade Journal Export (Parquet Auto-Persistence + 1-Click CSV Download)
+- Styled Recent Trades Table with Dynamic PnL Coloring (Green = Profit, Red = Loss)
+- Automatic Session-End (15:30) Forced Square-Off Mechanism
+- Auto-Reset of Paper Trading State on New Trading Date
+- Live Mark-to-Market (MTM) & Hit-Rate Performance HUD
+- Real ML Schema Alignment & Dynamic Column Ordering
+- Kotak Historical API Fallback for Daily Range Context
+- Thread-Safe Shared State Synchronization
+- Traffic Light Heatmap Visuals (Green/Red/Brown)
 """
 
 from __future__ import annotations
@@ -20,8 +22,9 @@ import hashlib
 import struct
 import base64
 import threading
-from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from collections import deque
+from dataclasses import dataclass, field, asdict
+from datetime import datetime, timedelta, date
 from pathlib import Path
 from typing import Dict, List, Optional, Any, Tuple
 
@@ -29,6 +32,11 @@ import numpy as np
 import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
+
+try:
+    import joblib
+except ImportError:
+    joblib = None
 
 try:
     import streamlit as st
@@ -46,10 +54,10 @@ except ImportError:
 # =========================================================
 
 CONFIG = {
-    "app_version": "v3.3_unified_heatmap",
-    "feature_version": "v2.1_research_clean",
-    "label_version": "TB_v1.7_clean",
-    "schema_version": "2.1",
+    "app_version": "v4.1_journal_colored",
+    "feature_version": "v3.0_journal_ready",
+    "label_version": "TB_v2.3_clean",
+    "schema_version": "3.0",
     "weight_version": "NIFTY_STATIC_2025Q1",
     "atr_period": 14,
     "sma_period": 20,
@@ -58,7 +66,7 @@ CONFIG = {
     "time_barrier_min": 30,
     "mfe_horizons_min": [15, 30, 45],
     "max_label_horizon_min": 45,
-    "purge_bars": 18,
+    "purge_bars": 15,
     "embargo_bars": 5,
     "opening_range_minutes": 15,
     "atr_mode": "session_local",
@@ -67,6 +75,7 @@ CONFIG = {
     "session_end": "15:30",
     "bar_minutes": 3,
     "dataset_path": "./nifty_3min_dataset",
+    "model_path": "./model/nifty_lgbm_latest.joblib",
     "neo_environment": "prod",
     "nifty_index_name": "Nifty 50",
     "nifty_spot_token": "26000",
@@ -82,6 +91,7 @@ CONFIG = {
     "hw_min_symbols_required": 5,
     "feed_silence_sec": 45,
     "atm_delta_approx": 0.52,
+    "estimated_slippage_pts": 0.50,
     "dq_weights": {
         "missing_future": 0.25,
         "missing_spot": 0.20,
@@ -384,41 +394,101 @@ class SessionContextEngine:
         self.prev_close = self.prev_high = self.prev_low = self.today_open = None
 
     def set_previous_day(self, close, high, low):
-        self.prev_close, self.prev_high, self.prev_low = close, high, low
+        self.prev_close = safe_float(close)
+        self.prev_high = safe_float(high)
+        self.prev_low = safe_float(low)
 
     def set_today_open(self, open_price):
-        self.today_open = open_price
+        self.today_open = safe_float(open_price)
 
     def reset(self):
         self.today_open = None
 
-    def features(self, candle, atr):
+    def features(self, candle: Candle3Min, atr: float):
         names = ["gap_points", "gap_atr", "gap_direction", "dist_to_pdh_atr", "dist_to_pdl_atr"]
-        if self.prev_close is None or not is_valid_number(atr) or atr <= 0:
+        if not is_valid_number(self.prev_close) or not is_valid_number(atr) or atr <= 0:
             return {k: np.nan for k in names}
-        gap = (self.today_open if self.today_open is not None else candle.fut_o) - self.prev_close
+        op = self.today_open if is_valid_number(self.today_open) else candle.fut_o
+        gap = op - self.prev_close
         return {
-            "gap_points": gap, "gap_atr": gap / atr,
+            "gap_points": gap,
+            "gap_atr": gap / atr,
             "gap_direction": 1 if gap > 0 else (-1 if gap < 0 else 0),
-            "dist_to_pdh_atr": (candle.fut_c - self.prev_high) / atr if self.prev_high is not None else np.nan,
-            "dist_to_pdl_atr": (candle.fut_c - self.prev_low) / atr if self.prev_low is not None else np.nan,
+            "dist_to_pdh_atr": (candle.fut_c - self.prev_high) / atr if is_valid_number(self.prev_high) else np.nan,
+            "dist_to_pdl_atr": (candle.fut_c - self.prev_low) / atr if is_valid_number(self.prev_low) else np.nan,
         }
 
 
 class OptionChainEngine:
-    def compute(self, chain: Dict[str, Any]):
-        keys = ["pcr_oi", "pcr_volume", "ce_oi_change", "pe_oi_change", "ce_oi_atm", "pe_oi_atm", "atm_strike"]
+    def __init__(self, maxlen=150):
+        self.pcr_history = deque(maxlen=maxlen)
+
+    def reset(self):
+        self.pcr_history.clear()
+
+    def compute(self, chain: Dict[str, Any], candle_ts: datetime):
+        keys = [
+            "pcr_oi", "pcr_volume", "ce_oi_change", "pe_oi_change", "ce_oi_atm", "pe_oi_atm",
+            "atm_strike", "ce_pe_oi_imbalance", "atm_oi_imbalance", "pcr_oi_delta",
+            "pcr_velocity", "days_to_expiry", "minutes_to_expiry", "expiry_day_flag"
+        ]
         if not chain:
             out = {k: np.nan for k in keys}
             for k in keys:
                 out[f"{k}_missing"] = 1
             out["ce_contracts_seen"] = out["pe_contracts_seen"] = 0
             return out
+
         out = {}
+        curr_pcr = safe_float(chain.get("pcr_oi"))
+        self.pcr_history.append(curr_pcr if is_valid_number(curr_pcr) else np.nan)
+        
+        valid_pcrs = [p for p in self.pcr_history if is_valid_number(p)]
+        pcr_delta = (valid_pcrs[-1] - valid_pcrs[-2]) if len(valid_pcrs) >= 2 else 0.0
+        pcr_velocity = calc_3bar_slope(valid_pcrs)
+
+        total_ce = safe_float(chain.get("total_ce_oi"), 0.0)
+        total_pe = safe_float(chain.get("total_pe_oi"), 0.0)
+        tot_sum = total_ce + total_pe
+        ce_pe_imbalance = (total_pe - total_ce) / tot_sum if tot_sum > 0 else 0.0
+
+        atm_ce = safe_float(chain.get("ce_oi_atm"), 0.0)
+        atm_pe = safe_float(chain.get("pe_oi_atm"), 0.0)
+        atm_sum = atm_ce + atm_pe
+        atm_imbalance = (atm_pe - atm_ce) / atm_sum if atm_sum > 0 else 0.0
+
+        exp_dt = chain.get("active_expiry")
+        if isinstance(exp_dt, datetime):
+            exp_day_end = exp_dt.replace(hour=15, minute=30, second=0)
+            diff = exp_day_end - candle_ts
+            days_to_exp = max(0, diff.days)
+            mins_to_exp = max(0.0, diff.total_seconds() / 60.0)
+            exp_flag = int(candle_ts.date() == exp_dt.date())
+        else:
+            days_to_exp = mins_to_exp = np.nan
+            exp_flag = 0
+
+        raw_metrics = {
+            "pcr_oi": curr_pcr,
+            "pcr_volume": chain.get("pcr_volume", np.nan),
+            "ce_oi_change": chain.get("ce_oi_change", np.nan),
+            "pe_oi_change": chain.get("pe_oi_change", np.nan),
+            "ce_oi_atm": atm_ce,
+            "pe_oi_atm": atm_pe,
+            "atm_strike": chain.get("atm_strike", np.nan),
+            "ce_pe_oi_imbalance": ce_pe_imbalance,
+            "atm_oi_imbalance": atm_imbalance,
+            "pcr_oi_delta": pcr_delta,
+            "pcr_velocity": pcr_velocity,
+            "days_to_expiry": days_to_exp,
+            "minutes_to_expiry": mins_to_exp,
+            "expiry_day_flag": exp_flag
+        }
+
         for key in keys:
-            value = chain.get(key, np.nan)
-            out[key] = value
-            out[f"{key}_missing"] = int(not is_valid_number(value))
+            val = raw_metrics.get(key, np.nan)
+            out[key] = val
+            out[f"{key}_missing"] = int(not is_valid_number(val))
         out["ce_contracts_seen"] = int(chain.get("ce_contracts_seen", 0))
         out["pe_contracts_seen"] = int(chain.get("pe_contracts_seen", 0))
         return out
@@ -432,7 +502,7 @@ class HeavyweightEngine:
     def reset_day(self):
         self.day_open.clear()
 
-    def compute(self, candle):
+    def compute(self, candle: Candle3Min):
         contributions, returns = [], []
         bullish = 0
         for symbol, weight in self.base_weights.items():
@@ -466,17 +536,17 @@ class HeavyweightEngine:
 
 
 class FeatureEngine:
-    def __init__(self):
+    def __init__(self, maxlen=150):
         self.vwap_pv = self.vwap_vol = 0.0
-        self.tr_history: List[float] = []
-        self.history: List[Dict[str, Any]] = []
-        self.stretch_history: List[float] = []
-        self.spread_history: List[float] = []
-        self.preloaded_closes: List[float] = []
+        self.tr_history = deque(maxlen=maxlen)
+        self.history = deque(maxlen=maxlen)
+        self.stretch_history = deque(maxlen=maxlen)
+        self.spread_history = deque(maxlen=maxlen)
+        self.preloaded_closes = deque(maxlen=CONFIG["sma_period"])
         self.hw = HeavyweightEngine(HEAVYWEIGHTS)
         self.or_eng = OpeningRangeEngine(CONFIG["opening_range_minutes"])
         self.sess = SessionContextEngine()
-        self.opt = OptionChainEngine()
+        self.opt = OptionChainEngine(maxlen=maxlen)
 
     def reset_session(self):
         self.vwap_pv = self.vwap_vol = 0.0
@@ -488,12 +558,17 @@ class FeatureEngine:
         self.hw.reset_day()
         self.or_eng.reset()
         self.sess.reset()
+        self.opt.reset()
 
     def preload_warmup(self, historical_closes: List[float], historical_trs: List[float]):
         if historical_closes:
-            self.preloaded_closes = [c for c in historical_closes if is_valid_number(c)][-CONFIG["sma_period"]:]
+            for c in historical_closes[-CONFIG["sma_period"]:]:
+                if is_valid_number(c):
+                    self.preloaded_closes.append(c)
         if historical_trs:
-            self.tr_history = [tr for tr in historical_trs if is_valid_number(tr)][-CONFIG["sma_period"]:]
+            for tr in historical_trs[-CONFIG["sma_period"]:]:
+                if is_valid_number(tr):
+                    self.tr_history.append(tr)
 
     def set_previous_day(self, close, high, low):
         self.sess.set_previous_day(close, high, low)
@@ -501,7 +576,7 @@ class FeatureEngine:
     def set_today_open(self, open_price):
         self.sess.set_today_open(open_price)
 
-    def compute(self, candle: Candle3Min, prev: List[Candle3Min]):
+    def compute(self, candle: Candle3Min, prev: deque):
         typical = (candle.fut_h + candle.fut_l + candle.fut_c) / 3.0
         volume = safe_float(candle.fut_volume, 0.0)
         self.vwap_pv += typical * max(volume, 0.0)
@@ -514,11 +589,11 @@ class FeatureEngine:
         else:
             tr = candle.fut_h - candle.fut_l
 
-        atr_prev = wilder_atr(self.tr_history, CONFIG["atr_period"])
+        atr_prev = wilder_atr(list(self.tr_history), CONFIG["atr_period"])
         self.tr_history.append(tr)
         atr = atr_prev
 
-        all_closes = self.preloaded_closes + [c.spot_c for c in prev]
+        all_closes = list(self.preloaded_closes) + [c.spot_c for c in prev]
         all_closes.append(candle.spot_c)
         sma_window = all_closes[-CONFIG["sma_period"]:]
         sma_ready = len(sma_window) >= CONFIG["sma_period"] and all(is_valid_number(x) for x in sma_window)
@@ -533,8 +608,8 @@ class FeatureEngine:
         self.stretch_history.append(normalized_stretch)
         self.spread_history.append(normalized_spread)
 
-        stretch_slope = calc_3bar_slope(self.stretch_history)
-        spread_slope = calc_3bar_slope(self.spread_history)
+        stretch_slope = calc_3bar_slope(list(self.stretch_history))
+        spread_slope = calc_3bar_slope(list(self.spread_history))
 
         if prev:
             oi_change = candle.fut_oi - prev[-1].fut_oi if is_valid_number(candle.fut_oi) and is_valid_number(prev[-1].fut_oi) else np.nan
@@ -577,9 +652,19 @@ class FeatureEngine:
             w["bad_ohlc"] * bad_ohlc
         )
 
-        pcr_features = self.opt.compute(candle.option_chain)
+        pcr_features = self.opt.compute(candle.option_chain, candle.timestamp)
+        now_ts = datetime.now()
+        
+        is_causal_verified = int(
+            candle.timestamp <= now_ts and 
+            is_valid_number(candle.fut_c) and 
+            is_valid_number(candle.spot_c)
+        )
+
         features = {
             "timestamp": candle.timestamp,
+            "feature_available_timestamp": now_ts,
+            "is_causal": is_causal_verified,
             "feature_version": CONFIG["feature_version"],
             "schema_version": CONFIG["schema_version"],
             "weight_version": CONFIG["weight_version"],
@@ -713,7 +798,7 @@ class LabelEngine:
 
 
 # =========================================================
-# 4. REGIME & DECISION ENGINE
+# 4. REGIME & SCHEMA-ALIGNED ML DECISION ENGINE
 # =========================================================
 
 class RegimeEngine:
@@ -759,6 +844,8 @@ class TradeDecision:
     confidence: float
     reason: str
     timestamp: Optional[datetime] = None
+    decision_timestamp: Optional[datetime] = None
+    ml_probability: float = 0.5
 
 
 class DecisionEngine:
@@ -767,6 +854,36 @@ class DecisionEngine:
         self.last_action: Optional[str] = None
         self.last_action_bar_idx: int = -999
         self.bar_counter: int = 0
+        self.ml_model = None
+        self.expected_feature_names: List[str] = []
+        self._load_production_model()
+
+    def _load_production_model(self):
+        model_p = Path(CONFIG.get("model_path", ""))
+        if joblib and model_p.exists():
+            try:
+                loaded = joblib.load(model_p)
+                if isinstance(loaded, dict) and "model" in loaded:
+                    self.ml_model = loaded["model"]
+                    self.expected_feature_names = loaded.get("features", [])
+                else:
+                    self.ml_model = loaded
+                    if hasattr(self.ml_model, "feature_name_"):
+                        self.expected_feature_names = list(self.ml_model.feature_name_)
+                    elif hasattr(self.ml_model, "feature_names_in_"):
+                        self.expected_feature_names = list(self.ml_model.feature_names_in_)
+            except Exception:
+                self.ml_model = None
+                self.expected_feature_names = []
+
+    def get_adaptive_weights(self, regime: str) -> Tuple[float, float]:
+        if regime in ["IMPULSE_UP", "IMPULSE_DOWN", "STAIRCASE_UP", "STAIRCASE_DOWN"]:
+            return 0.85, 0.15
+        elif regime == "FAILURE":
+            return 0.40, 0.60
+        elif regime == "GRIND":
+            return 0.50, 0.50
+        return 0.70, 0.30
 
     def _realistic_target(self, atr: float, regime: str) -> Tuple[float, float, float]:
         if not is_valid_number(atr) or atr <= 0:
@@ -781,8 +898,30 @@ class DecisionEngine:
             return 0.45 * atr, 0.40 * atr, 0.45
         return 0.60 * atr, 0.50 * atr, 0.55
 
+    def _predict_real_ml_proba(self, feats: Dict[str, Any]) -> float:
+        if self.ml_model is None:
+            return 0.5
+        try:
+            if self.expected_feature_names:
+                row = [safe_float(feats.get(k), np.nan) for k in self.expected_feature_names]
+                df_in = pd.DataFrame([row], columns=self.expected_feature_names)
+            else:
+                numeric_feats = {k: v for k, v in feats.items() if isinstance(v, (int, float)) and np.isfinite(v)}
+                df_in = pd.DataFrame([numeric_feats])
+                
+            if hasattr(self.ml_model, "predict_proba"):
+                probs = self.ml_model.predict_proba(df_in)
+                return float(probs[0][1])
+            elif hasattr(self.ml_model, "predict"):
+                pred = self.ml_model.predict(df_in)
+                return float(pred[0])
+        except Exception:
+            pass
+        return 0.5
+
     def decide(self, feats: Dict[str, Any]) -> TradeDecision:
         self.bar_counter += 1
+        now_ts = datetime.now()
         regime = self.regime_engine.detect(feats)
         atr = safe_float(feats.get("atr_14_prev"), 15.0)
         stretch = safe_float(feats.get("normalized_stretch"), 0.0)
@@ -791,18 +930,23 @@ class DecisionEngine:
         dq = safe_float(feats.get("data_quality_score"), 0.0)
 
         if regime == "DATA_BAD" or dq < CONFIG["min_data_quality_to_trade"]:
-            return TradeDecision("SKIP", regime, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, "Data quality low / warmup pending", feats.get("timestamp"))
+            return TradeDecision("SKIP", regime, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, "Data quality low / warmup pending", feats.get("timestamp"), now_ts)
 
         twc = safe_float(feats.get("twc"), 0.0)
         twc_term = float(np.clip(twc * 50.0, -0.8, 0.8))
         breadth_term = (safe_float(feats.get("breadth_10"), 0.5) - 0.5) * 1.5
+        
         pcr_val = safe_float(feats.get("pcr_oi"), 1.0)
         pcr_term = float(np.clip((pcr_val - 1.0) * 0.5, -0.5, 0.5))
+        pcr_vel = safe_float(feats.get("pcr_velocity"), 0.0)
+        pcr_vel_term = float(np.clip(pcr_vel * 2.0, -0.3, 0.3))
+        oi_imb = safe_float(feats.get("ce_pe_oi_imbalance"), 0.0)
+        oi_imb_term = float(np.clip(oi_imb * 0.4, -0.4, 0.4))
         
         score = (np.clip(stretch, -2, 2) * 1.2 +
                  np.clip(slope, -1, 1) * 0.8 +
                  or_state * 0.5 +
-                 twc_term + breadth_term + pcr_term)
+                 twc_term + breadth_term + pcr_term + pcr_vel_term + oi_imb_term)
 
         raw_action = "CE" if score >= 0 else "PE"
         hold = CONFIG["signal_min_hold_bars"]
@@ -821,12 +965,17 @@ class DecisionEngine:
             reason = f"Regime={regime}, score={score:.2f} [composite]"
 
         target, stop, size = self._realistic_target(atr, regime)
-        conf = 0.50 + min(0.30, abs(score) * 0.12) - conf_penalty
+        
+        ml_prob = self._predict_real_ml_proba(feats)
+        rule_conf = 0.50 + min(0.30, abs(score) * 0.12) - conf_penalty
         if regime.startswith("IMPULSE"):
-            conf += 0.10
+            rule_conf += 0.10
         if regime == "GRIND":
-            conf -= 0.08
-        conf = float(np.clip(conf, 0.30, 0.88))
+            rule_conf -= 0.08
+            
+        rule_w, ml_w = self.get_adaptive_weights(regime)
+        combined_conf = (rule_w * rule_conf) + (ml_w * abs(ml_prob - 0.5) * 2.0)
+        conf = float(np.clip(combined_conf, 0.30, 0.88))
 
         hw_seen = int(feats.get("hw_symbols_seen") or 0)
         min_hw = CONFIG.get("hw_min_symbols_required", 5)
@@ -847,11 +996,152 @@ class DecisionEngine:
 
         self.last_action = action
         self.last_action_bar_idx = self.bar_counter
-        return TradeDecision(action, regime, round(target, 1), round(stop, 1), opt_target, opt_stop, round(size, 2), round(conf, 3), reason, feats.get("timestamp"))
+        return TradeDecision(action, regime, round(target, 1), round(stop, 1), opt_target, opt_stop, round(size, 2), round(conf, 3), reason, feats.get("timestamp"), now_ts, ml_prob)
 
 
 # =========================================================
-# 5. DATASET MANAGER & KOTAK NEO ADAPTER
+# 5. PAPER TRADING SIMULATOR & PERSISTENCE
+# =========================================================
+
+@dataclass
+class PaperPosition:
+    entry_time: datetime
+    direction: int  # +1 CE, -1 PE
+    entry_price: float
+    target_price: float
+    stop_price: float
+    size: float
+    regime: str
+    option_target: float
+    option_stop: float
+    bars_held: int = 0
+    status: str = "OPEN"
+    exit_time: Optional[datetime] = None
+    exit_price: Optional[float] = None
+    pnl_pts: float = 0.0
+    exit_reason: str = ""
+
+
+class PaperTradingDesk:
+    def __init__(self, dataset_manager: DatasetManager):
+        self.dataset_manager = dataset_manager
+        self.active_position: Optional[PaperPosition] = None
+        self.pending_order: Optional[Dict[str, Any]] = None
+        self.closed_trades: deque = deque(maxlen=200)
+        self.realized_pnl_pts: float = 0.0
+        self.unrealized_pnl_pts: float = 0.0
+        self.current_trade_date: Optional[date] = None
+
+    def check_and_reset_new_day(self, current_dt: datetime):
+        today = current_dt.date()
+        if self.current_trade_date is None:
+            self.current_trade_date = today
+        elif today > self.current_trade_date:
+            self.active_position = None
+            self.pending_order = None
+            self.closed_trades.clear()
+            self.realized_pnl_pts = 0.0
+            self.unrealized_pnl_pts = 0.0
+            self.current_trade_date = today
+
+    def stage_signal(self, decision: TradeDecision, atr: float, next_bar_time: datetime):
+        if decision.action in ("CE", "PE") and self.active_position is None and self.pending_order is None:
+            direction = 1 if decision.action == "CE" else -1
+            self.pending_order = {
+                "target_fill_time": next_bar_time,
+                "direction": direction,
+                "target_pts": decision.target_points,
+                "stop_pts": decision.stop_points,
+                "size": decision.size_factor,
+                "regime": decision.regime,
+                "option_target": decision.option_target_pts,
+                "option_stop": decision.option_stop_pts,
+            }
+
+    def on_bar_open_fill(self, candle: Candle3Min):
+        self.check_and_reset_new_day(candle.timestamp)
+        if self.pending_order and candle.timestamp >= self.pending_order["target_fill_time"]:
+            order = self.pending_order
+            direction = order["direction"]
+            slippage = CONFIG["estimated_slippage_pts"] * direction
+            fill_price = candle.fut_o + slippage
+            
+            if direction == 1:
+                target_p = fill_price + order["target_pts"]
+                stop_p = fill_price - order["stop_pts"]
+            else:
+                target_p = fill_price - order["target_pts"]
+                stop_p = fill_price + order["stop_pts"]
+
+            self.active_position = PaperPosition(
+                entry_time=candle.timestamp,
+                direction=direction,
+                entry_price=round(fill_price, 2),
+                target_price=round(target_p, 2),
+                stop_price=round(stop_p, 2),
+                size=order["size"],
+                regime=order["regime"],
+                option_target=order["option_target"],
+                option_stop=order["option_stop"]
+            )
+            self.pending_order = None
+
+    def on_bar_update_and_exit_eval(self, candle: Candle3Min, is_session_end: bool = False):
+        if self.active_position is None:
+            self.unrealized_pnl_pts = 0.0
+            return
+
+        pos = self.active_position
+        pos.bars_held += 1
+        
+        if pos.direction == 1:
+            self.unrealized_pnl_pts = round((candle.fut_c - pos.entry_price) * pos.size, 2)
+            hit_target = candle.fut_h >= pos.target_price
+            hit_stop = candle.fut_l <= pos.stop_price
+        else:
+            self.unrealized_pnl_pts = round((pos.entry_price - candle.fut_c) * pos.size, 2)
+            hit_target = candle.fut_l <= pos.target_price
+            hit_stop = candle.fut_h >= pos.stop_price
+
+        timeout = pos.bars_held >= (CONFIG["time_barrier_min"] // CONFIG["bar_minutes"])
+
+        if is_session_end or hit_target or hit_stop or timeout:
+            if is_session_end:
+                exit_p = candle.fut_c
+                reason = "SESSION END AUTO-EXIT"
+            elif hit_target and hit_stop:
+                exit_p = pos.stop_price
+                reason = "AMBIGUOUS (SL ASSUMED)"
+            elif hit_target:
+                exit_p = pos.target_price
+                reason = "TARGET HIT"
+            elif hit_stop:
+                exit_p = pos.stop_price
+                reason = "STOP LOSS HIT"
+            else:
+                exit_p = candle.fut_c
+                reason = "TIME BARRIER EXIT"
+
+            pos.exit_time = candle.timestamp
+            pos.exit_price = round(exit_p, 2)
+            pos.pnl_pts = round(((exit_p - pos.entry_price) if pos.direction == 1 else (pos.entry_price - exit_p)) * pos.size, 2)
+            pos.status = "CLOSED"
+            pos.exit_reason = reason
+
+            self.realized_pnl_pts = round(self.realized_pnl_pts + pos.pnl_pts, 2)
+            self.closed_trades.append(pos)
+            
+            # Persistent Trade Journal Logging to Parquet
+            trade_record = asdict(pos)
+            trade_record["timestamp"] = pos.exit_time
+            self.dataset_manager.write_parquet(pd.DataFrame([trade_record]), name="paper_trades_log")
+
+            self.active_position = None
+            self.unrealized_pnl_pts = 0.0
+
+
+# =========================================================
+# 6. DATASET MANAGER & KOTAK NEO ADAPTER
 # =========================================================
 
 class DatasetManager:
@@ -888,8 +1178,10 @@ class DatasetManager:
                 break
             train_idx = data[data["date"].isin(dates[:train_end])].index.tolist()
             test_idx = data[data["date"].isin(dates[test_start:test_end])].index.tolist()
-            if len(train_idx) > CONFIG["embargo_bars"]:
-                train_idx = train_idx[:-CONFIG["embargo_bars"]]
+            
+            purge_count = CONFIG.get("purge_bars", 15)
+            if len(train_idx) > purge_count:
+                train_idx = train_idx[:-purge_count]
             if train_idx and test_idx:
                 splits.append((train_idx, test_idx))
         return splits
@@ -908,7 +1200,7 @@ class KotakNeoAdapter:
         self.conn_state = "DISCONNECTED"
         self.lock = threading.RLock()
         self.latest: Dict[str, Dict[str, Any]] = {}
-        self.tick_buffer: List[Dict[str, Any]] = []
+        self.tick_buffer = deque(maxlen=2000)
 
         self.spot_token = CONFIG.get("nifty_spot_token", "26000")
         self.future_token = CONFIG.get("nifty_future_token", "")
@@ -922,11 +1214,12 @@ class KotakNeoAdapter:
         self.discovery_log: List[str] = []
         self.last_error = ""
 
-        self.feature_engine = FeatureEngine()
-        self.label_engine = LabelEngine()
         self.dataset_manager = DatasetManager()
+        self.feature_engine = FeatureEngine(maxlen=150)
+        self.label_engine = LabelEngine()
         self.decision_engine = DecisionEngine()
-        self.candles_3m: List[Candle3Min] = []
+        self.paper_desk = PaperTradingDesk(self.dataset_manager)
+        self.candles_3m = deque(maxlen=150)
         self.current_bar_ticks: List[Dict[str, Any]] = []
         self.current_bar_time: Optional[datetime] = None
         self._bar_deadline: Optional[datetime] = None
@@ -934,6 +1227,8 @@ class KotakNeoAdapter:
         self._prev_ce_oi = np.nan
         self._prev_pe_oi = np.nan
         self._last_tick_wall = time.time()
+        self._last_cum_volume: Optional[float] = None
+        self._unlabeled_decisions = deque(maxlen=150)
 
         self._watchdog_stop = threading.Event()
         self._watchdog_thread: Optional[threading.Thread] = None
@@ -1003,7 +1298,8 @@ class KotakNeoAdapter:
             self.current_bar_ticks.clear()
             self.current_bar_time = None
             self._bar_deadline = None
-        self.last_error = f"Bar state cleared ({reason})"
+            self._last_cum_volume = None
+        self.last_error = f"Bar & volume state cleared ({reason})"
 
     def try_reconnect_and_resubscribe(self, live_totp_override: str = "") -> bool:
         self.conn_state = "RECONNECTING"
@@ -1043,7 +1339,7 @@ class KotakNeoAdapter:
         self.heavy_tokens = dict(NSE_CASH_TOKENS)
         self.token_to_symbol = {v: k for k, v in NSE_CASH_TOKENS.items()}
         self.token_to_symbol[self.spot_token] = "NIFTY_SPOT"
-        self.discovery_log.append(f"✓ 10 Nifty Heavyweights & Spot Mapped.")
+        self.discovery_log.append("✓ 10 Nifty Heavyweights & Spot Mapped.")
 
         try:
             res = self.client.search_scrip(exchange_segment="nse_fo", symbol="NIFTY")
@@ -1129,6 +1425,25 @@ class KotakNeoAdapter:
     def fetch_market_snapshot(self):
         if not self.connected or not self.client:
             return
+        
+        try:
+            if self.future_token and hasattr(self.client, "historical_candle"):
+                hist = self.client.historical_candle(
+                    exchange_segment="nse_fo",
+                    instrument_token=self.future_token,
+                    interval="1D"
+                )
+                recs = record_list(hist)
+                if recs and len(recs) >= 1:
+                    last_daily = recs[-1]
+                    pdc = safe_float(last_daily.get("c") or last_daily.get("close"))
+                    pdh = safe_float(last_daily.get("h") or last_daily.get("high"))
+                    pdl = safe_float(last_daily.get("l") or last_daily.get("low"))
+                    if is_valid_number(pdc):
+                        self.feature_engine.set_previous_day(pdc, pdh, pdl)
+        except Exception:
+            pass
+
         tokens = [{"instrument_token": self.spot_token, "exchange_segment": "nse_cm"}]
         if self.future_token:
             tokens.append({"instrument_token": self.future_token, "exchange_segment": "nse_fo"})
@@ -1141,6 +1456,15 @@ class KotakNeoAdapter:
                     tok = token_from_record(r)
                     if tok:
                         self.latest[tok] = r
+                        if tok == self.future_token:
+                            pdc = safe_float(r.get("c") or r.get("close") or r.get("pdc") or r.get("previousClose"))
+                            pdh = safe_float(r.get("h") or r.get("high") or r.get("pdh"))
+                            pdl = safe_float(r.get("l") or r.get("low") or r.get("pdl"))
+                            open_p = safe_float(r.get("o") or r.get("open"))
+                            if is_valid_number(pdc) and self.feature_engine.sess.prev_close is None:
+                                self.feature_engine.set_previous_day(pdc, pdh, pdl)
+                            if is_valid_number(open_p):
+                                self.feature_engine.set_today_open(open_p)
         except Exception as exc:
             self.last_error = f"Quote Fetch Error: {exc}"
 
@@ -1190,12 +1514,59 @@ class KotakNeoAdapter:
                 end_h, end_m = map(int, CONFIG["session_end"].split(":"))
                 sess_end = now.replace(hour=end_h, minute=end_m, second=0, microsecond=0)
                 if now >= sess_end and self.current_bar_ticks:
-                    self._close_bar(self.current_bar_time or floor_bar_timestamp(now) or now)
+                    self._close_bar(self.current_bar_time or floor_bar_timestamp(now) or now, is_session_end=True)
                     self.current_bar_ticks.clear()
                     self.current_bar_time = None
                     self._bar_deadline = None
 
-    def _close_bar(self, bar_time: datetime):
+    def _resolve_volume_clean(self, fut_ticks: List[Dict[str, Any]]) -> float:
+        if not fut_ticks:
+            return np.nan
+        last_cum = None
+        for t in reversed(fut_ticks):
+            c_val = safe_float(t.get("v") or t.get("vol") or t.get("volume"))
+            if is_valid_number(c_val) and c_val > 0:
+                last_cum = c_val
+                break
+        if last_cum is None:
+            return np.nan
+        if self._last_cum_volume is None:
+            self._last_cum_volume = last_cum
+            return 0.0
+        delta = last_cum - self._last_cum_volume
+        if delta < 0:
+            delta = last_cum
+        self._last_cum_volume = last_cum
+        return float(max(0.0, delta))
+
+    def _process_delayed_labels(self):
+        max_tb_bars = CONFIG["time_barrier_min"] // CONFIG["bar_minutes"]
+        completed_records = []
+        
+        with self.lock:
+            candles_list = list(self.candles_3m)
+            while self._unlabeled_decisions:
+                target_time, entry_px, atr_val, direction, f_row = self._unlabeled_decisions[0]
+                future_candles = [c for c in candles_list if c.timestamp > target_time]
+                if len(future_candles) >= max_tb_bars:
+                    self._unlabeled_decisions.popleft()
+                    try:
+                        labels = self.label_engine.generate(
+                            entry_price=entry_px, atr=atr_val,
+                            future_after_entry=future_candles, direction=direction,
+                            signal_timestamp=f_row["timestamp"], entry_timestamp=target_time
+                        )
+                        merged = {**f_row, **labels}
+                        completed_records.append(merged)
+                    except Exception:
+                        pass
+                else:
+                    break
+
+        if completed_records:
+            self.dataset_manager.write_parquet(pd.DataFrame(completed_records), name="labeled_features_3min")
+
+    def _close_bar(self, bar_time: datetime, is_session_end: bool = False):
         with self.lock:
             if not self.current_bar_ticks:
                 return
@@ -1221,21 +1592,7 @@ class KotakNeoAdapter:
                 fut_oi = safe_float(self.latest.get(self.future_token, {}).get("oi"), np.nan)
             else:
                 fut_o, fut_h, fut_l, fut_c = fut_prices[0], max(fut_prices), min(fut_prices), fut_prices[-1]
-                vols = [safe_float(t.get("v") or t.get("vol") or t.get("volume"), np.nan) for t in fut_ticks]
-                vols = [v for v in vols if is_valid_number(v)]
-                
-                if len(vols) >= 2:
-                    if vols[-1] >= vols[0] and vols[-1] < (vols[0] * 50.0 + 10.0):
-                        fut_vol = max(0.0, vols[-1] - vols[0])
-                    else:
-                        s = sum(vols)
-                        med = float(np.median(vols)) if vols else 0.0
-                        fut_vol = s if s < max(med * len(vols) * 5.0, 1.0) else med * len(vols)
-                elif len(vols) == 1:
-                    fut_vol = vols[0]
-                else:
-                    fut_vol = np.nan
-                    
+                fut_vol = self._resolve_volume_clean(fut_ticks)
                 fut_oi = safe_float(fut_ticks[-1].get("oi") or fut_ticks[-1].get("open_interest"), np.nan)
 
             hw_snap = {}
@@ -1284,6 +1641,8 @@ class KotakNeoAdapter:
                 "pcr_volume": total_pe_vol / max(total_ce_vol, 1.0) if total_ce_vol > 0 else np.nan,
                 "ce_oi_change": ce_oi_change, "pe_oi_change": pe_oi_change,
                 "ce_oi_atm": atm_ce_oi, "pe_oi_atm": atm_pe_oi, "atm_strike": atm,
+                "total_ce_oi": total_ce_oi, "total_pe_oi": total_pe_oi,
+                "active_expiry": self.active_pcr_expiry,
                 "ce_contracts_seen": sum(1 for t in self.pcr_tokens if self.pcr_records.get(t, {}).get("option_type") == "CE"),
                 "pe_contracts_seen": sum(1 for t in self.pcr_tokens if self.pcr_records.get(t, {}).get("option_type") == "PE"),
             }
@@ -1293,16 +1652,37 @@ class KotakNeoAdapter:
                 fut_o=fut_o, fut_h=fut_h, fut_l=fut_l, fut_c=fut_c, fut_volume=fut_vol, fut_oi=fut_oi,
                 heavy=hw_snap, option_chain=pcr_chain,
             )
+            
+            # Paper Desk Execution & Session-End Forced Exit
+            self.paper_desk.on_bar_open_fill(candle)
+            self.paper_desk.on_bar_update_and_exit_eval(candle, is_session_end=is_session_end)
+
             feats = self.feature_engine.compute(candle, self.candles_3m)
             self.candles_3m.append(candle)
 
             decision = self.decision_engine.decide(feats)
             self.last_decision = decision
+            
+            if not is_session_end:
+                atr_v = safe_float(feats.get("atr_14_prev"), 15.0)
+                next_t = bar_time + timedelta(minutes=CONFIG["bar_minutes"])
+                self.paper_desk.stage_signal(decision, atr_v, next_t)
+
             feats["decision_action"] = decision.action
             feats["decision_regime"] = decision.regime
             feats["decision_target"] = decision.target_points
             feats["decision_confidence"] = decision.confidence
+            feats["decision_timestamp"] = decision.decision_timestamp
+            feats["entry_timestamp"] = bar_time + timedelta(minutes=CONFIG["bar_minutes"])
+            
             self.dataset_manager.write_parquet(pd.DataFrame([feats]), name="features_3min")
+            
+            dir_flag = 1 if decision.action == "CE" else (-1 if decision.action == "PE" else 0)
+            if dir_flag != 0 and not is_session_end:
+                self._unlabeled_decisions.append((
+                    feats["entry_timestamp"], fut_c, feats.get("atr_14_prev"), dir_flag, feats
+                ))
+            self._process_delayed_labels()
 
     def start_bar_watchdog(self):
         if self._watchdog_thread and self._watchdog_thread.is_alive():
@@ -1345,7 +1725,7 @@ class KotakNeoAdapter:
 
 
 # =========================================================
-# 6. STREAMLIT UI & MAIN ENTRY (HEATMAP TERMINAL)
+# 7. STREAMLIT UI & MAIN ENTRY (HEATMAP + PAPER DESK)
 # =========================================================
 
 def inject_custom_css():
@@ -1439,17 +1819,29 @@ def run_unit_tests() -> bool:
     assert "or_width_atr" in oe.features(c1, 10.0)
     
     le = LabelEngine()
-    future_short = [Candle3Min(datetime(2026, 1, 1, 9, 18), 100, 108, 98, 102, 100, 108, 98, 102, 1000, 500)]
-    lbl_short = le.generate(100.0, 10.0, future_short, direction=-1)
+    future_short = [
+        Candle3Min(datetime(2026, 1, 1, 9, 18), 100, 102, 90, 92, 100, 102, 90, 92, 1000, 500)
+    ]
+    lbl_short = le.generate(entry_price=100.0, atr=10.0, future_after_entry=future_short, direction=-1)
     assert lbl_short["triple_barrier_outcome"] in ["TARGET_FIRST", "STOP_FIRST", "TIMEOUT", "AMBIGUOUS"]
+    assert lbl_short["real_breakout"] in [0, 1]
     
     de = DecisionEngine()
-    d = de.decide({
-        "data_quality_score": 0.9, "atr_14_prev": 12.0, "normalized_stretch": 0.8,
+    d_bad = de.decide({
+        "data_quality_score": 0.20, "atr_14_prev": 12.0, "normalized_stretch": 0.8,
         "stretch_slope_3": 0.2, "or_breakout_state": 1, "oi_long_buildup": 1,
         "twc": 0.002, "breadth_10": 0.7, "hw_symbols_seen": 9, "timestamp": datetime.now(),
     })
-    assert d.action in ("CE", "PE", "SKIP")
+    assert d_bad.action == "SKIP"
+    assert d_bad.regime == "DATA_BAD"
+    
+    sc = SessionContextEngine()
+    sc.set_previous_day(24000.0, 24100.0, 23900.0)
+    sc.set_today_open(24150.0)
+    gap_feats = sc.features(c1, 15.0)
+    assert is_valid_number(gap_feats["gap_points"])
+    assert gap_feats["gap_direction"] == 1
+    
     return True
 
 
@@ -1458,13 +1850,13 @@ def main():
         print("Streamlit not installed.")
         return
 
-    st.set_page_config(page_title="NIFTY 3M | Micro Engine", page_icon="⚡", layout="wide", initial_sidebar_state="expanded")
+    st.set_page_config(page_title="NIFTY 3M | Micro Engine v4.1", page_icon="⚡", layout="wide", initial_sidebar_state="expanded")
     inject_custom_css()
 
     adapter: Optional[KotakNeoAdapter] = st.session_state.get("neo")
     is_logged_in = adapter is not None and getattr(adapter, "connected", False)
 
-    # Sidebar: Auth & Controls
+    # Sidebar: Controls & Diagnostics
     with st.sidebar:
         st.subheader("⚡ Gateway Controls")
         
@@ -1513,6 +1905,7 @@ def main():
 
         if st.button("Start Live Feed", use_container_width=True, disabled=not is_logged_in):
             n = adapter.subscribe_live_feed()
+            adapter.fetch_market_snapshot()
             adapter.start_bar_watchdog()
             st.session_state.stream_active = True
             st.rerun()
@@ -1566,8 +1959,79 @@ def main():
         st.info("Awaiting first completed 3-minute bar to establish baseline regime and signal...")
     st.markdown('</div>', unsafe_allow_html=True)
 
-    # 2-Column Analytics Grid: Heatmap Feature Vector + Heavyweights
+    # Paper Trading Simulator Desk HUD
+    st.markdown('<div class="terminal-card">', unsafe_allow_html=True)
+    st.markdown("**⚡ Live Paper Trading Desk & Journal**")
+    
+    col_p1, col_p2, col_p3, col_p4 = st.columns(4)
+    if adapter:
+        desk = adapter.paper_desk
+        active_pos = desk.active_position
+        total_pnl = round(desk.realized_pnl_pts + desk.unrealized_pnl_pts, 2)
+        closed_count = len(desk.closed_trades)
+        wins = sum(1 for t in desk.closed_trades if t.pnl_pts > 0)
+        hit_rate = (wins / closed_count * 100) if closed_count > 0 else 0.0
+
+        col_p1.metric("Total Net PnL", f"{total_pnl:+.2f} pt", delta=f"Realized: {desk.realized_pnl_pts:+.2f} pt")
+        col_p2.metric("Unrealized MTM", f"{desk.unrealized_pnl_pts:+.2f} pt")
+        col_p3.metric("Closed Trades", f"{closed_count}", delta=f"Win Rate: {hit_rate:.0f}%")
+        
+        if active_pos:
+            dir_str = "CE (LONG)" if active_pos.direction == 1 else "PE (SHORT)"
+            col_p4.markdown(f"**Active Position:** `{dir_str}`<br>Entry: `₹{active_pos.entry_price}` | SL: `₹{active_pos.stop_price}`", unsafe_allow_html=True)
+        elif desk.pending_order:
+            p_dir = "CE" if desk.pending_order["direction"] == 1 else "PE"
+            col_p4.markdown(f"**Order Staged:** `{p_dir}` (Filling Next Open)", unsafe_allow_html=True)
+        else:
+            col_p4.markdown("**Active Position:** `FLAT (NO POSITION)`", unsafe_allow_html=True)
+
+        # Recent Closed Trades Table with Colored PnL
+        if desk.closed_trades:
+            st.markdown("---")
+            col_tbl_head, col_tbl_dl = st.columns([3, 1])
+            with col_tbl_head:
+                st.caption("Recent Closed Paper Trades (Real-Time)")
+            
+            trades_raw = [asdict(t) for t in desk.closed_trades]
+            df_full_journal = pd.DataFrame(trades_raw)
+            
+            with col_tbl_dl:
+                csv_data = df_full_journal.to_csv(index=False).encode('utf-8')
+                st.download_button(
+                    label="📥 Download Journal (.csv)",
+                    data=csv_data,
+                    file_name=f"nifty_paper_trades_{datetime.now().strftime('%Y%m%d')}.csv",
+                    mime="text/csv",
+                    use_container_width=True
+                )
+            
+            recent_trades_data = []
+            for t in list(desk.closed_trades)[-8:]:
+                recent_trades_data.append({
+                    "Exit Time": t.exit_time.strftime("%H:%M:%S") if t.exit_time else "-",
+                    "Type": "CE (LONG)" if t.direction == 1 else "PE (SHORT)",
+                    "Entry (₹)": f"{t.entry_price:.2f}",
+                    "Exit (₹)": f"{t.exit_price:.2f}",
+                    "PnL (pt)": t.pnl_pts,
+                    "Bars Held": t.bars_held,
+                    "Exit Reason": t.exit_reason
+                })
+            
+            df_trades = pd.DataFrame(recent_trades_data)
+            
+            # Dynamic Green/Red PnL Formatting via Styler
+            def style_pnl(val):
+                color = '#34d399' if val > 0 else ('#f87171' if val < 0 else '#9ca3af')
+                return f'color: {color}; font-weight: bold;'
+            
+            styled_df = df_trades.style.format({"PnL (pt)": "{:+.2f}"}).map(style_pnl, subset=["PnL (pt)"])
+            st.dataframe(styled_df, use_container_width=True, hide_index=True)
+
+    st.markdown('</div>', unsafe_allow_html=True)
+
+    # 2-Column Analytics Grid: Heatmap + Heavyweights
     grid_left, grid_right = st.columns([1.2, 0.8])
+    latest_row = None
     with grid_left:
         st.markdown("**Core Feature Vector (Heatmap Traffic Light)**")
         if adapter:
@@ -1588,7 +2052,23 @@ def main():
                 val_breadth = latest_row.get("breadth_10", 0.5)
                 f4.markdown(f"**Breadth (10)**<br>{get_colored_text(val_breadth, 'breadth_10')}", unsafe_allow_html=True)
                 
-                with st.expander("Inspect Raw Vector Properties", expanded=False):
+                with st.expander("🛡️ Data Integrity & MLOps Diagnostics Scorecard", expanded=False):
+                    dq_val = latest_row.get("data_quality_score", 1.0)
+                    st.write(f"**Overall DQ Score:** `{dq_val * 100:.0f}%`")
+                    
+                    c_dq1, c_dq2 = st.columns(2)
+                    with c_dq1:
+                        st.write(f"• PCR Delta: `{latest_row.get('pcr_oi_delta', 0.0):.3f}`")
+                        st.write(f"• PCR Velocity: `{latest_row.get('pcr_velocity', 0.0):.3f}`")
+                        st.write(f"• CE/PE OI Imbalance: `{latest_row.get('ce_pe_oi_imbalance', 0.0):.2f}`")
+                        model_loaded = adapter.decision_engine.ml_model is not None
+                        feat_cnt = len(adapter.decision_engine.expected_feature_names)
+                        st.write(f"• ML Status: `{'ACTIVE (' + str(feat_cnt) + ' Features)' if model_loaded else 'FALLBACK (Heuristic)'}`")
+                    with c_dq2:
+                        st.write(f"• Minutes to Expiry: `{latest_row.get('minutes_to_expiry', 0.0):.0f} min`")
+                        st.write(f"• Gap Points: `{latest_row.get('gap_points', 0.0):.1f} pt`")
+                        st.write(f"• Missing Spot/Fut Flag: `{latest_row.get('missing_spot', 0)} / {latest_row.get('missing_future', 0)}`")
+                        st.write(f"• Causal Integrity Tag: `{'1 (VERIFIED)' if latest_row.get('is_causal') == 1 else '0 (INVALID)'}`")
                     st.json(latest_row)
             else:
                 st.caption("Feature extraction initializing...")
