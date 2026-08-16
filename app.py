@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """
-NIFTY 3-Min Micro Engine | v4.1 Trade Journal Persistence & Colored PnL
+NIFTY 3-Min Micro Engine | v4.3 GEX & Regime Adaptive Hardened
 - Single Self-Contained File Architecture
+- Normalized Magnitude Dealer GEX Proxy & 0DTE Intensity
+- RegimeEngine GEX Awareness (Gamma Squeeze vs Dealer Pinning Regimes)
 - Real-Time Trade Journal Export (Parquet Auto-Persistence + 1-Click CSV Download)
 - Styled Recent Trades Table with Dynamic PnL Coloring (Green = Profit, Red = Loss)
 - Automatic Session-End (15:30) Forced Square-Off Mechanism
 - Auto-Reset of Paper Trading State on New Trading Date
 - Live Mark-to-Market (MTM) & Hit-Rate Performance HUD
-- Real ML Schema Alignment & Dynamic Column Ordering
 - Kotak Historical API Fallback for Daily Range Context
 - Thread-Safe Shared State Synchronization
 - Traffic Light Heatmap Visuals (Green/Red/Brown)
@@ -54,10 +55,10 @@ except ImportError:
 # =========================================================
 
 CONFIG = {
-    "app_version": "v4.1_journal_colored",
-    "feature_version": "v3.0_journal_ready",
-    "label_version": "TB_v2.3_clean",
-    "schema_version": "3.0",
+    "app_version": "v4.3_gex_regime_prod",
+    "feature_version": "v3.2_gex_regime_aware",
+    "label_version": "TB_v2.5_clean",
+    "schema_version": "3.2",
     "weight_version": "NIFTY_STATIC_2025Q1",
     "atr_period": 14,
     "sma_period": 20,
@@ -420,6 +421,7 @@ class SessionContextEngine:
 
 
 class OptionChainEngine:
+    """Rich Option Family Engine with Normalized 0DTE & Dealer GEX Proxy"""
     def __init__(self, maxlen=150):
         self.pcr_history = deque(maxlen=maxlen)
 
@@ -430,7 +432,8 @@ class OptionChainEngine:
         keys = [
             "pcr_oi", "pcr_volume", "ce_oi_change", "pe_oi_change", "ce_oi_atm", "pe_oi_atm",
             "atm_strike", "ce_pe_oi_imbalance", "atm_oi_imbalance", "pcr_oi_delta",
-            "pcr_velocity", "days_to_expiry", "minutes_to_expiry", "expiry_day_flag"
+            "pcr_velocity", "days_to_expiry", "minutes_to_expiry", "expiry_day_flag",
+            "gex_proxy", "zero_dte_intensity", "gex_x_0dte", "atm_gamma_imbalance"
         ]
         if not chain:
             out = {k: np.nan for k in keys}
@@ -450,13 +453,14 @@ class OptionChainEngine:
         total_ce = safe_float(chain.get("total_ce_oi"), 0.0)
         total_pe = safe_float(chain.get("total_pe_oi"), 0.0)
         tot_sum = total_ce + total_pe
-        ce_pe_imbalance = (total_pe - total_ce) / tot_sum if tot_sum > 0 else 0.0
+        ce_pe_imbalance = (total_pe - total_ce) / (tot_sum + 1e-5) if tot_sum > 0 else 0.0
 
         atm_ce = safe_float(chain.get("ce_oi_atm"), 0.0)
         atm_pe = safe_float(chain.get("pe_oi_atm"), 0.0)
         atm_sum = atm_ce + atm_pe
-        atm_imbalance = (atm_pe - atm_ce) / atm_sum if atm_sum > 0 else 0.0
+        atm_imbalance = (atm_pe - atm_ce) / (atm_sum + 1e-5) if atm_sum > 0 else 0.0
 
+        # Expiry Time Context & 0DTE Intensity
         exp_dt = chain.get("active_expiry")
         if isinstance(exp_dt, datetime):
             exp_day_end = exp_dt.replace(hour=15, minute=30, second=0)
@@ -467,6 +471,23 @@ class OptionChainEngine:
         else:
             days_to_exp = mins_to_exp = np.nan
             exp_flag = 0
+
+        # Normalized Scale-Invariant GEX Proxy
+        if exp_flag and is_valid_number(mins_to_exp) and mins_to_exp <= 375:
+            zero_dte_intensity = max(0.0, 1.0 - (mins_to_exp / 375.0))
+            if mins_to_exp <= 90:
+                zero_dte_intensity = min(1.0, zero_dte_intensity + 0.35)
+        else:
+            zero_dte_intensity = 0.0
+
+        atm_diff = atm_ce - atm_pe
+        total_diff = total_ce - total_pe
+        tot_oi_baseline = (tot_sum + 1e-5)
+        
+        # Dimensionless GEX Proxy (Weighted ATM + Total Spread)
+        gex_proxy = float(((atm_diff * 2.5) + (total_diff * 0.4)) / tot_oi_baseline)
+        atm_gamma_imb = (atm_ce - atm_pe) / (atm_sum + 1e-5) if atm_sum > 0 else 0.0
+        gex_x_0dte = float(gex_proxy * zero_dte_intensity)
 
         raw_metrics = {
             "pcr_oi": curr_pcr,
@@ -482,7 +503,11 @@ class OptionChainEngine:
             "pcr_velocity": pcr_velocity,
             "days_to_expiry": days_to_exp,
             "minutes_to_expiry": mins_to_exp,
-            "expiry_day_flag": exp_flag
+            "expiry_day_flag": exp_flag,
+            "gex_proxy": gex_proxy,
+            "zero_dte_intensity": zero_dte_intensity,
+            "gex_x_0dte": gex_x_0dte,
+            "atm_gamma_imbalance": atm_gamma_imb
         }
 
         for key in keys:
@@ -802,6 +827,7 @@ class LabelEngine:
 # =========================================================
 
 class RegimeEngine:
+    """GEX-Aware Quantitative Regime Engine"""
     def detect(self, feats: Dict[str, Any]) -> str:
         dq = safe_float(feats.get("data_quality_score"), 0.0)
         atr_warm = int(feats.get("atr_warmup_flag") or 0)
@@ -817,6 +843,18 @@ class RegimeEngine:
         oi_unwind = int(feats.get("oi_long_unwinding") or 0) or int(feats.get("oi_short_covering") or 0)
         twc = safe_float(feats.get("twc"), 0.0)
         breadth = safe_float(feats.get("breadth_10"), 0.5)
+
+        # 0DTE & Dealer Gamma Regime Sensitivity
+        gex_val = safe_float(feats.get("gex_proxy"), 0.0)
+        z_dte = safe_float(feats.get("zero_dte_intensity"), 0.0)
+
+        # Dealer Long Gamma Pinning Bias (Expiry Day Mean Reversion)
+        if z_dte > 0.5 and gex_val > 0.70 and abs(stretch) <= 0.65:
+            return "GRIND"
+
+        # Dealer Short Gamma Squeeze Bias (Expiry Day Breakout Acceleration)
+        if z_dte > 0.4 and gex_val < -0.70 and abs(stretch) > 0.40:
+            return "IMPULSE_UP" if stretch > 0 else "IMPULSE_DOWN"
 
         if (abs(stretch) > 0.9 and abs(slope) > 0.15) or (or_state != 0 and abs(stretch) > 0.5):
             if stretch > 0 and (oi_long or twc > 0 or breadth > 0.55):
@@ -936,6 +974,7 @@ class DecisionEngine:
         twc_term = float(np.clip(twc * 50.0, -0.8, 0.8))
         breadth_term = (safe_float(feats.get("breadth_10"), 0.5) - 0.5) * 1.5
         
+        # Options Terms + Normalized GEX Integration
         pcr_val = safe_float(feats.get("pcr_oi"), 1.0)
         pcr_term = float(np.clip((pcr_val - 1.0) * 0.5, -0.5, 0.5))
         pcr_vel = safe_float(feats.get("pcr_velocity"), 0.0)
@@ -943,10 +982,13 @@ class DecisionEngine:
         oi_imb = safe_float(feats.get("ce_pe_oi_imbalance"), 0.0)
         oi_imb_term = float(np.clip(oi_imb * 0.4, -0.4, 0.4))
         
+        gex_x_0dte = safe_float(feats.get("gex_x_0dte"), 0.0)
+        gex_term = float(np.clip(gex_x_0dte * 0.8, -0.8, 0.8))
+        
         score = (np.clip(stretch, -2, 2) * 1.2 +
                  np.clip(slope, -1, 1) * 0.8 +
                  or_state * 0.5 +
-                 twc_term + breadth_term + pcr_term + pcr_vel_term + oi_imb_term)
+                 twc_term + breadth_term + pcr_term + pcr_vel_term + oi_imb_term + gex_term)
 
         raw_action = "CE" if score >= 0 else "PE"
         hold = CONFIG["signal_min_hold_bars"]
@@ -1850,7 +1892,7 @@ def main():
         print("Streamlit not installed.")
         return
 
-    st.set_page_config(page_title="NIFTY 3M | Micro Engine v4.1", page_icon="⚡", layout="wide", initial_sidebar_state="expanded")
+    st.set_page_config(page_title="NIFTY 3M | Micro Engine v4.3", page_icon="⚡", layout="wide", initial_sidebar_state="expanded")
     inject_custom_css()
 
     adapter: Optional[KotakNeoAdapter] = st.session_state.get("neo")
@@ -2019,7 +2061,6 @@ def main():
             
             df_trades = pd.DataFrame(recent_trades_data)
             
-            # Dynamic Green/Red PnL Formatting via Styler
             def style_pnl(val):
                 color = '#34d399' if val > 0 else ('#f87171' if val < 0 else '#9ca3af')
                 return f'color: {color}; font-weight: bold;'
@@ -2060,11 +2101,13 @@ def main():
                     with c_dq1:
                         st.write(f"• PCR Delta: `{latest_row.get('pcr_oi_delta', 0.0):.3f}`")
                         st.write(f"• PCR Velocity: `{latest_row.get('pcr_velocity', 0.0):.3f}`")
-                        st.write(f"• CE/PE OI Imbalance: `{latest_row.get('ce_pe_oi_imbalance', 0.0):.2f}`")
+                        st.write(f"• 0DTE Intensity: `{latest_row.get('zero_dte_intensity', 0.0):.2f}`")
+                        st.write(f"• Dealer GEX Proxy: `{latest_row.get('gex_proxy', 0.0):.3f}`")
+                        st.write(f"• GEX × 0DTE Term: `{latest_row.get('gex_x_0dte', 0.0):.3f}`")
+                    with c_dq2:
                         model_loaded = adapter.decision_engine.ml_model is not None
                         feat_cnt = len(adapter.decision_engine.expected_feature_names)
                         st.write(f"• ML Status: `{'ACTIVE (' + str(feat_cnt) + ' Features)' if model_loaded else 'FALLBACK (Heuristic)'}`")
-                    with c_dq2:
                         st.write(f"• Minutes to Expiry: `{latest_row.get('minutes_to_expiry', 0.0):.0f} min`")
                         st.write(f"• Gap Points: `{latest_row.get('gap_points', 0.0):.1f} pt`")
                         st.write(f"• Missing Spot/Fut Flag: `{latest_row.get('missing_spot', 0)} / {latest_row.get('missing_future', 0)}`")
