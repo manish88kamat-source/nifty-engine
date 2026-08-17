@@ -15,7 +15,7 @@ NIFTY 3-Min Micro Engine | v5.0 Institutional Prop-Grade Architecture
 - Dual Engine: WebSocket + Auto REST Polling Fallback
 - Thread-Safe Shared State Synchronization
 - Traffic Light Heatmap Visuals (Green/Red/Brown)
-- Fixed Nifty Spot Index ("Nifty 50" with isIndex=True) & Tightened Future Filter
+- Fixed Nifty Spot Index ("Nifty 50" with isIndex=True) & Strict Future Filter (FPI/Bank/Fin excluded)
 """
 
 from __future__ import annotations
@@ -1443,10 +1443,11 @@ class KotakNeoAdapter:
                 sym = str(r.get("pTrdSymbol", r.get("ts", r.get("symbol", "")))).upper().strip()
                 inst = str(r.get("pInstType", "")).upper()
                 
-                # Strict Tightened Filter as suggested
+                # Strict Tightened Filter as suggested by you
                 is_nifty_fut = (
-                    "NIFTY" in sym and 
+                    sym.startswith("NIFTY") and 
                     ("FUT" in sym or "FUTIDX" in inst) and
+                    "FPI" not in sym and
                     "BANK" not in sym and
                     "FIN" not in sym and
                     "MID" not in sym and
