@@ -19,6 +19,7 @@ NIFTY 3-Min Micro Engine | v5.0 Institutional Prop-Grade Architecture
 from __future__ import annotations
 
 import os
+import re
 import time
 import math
 import hmac
@@ -1382,13 +1383,12 @@ class KotakNeoAdapter:
 
     def on_error(self, error):
         self.last_error = str(error)
-        self.connected = False
-        self.conn_state = "DISCONNECTED"
 
     def on_close(self, message=None):
-        self.connected = False
-        self.conn_state = "DISCONNECTED"
-        self.last_error = f"WebSocket closed: {message}"
+        if self.conn_state == "STREAMING":
+            self.conn_state = "DISCONNECTED"
+            self.connected = False
+            self.last_error = f"WebSocket closed: {message}"
 
     def on_open(self, message=None):
         self.connected = True
@@ -1476,20 +1476,25 @@ class KotakNeoAdapter:
         self.token_to_symbol[self.spot_token] = "NIFTY_SPOT"
         self.discovery_log.append("✓ 10 Nifty Heavyweights (Top 5 Focused) & Spot Mapped.")
 
+        # Strict Regex for Pure NIFTY 50 Futures (e.g. NIFTY26AUGFUT or NIFTY26818FUT)
+        # Rejects NIFTYFPI, FINNIFTY, BANKNIFTY, MIDCPNIFTY, NIFTYIT, etc.
+        nifty_fut_pattern = re.compile(r"^NIFTY\d{2}[A-Z0-9]+FUT$", re.IGNORECASE)
+
         try:
             res = self.client.search_scrip(exchange_segment="nse_fo", symbol="NIFTY")
             records = record_list(res)
             future_candidates = []
             now_d = datetime.now().date()
             for r in records:
-                sym = str(r.get("pTrdSymbol", r.get("ts", r.get("symbol", "")))).upper()
-                inst_type = str(r.get("pInstType", r.get("instrument_type", ""))).upper()
-                # Strict check: Exclude FINNIFTY, BANKNIFTY, MIDCPNIFTY
-                if (sym.startswith("NIFTY") and not sym.startswith("FINNIFTY") and not sym.startswith("BANKNIFTY") and not sym.startswith("MIDCPNIFTY")) and ("FUT" in sym or "FUTIDX" in inst_type):
+                sym = str(r.get("pTrdSymbol", r.get("ts", r.get("symbol", "")))).upper().strip()
+                inst_type = str(r.get("pInstType", r.get("instrument_type", ""))).upper().strip()
+                
+                if nifty_fut_pattern.match(sym) or (sym.startswith("NIFTY") and ("FUT" in sym or "FUTIDX" in inst_type) and not any(x in sym for x in ["FPI", "FIN", "BANK", "MID", "IT", "AUTO", "MEDIA", "PHARMA"])):
                     exp = expiry_from_record(r)
                     tok = token_from_record(r)
                     if tok and exp and exp.date() >= now_d:
                         future_candidates.append((exp, tok, sym))
+            
             if future_candidates:
                 future_candidates.sort(key=lambda x: x[0])
                 self.future_expiry, self.future_token, self.future_symbol = future_candidates[0]
@@ -1499,7 +1504,7 @@ class KotakNeoAdapter:
                 self.future_token = CONFIG.get("nifty_future_token", "45450")
                 self.token_to_symbol[self.future_token] = "NIFTY_FUT"
                 self.discovery_log.append(f"✓ Future Fallback: Token {self.future_token}")
-        except Exception:
+        except Exception as exc:
             self.future_token = CONFIG.get("nifty_future_token", "45450")
             self.token_to_symbol[self.future_token] = "NIFTY_FUT"
             self.discovery_log.append(f"✓ Configured Future Token: {self.future_token}")
@@ -1525,10 +1530,12 @@ class KotakNeoAdapter:
             records = record_list(res)
             now_d = datetime.now().date()
             
+            nifty_opt_pattern = re.compile(r"^NIFTY\d{2}[A-Z0-9]+(CE|PE)$", re.IGNORECASE)
+            
             valid_expiries = []
             for r in records:
-                sym = str(r.get("pTrdSymbol", r.get("ts", r.get("symbol", "")))).upper()
-                if not (sym.startswith("NIFTY") and not sym.startswith("FINNIFTY") and not sym.startswith("BANKNIFTY")):
+                sym = str(r.get("pTrdSymbol", r.get("ts", r.get("symbol", "")))).upper().strip()
+                if not nifty_opt_pattern.match(sym) and any(x in sym for x in ["FPI", "FIN", "BANK", "MID", "IT"]):
                     continue
                 op_type = option_type_from_record(r)
                 if op_type in ("CE", "PE"):
@@ -1544,8 +1551,8 @@ class KotakNeoAdapter:
             
             discovered = []
             for r in records:
-                sym = str(r.get("pTrdSymbol", r.get("ts", r.get("symbol", "")))).upper()
-                if not (sym.startswith("NIFTY") and not sym.startswith("FINNIFTY") and not sym.startswith("BANKNIFTY")):
+                sym = str(r.get("pTrdSymbol", r.get("ts", r.get("symbol", "")))).upper().strip()
+                if not nifty_opt_pattern.match(sym) and any(x in sym for x in ["FPI", "FIN", "BANK", "MID", "IT"]):
                     continue
                 exp = expiry_from_record(r)
                 strike = strike_from_record(r)
