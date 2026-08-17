@@ -15,7 +15,7 @@ NIFTY 3-Min Micro Engine | v5.0 Institutional Prop-Grade Architecture
 - Dual Engine: WebSocket + Auto REST Polling Fallback
 - Thread-Safe Shared State Synchronization
 - Traffic Light Heatmap Visuals (Green/Red/Brown)
-- Integrated F&O Live Token Debugger
+- Dynamic Nifty Future Token Auto-Resolver (No Monthly Manual Changes)
 """
 
 from __future__ import annotations
@@ -1318,7 +1318,7 @@ class PaperTradingDesk:
 
 
 # =========================================================
-# 7. KOTAK NEO ADAPTER & DUAL DATA FEED (FIXED SPOT/FUT/OPTIONS)
+# 7. KOTAK NEO ADAPTER & DUAL DATA FEED (AUTO-RESOLVER)
 # =========================================================
 
 class KotakNeoAdapter:
@@ -1432,6 +1432,31 @@ class KotakNeoAdapter:
         self.conn_state = "AUTHENTICATED"
         return True
 
+    def resolve_current_nifty_future_token(self) -> str:
+        """Dynamically finds the nearest active Nifty Future token using search_scrip"""
+        try:
+            res = self.client.search_scrip(exchange_segment="nse_fo", symbol="NIFTY")
+            records = record_list(res)
+            now_d = datetime.now().date()
+            
+            futures = []
+            for r in records:
+                sym = str(r.get("pTrdSymbol", r.get("ts", r.get("symbol", "")))).upper().strip()
+                if "NIFTY" in sym and ("FUT" in sym or sym.endswith("FUT")) and not any(x in sym for x in ["BANK", "FIN", "MID"]):
+                    exp = expiry_from_record(r)
+                    tok = token_from_record(r)
+                    if exp and exp.date() >= now_d and tok:
+                        futures.append((exp, tok))
+            
+            if futures:
+                futures.sort(key=lambda x: x[0])
+                nearest_exp, nearest_tok = futures[0]
+                self.discovery_log.append(f"✓ Auto-Resolved Nifty Future Token: {nearest_tok} (Expiry: {nearest_exp.date()})")
+                return nearest_tok
+        except Exception as e:
+            self.last_error = f"Future resolution error: {e}"
+        return CONFIG.get("nifty_future_token", "53000")
+
     def discover_nifty_instruments(self, auto_pcr: bool = True) -> bool:
         if not self.connected or not self.client:
             raise RuntimeError("Kotak Neo not authenticated.")
@@ -1442,8 +1467,8 @@ class KotakNeoAdapter:
         self.token_to_symbol[self.spot_token] = "NIFTY_SPOT"
         self.discovery_log.append("✓ 10 Nifty Heavyweights & Spot Mapped.")
 
-        cfg_fut_tok = str(env_or_secret("NIFTY_FUT_TOKEN") or CONFIG.get("nifty_future_token", "53000")).strip()
-        self.future_token = cfg_fut_tok if cfg_fut_tok else "53000"
+        # Automatically resolve current live Nifty Future Token
+        self.future_token = self.resolve_current_nifty_future_token()
         self.future_symbol = f"NIFTY_FUT ({self.future_token})"
         self.token_to_symbol[self.future_token] = "NIFTY_FUT"
         self.discovery_log.append(f"✓ Configured Active Future: Token {self.future_token}")
@@ -1514,8 +1539,6 @@ class KotakNeoAdapter:
             return
 
         now_ts = datetime.now()
-        
-        # Robust multi-segment polling for Spot, Futures, and Options
         tokens_to_poll = [
             {"instrument_token": str(self.spot_token), "exchange_segment": "nse_index"},
             {"instrument_token": str(self.spot_token), "exchange_segment": "nse_cm"},
@@ -1809,7 +1832,7 @@ class KotakNeoAdapter:
 
 
 # =========================================================
-# 8. STREAMLIT UI & MAIN ENTRY (HEATMAP + PAPER DESK + DEBUGGER)
+# 8. STREAMLIT UI & MAIN ENTRY (HEATMAP + PAPER DESK)
 # =========================================================
 
 def inject_custom_css():
@@ -1996,23 +2019,6 @@ def main():
                 st.session_state.stream_active = True
                 st.rerun()
 
-        st.markdown("---")
-        st.subheader("🔍 F&O Live Token Debugger")
-        if st.button("Check Future & Option Token Response", key="btn_dbg_fo", disabled=not is_logged_in):
-            try:
-                fut_tok = adapter.future_token
-                res_fut = adapter.client.quotes(instrument_tokens=[{"instrument_token": fut_tok, "exchange_segment": "nse_fo"}])
-                st.write(f"Future Token ({fut_tok}) Response:", res_fut)
-                
-                if adapter.pcr_tokens:
-                    opt_tok = adapter.pcr_tokens[0]
-                    res_opt = adapter.client.quotes(instrument_tokens=[{"instrument_token": opt_tok, "exchange_segment": "nse_fo"}])
-                    st.write(f"Option Token ({opt_tok}) Response:", res_opt)
-                else:
-                    st.warning("Discover instruments first to check options.")
-            except Exception as dbg_err:
-                st.error(f"API Error: {dbg_err}")
-
         if adapter.last_error:
             st.warning(f"Engine Log: {adapter.last_error}")
 
@@ -2031,12 +2037,11 @@ def main():
     spot_val, fut_val, fut_oi, ticks_count = "-", "-", "-", 0
     if adapter and adapter.latest:
         with adapter.lock:
-            # Fallback check for spot across keys
             s = adapter.latest.get(str(adapter.spot_token), {})
             spot_p = extract_tick_price(s)
             if not is_valid_number(spot_p):
                 for k, v in adapter.latest.items():
-                    if "NIFTY" in str(v.get("display_symbol", "")).upper() and "EQ" not in str(v.get("display_symbol", "")):
+                    if "NIFTY" in str(v.get("display_symbol", "")).upper() and "EQ" not in str(v.get("display_symbol", "")) and "FUT" not in str(v.get("display_symbol", "")):
                         spot_p = extract_tick_price(v)
                         if is_valid_number(spot_p): break
             spot_val = f"{spot_p:.2f}" if is_valid_number(spot_p) else "-"
