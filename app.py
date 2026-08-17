@@ -15,7 +15,7 @@ NIFTY 3-Min Micro Engine | v5.0 Institutional Prop-Grade Architecture
 - Dual Engine: WebSocket + Auto REST Polling Fallback
 - Thread-Safe Shared State Synchronization
 - Traffic Light Heatmap Visuals (Green/Red/Brown)
-- Fixed Nifty Spot Index ("Nifty 50" with isIndex=True) & Dynamic Future Token Resolver
+- Fixed Nifty Spot Index ("Nifty 50" with isIndex=True) & Tightened Future Filter
 """
 
 from __future__ import annotations
@@ -86,7 +86,7 @@ CONFIG = {
     "model_path": "./model/nifty_lgbm_latest.joblib",
     "neo_environment": "prod",
     "nifty_index_name": "Nifty 50",
-    "nifty_spot_token": "Nifty 50",  # Correct Kotak Index Format
+    "nifty_spot_token": "Nifty 50",
     "nifty_future_token": os.getenv("NIFTY_FUT_TOKEN", "").strip(),
     "pcr_strike_count": int(os.getenv("PCR_STRIKE_COUNT", "5")),
     "pcr_strike_step": float(os.getenv("PCR_STRIKE_STEP", "50")),
@@ -1318,7 +1318,7 @@ class PaperTradingDesk:
 
 
 # =========================================================
-# 7. KOTAK NEO ADAPTER & DUAL DATA FEED (CORRECT INDEX SUBSCRIPTION)
+# 7. KOTAK NEO ADAPTER & DUAL DATA FEED (STRICT FUTURE FILTER)
 # =========================================================
 
 class KotakNeoAdapter:
@@ -1441,16 +1441,30 @@ class KotakNeoAdapter:
             futures = []
             for r in records:
                 sym = str(r.get("pTrdSymbol", r.get("ts", r.get("symbol", "")))).upper().strip()
-                if "NIFTY" in sym and "FUT" in sym and "BANK" not in sym and "FIN" not in sym and "MID" not in sym:
+                inst = str(r.get("pInstType", "")).upper()
+                
+                # Strict Tightened Filter as suggested
+                is_nifty_fut = (
+                    "NIFTY" in sym and 
+                    ("FUT" in sym or "FUTIDX" in inst) and
+                    "BANK" not in sym and
+                    "FIN" not in sym and
+                    "MID" not in sym and
+                    "NXT" not in sym and
+                    "IT" not in sym
+                )
+                
+                if is_nifty_fut:
                     exp = expiry_from_record(r)
                     tok = token_from_record(r)
                     if exp and exp.date() >= now_d and tok:
-                        futures.append((exp, tok))
+                        futures.append((exp, tok, sym))
             
             if futures:
                 futures.sort(key=lambda x: x[0])
-                nearest_exp, nearest_tok = futures[0]
-                self.discovery_log.append(f"✓ Auto-Resolved Nifty Future Token: {nearest_tok} (Expiry: {nearest_exp.date()})")
+                nearest_exp, nearest_tok, nearest_sym = futures[0]
+                self.future_symbol = nearest_sym
+                self.discovery_log.append(f"✓ Resolved Nifty Future: {nearest_sym} | Token: {nearest_tok} | Expiry: {nearest_exp.date()}")
                 return nearest_tok
         except Exception as e:
             self.last_error = f"Future resolution error: {e}"
@@ -1469,9 +1483,8 @@ class KotakNeoAdapter:
         self.discovery_log.append("✓ Configured Nifty Spot Index: Nifty 50")
 
         self.future_token = self.resolve_current_nifty_future_token()
-        self.future_symbol = f"NIFTY_FUT ({self.future_token})"
         self.token_to_symbol[self.future_token] = "NIFTY_FUT"
-        self.discovery_log.append(f"✓ Configured Active Future: Token {self.future_token}")
+        self.discovery_log.append(f"✓ Configured Active Future Token: {self.future_token}")
 
         if auto_pcr:
             self.discover_pcr_chain()
@@ -1483,7 +1496,7 @@ class KotakNeoAdapter:
         try:
             if not center_strike or not is_valid_number(center_strike):
                 with self.lock:
-                    spot_tick = self.latest.get(str(self.spot_token), {})
+                    spot_tick = self.latest.get("Nifty 50", {})
                     center_strike = extract_tick_price(spot_tick) or 24500.0
             step = CONFIG["pcr_strike_step"]
             atm = round(center_strike / step) * step
@@ -1539,7 +1552,6 @@ class KotakNeoAdapter:
             return
 
         now_ts = datetime.now()
-        # Correct Kotak Neo API format for Index using isIndex=True
         tokens_to_poll = [
             {"instrument_token": "Nifty 50", "exchange_segment": "nse_cm"},
             {"instrument_token": str(self.future_token), "exchange_segment": "nse_fo"},
@@ -1600,7 +1612,6 @@ class KotakNeoAdapter:
             sub_tokens.append({"instrument_token": str(tok), "exchange_segment": "nse_fo"})
             
         try:
-            # isIndex=True parameter passed correctly for index subscription per Kotak Neo SDK
             self.client.subscribe(instrument_tokens=sub_tokens, isIndex=True)
         except Exception as exc:
             self.last_error = f"Subscribe error: {exc}"
@@ -1702,9 +1713,9 @@ class KotakNeoAdapter:
                 vals = [v for v in vals if is_valid_number(v)]
                 return ticks, vals
 
-            _, spot_prices = _prices(self.spot_token)
+            _, spot_prices = _prices("Nifty 50")
             if not spot_prices:
-                last = extract_tick_price(self.latest.get(str(self.spot_token), {}))
+                last = extract_tick_price(self.latest.get("Nifty 50", {}))
                 spot_o = spot_h = spot_l = spot_c = last
             else:
                 spot_o, spot_h, spot_l, spot_c = spot_prices[0], max(spot_prices), min(spot_prices), spot_prices[-1]
@@ -2041,11 +2052,11 @@ def main():
     if is_streaming and adapter:
         adapter.fetch_market_snapshot()
 
-    # Top Metric Strip (Correct Index Spot Parser via "Nifty 50")
+    # Top Metric Strip (Accurate Nifty Spot & Future Extraction)
     spot_val, fut_val, fut_oi, ticks_count = "-", "-", "-", 0
     if adapter and adapter.latest:
         with adapter.lock:
-            s = adapter.latest.get("Nifty 50", {}) or adapter.latest.get("26000", {})
+            s = adapter.latest.get("Nifty 50", {})
             spot_p = extract_tick_price(s)
             
             if not is_valid_number(spot_p):
@@ -2158,7 +2169,7 @@ def main():
                 return f'color: {color}; font-weight: bold;'
             
             styled_df = df_trades.style.format({"PnL (pt)": "{:+.2f}"}).map(style_pnl, subset=["PnL (pt)"])
-            st.dataframe(styled_df, hide_index=True)
+            st.dataframe(df_trades, hide_index=True)
 
     st.markdown('</div>', unsafe_allow_html=True)
 
