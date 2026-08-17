@@ -12,6 +12,7 @@ NIFTY 3-Min Micro Engine | v5.0 Institutional Prop-Grade Architecture
 - Auto-Reset of Paper Trading State on New Trading Date
 - Live Mark-to-Market (MTM) & Hit-Rate Performance HUD
 - Kotak Historical API Fallback for Daily Range Context
+- Dual Engine: WebSocket + Auto REST Polling Fallback
 - Thread-Safe Shared State Synchronization
 - Traffic Light Heatmap Visuals (Green/Red/Brown)
 """
@@ -328,6 +329,8 @@ def token_from_record(record):
     return ""
 
 def extract_tick_price(tick: Dict[str, Any]) -> float:
+    if not isinstance(tick, dict):
+        return np.nan
     for k in ("ltp", "lp", "c", "iv", "last_price", "last_traded_price", "close", "lastPrice"):
         val = safe_float(tick.get(k))
         if is_valid_number(val) and val > 0:
@@ -1320,7 +1323,7 @@ class PaperTradingDesk:
 
 
 # =========================================================
-# 7. KOTAK NEO ADAPTER & DATA FEED
+# 7. KOTAK NEO ADAPTER & DUAL DATA FEED (WS + REST POLLING)
 # =========================================================
 
 class KotakNeoAdapter:
@@ -1368,10 +1371,6 @@ class KotakNeoAdapter:
 
         self._watchdog_stop = threading.Event()
         self._watchdog_thread: Optional[threading.Thread] = None
-        self._reconnect_attempts = 0
-        self._next_reconnect_ts = 0.0
-        self._max_reconnect_attempts = 5
-        self._backoff_sec = [5, 10, 20, 40, 60]
 
     def on_message(self, message):
         try:
@@ -1399,10 +1398,7 @@ class KotakNeoAdapter:
         self.last_error = str(error)
 
     def on_close(self, message=None):
-        if self.conn_state == "STREAMING":
-            self.conn_state = "DISCONNECTED"
-            self.connected = False
-            self.last_error = f"WebSocket closed: {message}"
+        pass
 
     def on_open(self, message=None):
         self.connected = True
@@ -1429,51 +1425,17 @@ class KotakNeoAdapter:
         self.client.on_error = self.on_error
         self.client.on_close = self.on_close
         self.client.on_open = self.on_open
+        
         step1 = self.client.totp_login(mobile_number=self.mobile, ucc=self.ucc, totp=generate_live_totp(totp))
         if isinstance(step1, dict) and step1.get("error"):
             raise RuntimeError(str(step1))
         step2 = self.client.totp_validate(mpin=self.mpin)
         if isinstance(step2, dict) and step2.get("error"):
             raise RuntimeError(str(step2))
+            
         self.connected = True
         self.conn_state = "AUTHENTICATED"
         return True
-
-    def _can_auto_reconnect(self) -> bool:
-        return is_base32_totp_secret(self.totp)
-
-    def _reset_bar_state(self, reason: str = "reconnect"):
-        with self.lock:
-            self.current_bar_ticks.clear()
-            self.current_bar_time = None
-            self._bar_deadline = None
-            self._last_cum_volume = None
-        self.last_error = f"Bar & volume state cleared ({reason})"
-
-    def try_reconnect_and_resubscribe(self, live_totp_override: str = "") -> bool:
-        self.conn_state = "RECONNECTING"
-        self._reset_bar_state("reconnect")
-        try:
-            self.login(live_totp_override=live_totp_override)
-            ok = self.discover_nifty_instruments(auto_pcr=True)
-            if not ok or not self.future_token:
-                raise RuntimeError("Rediscovery failed: no active future")
-            n = self.subscribe_live_feed()
-            if n <= 0:
-                raise RuntimeError("Subscribe returned 0 instruments")
-            self.fetch_market_snapshot()
-            time.sleep(1.0)
-            self.conn_state = "STREAMING"
-            self.connected = True
-            self._reconnect_attempts = 0
-            self._next_reconnect_ts = 0.0
-            self.last_error = ""
-            return True
-        except Exception as exc:
-            self.last_error = f"Reconnect failed: {exc}"
-            self.conn_state = "DISCONNECTED"
-            self.connected = False
-            return False
 
     def discover_nifty_instruments(self, auto_pcr: bool = True) -> bool:
         if not self.connected or not self.client:
@@ -1486,15 +1448,10 @@ class KotakNeoAdapter:
         self.discovery_log.append("✓ 10 Nifty Heavyweights & Spot Mapped.")
 
         cfg_fut_tok = str(env_or_secret("NIFTY_FUT_TOKEN") or CONFIG.get("nifty_future_token", "53000")).strip()
-        if cfg_fut_tok:
-            self.future_token = cfg_fut_tok
-            self.future_symbol = f"NIFTY_FUT ({cfg_fut_tok})"
-            self.token_to_symbol[self.future_token] = "NIFTY_FUT"
-            self.discovery_log.append(f"✓ Configured Active Future: Token {self.future_token}")
-        else:
-            self.future_token = "53000"
-            self.token_to_symbol[self.future_token] = "NIFTY_FUT"
-            self.discovery_log.append(f"✓ Fallback Future: Token {self.future_token}")
+        self.future_token = cfg_fut_tok if cfg_fut_tok else "53000"
+        self.future_symbol = f"NIFTY_FUT ({self.future_token})"
+        self.token_to_symbol[self.future_token] = "NIFTY_FUT"
+        self.discovery_log.append(f"✓ Configured Active Future: Token {self.future_token}")
 
         if auto_pcr:
             self.discover_pcr_chain()
@@ -1561,31 +1518,42 @@ class KotakNeoAdapter:
         if not self.connected or not self.client:
             return
 
-        # 1. Fetch Spot Index Quote
+        now_ts = datetime.now()
+
+        # 1. Spot Index Quote
         try:
             spot_q = self.client.quotes(instrument_tokens=[{"instrument_token": str(self.spot_token), "exchange_segment": "nse_cm"}], isIndex=True)
-            with self.lock:
-                for r in record_list(spot_q):
-                    tok = token_from_record(r) or str(self.spot_token)
+            for r in record_list(spot_q):
+                tok = str(token_from_record(r) or self.spot_token)
+                r["_parsed_ts"] = now_ts
+                with self.lock:
                     self.latest[tok] = r
+                    self.tick_buffer.append(r)
+                    self._process_live_tick(tok, r)
         except Exception:
             pass
 
-        # 2. Fetch Equity & Future Quotes
-        equity_fo_tokens = []
+        # 2. Futures, Equities & Options Quotes (Live Polling Fallback)
+        tokens_to_poll = []
         if self.future_token:
-            equity_fo_tokens.append({"instrument_token": str(self.future_token), "exchange_segment": "nse_fo"})
+            tokens_to_poll.append({"instrument_token": str(self.future_token), "exchange_segment": "nse_fo"})
         for tok in self.heavy_tokens.values():
-            equity_fo_tokens.append({"instrument_token": str(tok), "exchange_segment": "nse_cm"})
+            tokens_to_poll.append({"instrument_token": str(tok), "exchange_segment": "nse_cm"})
+        for tok in self.pcr_tokens[:10]:
+            tokens_to_poll.append({"instrument_token": str(tok), "exchange_segment": "nse_fo"})
         
         try:
-            res = self.client.quotes(instrument_tokens=equity_fo_tokens, isIndex=False)
+            res = self.client.quotes(instrument_tokens=tokens_to_poll, isIndex=False)
+            recs = record_list(res)
             with self.lock:
-                for r in record_list(res):
-                    tok = token_from_record(r)
+                for r in recs:
+                    tok = str(token_from_record(r))
                     if tok:
+                        r["_parsed_ts"] = now_ts
                         self.latest[tok] = r
-                        if str(tok) == str(self.future_token):
+                        self.tick_buffer.append(r)
+                        self._process_live_tick(tok, r)
+                        if tok == str(self.future_token):
                             pdc = safe_float(r.get("c") or r.get("close") or r.get("pdc"))
                             pdh = safe_float(r.get("h") or r.get("high") or r.get("pdh"))
                             pdl = safe_float(r.get("l") or r.get("low") or r.get("pdl"))
@@ -1595,12 +1563,15 @@ class KotakNeoAdapter:
                             if is_valid_number(open_p):
                                 self.feature_engine.set_today_open(open_p)
         except Exception as exc:
-            self.last_error = f"Quote Fetch Error: {exc}"
+            self.last_error = f"Poll error: {exc}"
 
     def subscribe_live_feed(self) -> int:
         if not self.connected or not self.client:
             raise RuntimeError("Kotak Neo not authenticated.")
         
+        # Dual Fire: Initial REST snapshot immediate load
+        self.fetch_market_snapshot()
+
         sub_tokens = [{"instrument_token": str(self.spot_token), "exchange_segment": "nse_cm"}]
         if self.future_token:
             sub_tokens.append({"instrument_token": str(self.future_token), "exchange_segment": "nse_fo"})
@@ -1835,30 +1806,12 @@ class KotakNeoAdapter:
             while not self._watchdog_stop.is_set():
                 try:
                     self.maybe_flush_bars()
-                    if self._last_tick_wall is not None:
-                        silent = time.time() - self._last_tick_wall
-                        if self.conn_state == "STREAMING" and silent > CONFIG["feed_silence_sec"]:
-                            self.conn_state = "DISCONNECTED"
-                            self.connected = False
-
-                    if self.conn_state == "DISCONNECTED" and self._last_tick_wall is not None:
-                        if not self._can_auto_reconnect():
-                            self._reconnect_attempts = self._max_reconnect_attempts
-                            self._next_reconnect_ts = time.time() + 3600
-                        else:
-                            now = time.time()
-                            if (self._reconnect_attempts < self._max_reconnect_attempts and now >= self._next_reconnect_ts):
-                                ok = self.try_reconnect_and_resubscribe()
-                                if ok:
-                                    self._reconnect_attempts = 0
-                                    self._next_reconnect_ts = 0.0
-                                else:
-                                    delay = self._backoff_sec[min(self._reconnect_attempts, len(self._backoff_sec) - 1)]
-                                    self._reconnect_attempts += 1
-                                    self._next_reconnect_ts = now + delay
+                    if self.conn_state == "STREAMING":
+                        # Continuous Background Polling Fallback ensures non-zero ticks
+                        self.fetch_market_snapshot()
                 except Exception as exc:
                     self.last_error = f"watchdog: {exc}"
-                self._watchdog_stop.wait(1.0)
+                self._watchdog_stop.wait(3.0)
 
         self._watchdog_thread = threading.Thread(target=_loop, name="BarWatchdog", daemon=True)
         self._watchdog_thread.start()
@@ -2024,14 +1977,13 @@ def main():
                 try:
                     with st.spinner("Connecting..."):
                         adapter.login(live_totp_override=user_live_totp)
-                        adapter.start_bar_watchdog()
                         st.session_state.discovered = False
                         st.rerun()
                 except Exception as exc:
                     st.error(f"{exc}")
         with col_sb2:
             if st.button("Reconnect", key="btn_reconn", disabled=not is_logged_in):
-                adapter.try_reconnect_and_resubscribe(live_totp_override=user_live_totp)
+                adapter.login(live_totp_override=user_live_totp)
                 st.rerun()
 
         st.markdown("---")
@@ -2050,9 +2002,9 @@ def main():
 
         is_streaming = (adapter.conn_state == "STREAMING")
         if st.button("Start Live Feed", key="btn_start_feed", disabled=not is_logged_in or is_streaming):
-            with st.spinner("Subscribing & Fetching Quotes..."):
+            with st.spinner("Subscribing & Ingesting Feed..."):
                 adapter.subscribe_live_feed()
-                adapter.fetch_market_snapshot()
+                adapter.start_bar_watchdog()
                 st.session_state.stream_active = True
                 st.rerun()
 
