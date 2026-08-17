@@ -1512,11 +1512,13 @@ class KotakNeoAdapter:
             return
 
         now_ts = datetime.now()
+        
+        # Spot index needs specific exchange segment or index polling handling
         tokens_to_poll = [
-            {"instrument_token": str(self.spot_token), "exchange_segment": "nse_cm"}
+            {"instrument_token": str(self.spot_token), "exchange_segment": "nse_index"},
+            {"instrument_token": str(self.spot_token), "exchange_segment": "nse_cm"},
+            {"instrument_token": str(self.future_token), "exchange_segment": "nse_fo"}
         ]
-        if self.future_token:
-            tokens_to_poll.append({"instrument_token": str(self.future_token), "exchange_segment": "nse_fo"})
         for tok in self.heavy_tokens.values():
             tokens_to_poll.append({"instrument_token": str(tok), "exchange_segment": "nse_cm"})
         for tok in self.pcr_tokens[:10]:
@@ -1552,9 +1554,11 @@ class KotakNeoAdapter:
         
         self.fetch_market_snapshot()
 
-        sub_tokens = [{"instrument_token": str(self.spot_token), "exchange_segment": "nse_cm"}]
-        if self.future_token:
-            sub_tokens.append({"instrument_token": str(self.future_token), "exchange_segment": "nse_fo"})
+        sub_tokens = [
+            {"instrument_token": str(self.spot_token), "exchange_segment": "nse_index"},
+            {"instrument_token": str(self.spot_token), "exchange_segment": "nse_cm"},
+            {"instrument_token": str(self.future_token), "exchange_segment": "nse_fo"}
+        ]
         for tok in self.heavy_tokens.values():
             sub_tokens.append({"instrument_token": str(tok), "exchange_segment": "nse_cm"})
         for tok in self.pcr_tokens:
@@ -2001,7 +2005,7 @@ def main():
     if is_streaming and adapter:
         adapter.fetch_market_snapshot()
 
-    # Top Metric Strip (Fixed to match exchange_token & ltp keys)
+    # Top Metric Strip
     spot_val, fut_val, fut_oi, ticks_count = "-", "-", "-", 0
     if adapter and adapter.latest:
         with adapter.lock:
