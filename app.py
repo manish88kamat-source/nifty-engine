@@ -327,6 +327,13 @@ def token_from_record(record):
             return str(value).strip()
     return ""
 
+def extract_tick_price(tick: Dict[str, Any]) -> float:
+    for k in ("ltp", "lp", "c", "iv", "last_price", "last_traded_price", "close", "lastPrice"):
+        val = safe_float(tick.get(k))
+        if is_valid_number(val) and val > 0:
+            return val
+    return np.nan
+
 def record_list(response):
     if isinstance(response, list):
         return response
@@ -530,7 +537,7 @@ class OptionChainEngine:
         atm_pe = safe_float(chain.get("pe_oi_atm"), 0.0)
         atm_sum = atm_ce + atm_pe
         atm_imbalance = (atm_pe - atm_ce) / (atm_sum + 1e-5) if atm_sum > 0 else 0.0
-        atm_strike = safe_float(chain.get("atm_strike"), round(spot_price / 50.0) * 50.0 if spot_price > 0 else 24000.0)
+        atm_strike = safe_float(chain.get("atm_strike"), round(spot_price / 50.0) * 50.0 if spot_price > 0 else 24500.0)
 
         exp_dt = chain.get("active_expiry")
         if isinstance(exp_dt, datetime):
@@ -1500,7 +1507,7 @@ class KotakNeoAdapter:
             if not center_strike or not is_valid_number(center_strike):
                 with self.lock:
                     spot_tick = self.latest.get(self.spot_token, {})
-                    center_strike = safe_float(spot_tick.get("ltp") or spot_tick.get("lp") or spot_tick.get("c") or spot_tick.get("iv"), 24500.0)
+                    center_strike = extract_tick_price(spot_tick) or 24500.0
             step = CONFIG["pcr_strike_step"]
             atm = round(center_strike / step) * step
             count = CONFIG["pcr_strike_count"]
@@ -1554,17 +1561,17 @@ class KotakNeoAdapter:
         if not self.connected or not self.client:
             return
 
-        # 1. Fetch Spot Index separately
+        # 1. Fetch Spot Index Quote
         try:
             spot_q = self.client.quotes(instrument_tokens=[{"instrument_token": str(self.spot_token), "exchange_segment": "nse_cm"}], isIndex=True)
             with self.lock:
                 for r in record_list(spot_q):
-                    tok = token_from_record(r) or self.spot_token
+                    tok = token_from_record(r) or str(self.spot_token)
                     self.latest[tok] = r
         except Exception:
             pass
 
-        # 2. Fetch Futures & Equities separately
+        # 2. Fetch Equity & Future Quotes
         equity_fo_tokens = []
         if self.future_token:
             equity_fo_tokens.append({"instrument_token": str(self.future_token), "exchange_segment": "nse_fo"})
@@ -1594,30 +1601,22 @@ class KotakNeoAdapter:
         if not self.connected or not self.client:
             raise RuntimeError("Kotak Neo not authenticated.")
         
-        # Subscribe Spot Index
+        sub_tokens = [{"instrument_token": str(self.spot_token), "exchange_segment": "nse_cm"}]
+        if self.future_token:
+            sub_tokens.append({"instrument_token": str(self.future_token), "exchange_segment": "nse_fo"})
+        for tok in self.heavy_tokens.values():
+            sub_tokens.append({"instrument_token": str(tok), "exchange_segment": "nse_cm"})
+        for tok in self.pcr_tokens:
+            sub_tokens.append({"instrument_token": str(tok), "exchange_segment": "nse_fo"})
+            
         try:
-            self.client.subscribe(instrument_tokens=[{"instrument_token": str(self.spot_token), "exchange_segment": "nse_cm"}], isIndex=True)
+            self.client.subscribe(instrument_tokens=sub_tokens)
         except Exception:
             pass
 
-        # Subscribe Equities, Futures & Options
-        other_tokens = []
-        if self.future_token:
-            other_tokens.append({"instrument_token": str(self.future_token), "exchange_segment": "nse_fo"})
-        for tok in self.heavy_tokens.values():
-            other_tokens.append({"instrument_token": str(tok), "exchange_segment": "nse_cm"})
-        for tok in self.pcr_tokens:
-            other_tokens.append({"instrument_token": str(tok), "exchange_segment": "nse_fo"})
-            
-        if other_tokens:
-            try:
-                self.client.subscribe(instrument_tokens=other_tokens, isIndex=False)
-            except Exception:
-                pass
-
         self.conn_state = "STREAMING"
         self._last_tick_wall = time.time()
-        return len(other_tokens) + 1
+        return len(sub_tokens)
 
     def _process_live_tick(self, token: str, tick: Dict[str, Any]):
         ts = tick.get("_parsed_ts") or parse_tick_timestamp(tick)
@@ -1708,23 +1707,23 @@ class KotakNeoAdapter:
 
             def _prices(token):
                 ticks = [t for t in self.current_bar_ticks if str(t.get("tk") or t.get("token")) == str(token)]
-                vals = [safe_float(t.get("ltp") or t.get("lp") or t.get("c") or t.get("iv")) for t in ticks]
+                vals = [extract_tick_price(t) for t in ticks]
                 vals = [v for v in vals if is_valid_number(v)]
                 return ticks, vals
 
             _, spot_prices = _prices(self.spot_token)
             if not spot_prices:
-                last = safe_float(self.latest.get(self.spot_token, {}).get("ltp") or self.latest.get(self.spot_token, {}).get("lp") or self.latest.get(self.spot_token, {}).get("iv"), np.nan)
+                last = extract_tick_price(self.latest.get(str(self.spot_token), {}))
                 spot_o = spot_h = spot_l = spot_c = last
             else:
                 spot_o, spot_h, spot_l, spot_c = spot_prices[0], max(spot_prices), min(spot_prices), spot_prices[-1]
 
             fut_ticks, fut_prices = _prices(self.future_token)
             if not fut_prices:
-                last = safe_float(self.latest.get(self.future_token, {}).get("ltp") or self.latest.get(self.future_token, {}).get("lp"), spot_c)
+                last = extract_tick_price(self.latest.get(str(self.future_token), {})) or spot_c
                 fut_o = fut_h = fut_l = fut_c = last
                 fut_vol = np.nan
-                fut_oi = safe_float(self.latest.get(self.future_token, {}).get("oi"), np.nan)
+                fut_oi = safe_float(self.latest.get(str(self.future_token), {}).get("oi"), np.nan)
                 l2_snap = {}
             else:
                 fut_o, fut_h, fut_l, fut_c = fut_prices[0], max(fut_prices), min(fut_prices), fut_prices[-1]
@@ -1747,7 +1746,7 @@ class KotakNeoAdapter:
                 age = abs((bar_end - qts).total_seconds()) if isinstance(qts, datetime) else 9999
                 if age > CONFIG["hw_max_quote_age_sec"]:
                     continue
-                c_val = safe_float(t.get("ltp") or t.get("lp") or t.get("c"))
+                c_val = extract_tick_price(t)
                 o_val = safe_float(t.get("o") or t.get("open"), c_val)
                 hw_snap[sym] = {"o": o_val, "c": c_val, "vwap": safe_float(t.get("vwap"), c_val)}
 
@@ -2069,9 +2068,13 @@ def main():
     if adapter and adapter.latest:
         with adapter.lock:
             s = adapter.latest.get(str(adapter.spot_token), {})
-            spot_val = s.get("ltp") or s.get("lp") or s.get("c") or s.get("iv") or "-"
+            spot_p = extract_tick_price(s)
+            spot_val = f"{spot_p:.2f}" if is_valid_number(spot_p) else "-"
+            
             f = adapter.latest.get(str(adapter.future_token), {})
-            fut_val = f.get("ltp") or f.get("lp") or f.get("c") or "-"
+            fut_p = extract_tick_price(f)
+            fut_val = f"{fut_p:.2f}" if is_valid_number(fut_p) else "-"
+            
             fut_oi = f.get("oi") or f.get("open_interest", "-")
             ticks_count = len(adapter.tick_buffer)
 
@@ -2227,8 +2230,8 @@ def main():
                 for sym in HEAVYWEIGHTS_TOP5.keys():
                     tok = str(adapter.heavy_tokens.get(sym))
                     t = adapter.latest.get(tok, {})
-                    ltp = safe_float(t.get("ltp") or t.get("lp") or t.get("c"))
-                    hw_list.append({"Symbol": sym, "LTP": ltp, "Weight": f"{HEAVYWEIGHTS_TOP5.get(sym, 0)*100:.1f}%"})
+                    ltp = extract_tick_price(t)
+                    hw_list.append({"Symbol": sym, "LTP": f"₹{ltp:.2f}" if is_valid_number(ltp) else "-", "Weight": f"{HEAVYWEIGHTS_TOP5.get(sym, 0)*100:.1f}%"})
             st.dataframe(pd.DataFrame(hw_list), height=210, hide_index=True)
         else:
             st.caption("Heavyweights mapping pending discovery...")
