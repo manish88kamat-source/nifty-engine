@@ -163,7 +163,7 @@ def generate_live_totp(secret_or_otp: str) -> str:
 def normalize_kotak_mobile(value: str) -> str:
     raw = str(value or "").strip()
     if not raw:
-        raise ValueError("KOTAK_MOBILE is empty.")
+        return ""
     digits = "".join(ch for ch in raw if ch.isdigit())
     if digits.startswith("00"):
         digits = digits[2:]
@@ -172,9 +172,9 @@ def normalize_kotak_mobile(value: str) -> str:
     elif len(digits) == 10:
         national = digits
     else:
-        raise ValueError("Invalid KOTAK_MOBILE. Use 10-digit Indian mobile number.")
+        return raw
     if len(national) != 10 or national[0] not in "6789":
-        raise ValueError("KOTAK_MOBILE is not a valid Indian mobile number.")
+        return raw
     return "+91" + national
 
 def is_base32_totp_secret(value: str) -> bool:
@@ -1417,12 +1417,21 @@ class KotakNeoAdapter:
     def login(self, live_totp_override=""):
         if NeoAPI is None:
             raise RuntimeError("neo_api_client missing. Install official Kotak Neo API v2 package.")
+        
+        # Fresh credentials lookup on demand
+        self.consumer_key = env_or_secret("KOTAK_CONSUMER_KEY")
+        self.mobile = normalize_kotak_mobile(env_or_secret("KOTAK_MOBILE"))
+        self.ucc = env_or_secret("KOTAK_UCC")
+        self.totp = env_or_secret("KOTAK_TOTP")
+        self.mpin = env_or_secret("KOTAK_MPIN")
+
         totp = (live_totp_override or "").strip() or self.totp
         required = {"KOTAK_CONSUMER_KEY": self.consumer_key, "KOTAK_MOBILE": self.mobile,
                     "KOTAK_UCC": self.ucc, "TOTP": totp, "KOTAK_MPIN": self.mpin}
         missing = [k for k, v in required.items() if not v]
         if missing:
             raise RuntimeError("Missing credentials: " + ", ".join(missing))
+            
         self.client = NeoAPI(environment=CONFIG["neo_environment"], access_token=None, neo_fin_key=None, consumer_key=self.consumer_key)
         self.client.on_message = self.on_message
         self.client.on_error = self.on_error
@@ -1746,6 +1755,7 @@ class KotakNeoAdapter:
                 last_fut_t = fut_ticks[-1]
                 fut_oi = safe_float(last_fut_t.get("oi") or last_fut_t.get("open_interest"), np.nan)
                 
+                # Extract L2 Depth Quotes
                 l2_snap = {
                     "best_bid": safe_float(last_fut_t.get("bp") or last_fut_t.get("bid_price"), fut_c),
                     "best_ask": safe_float(last_fut_t.get("ap") or last_fut_t.get("ask_price"), fut_c),
@@ -2253,4 +2263,11 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    if st is not None and hasattr(st, "runtime") and st.runtime.exists():
+        main()
+    else:
+        print("⚡ Running Institutional Prop-Engine Verification & Backtest Hooks...")
+        if run_unit_tests():
+            print("✓ All 5 Quant Engines Verified (Kalman, Greeks, Heavyweights, OBI, GEX).")
+        else:
+            raise RuntimeError("Engine Verification Failed.")
