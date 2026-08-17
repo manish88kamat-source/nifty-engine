@@ -1318,7 +1318,7 @@ class PaperTradingDesk:
 
 
 # =========================================================
-# 7. KOTAK NEO ADAPTER & DUAL DATA FEED (FIXED SPOT & FUT)
+# 7. KOTAK NEO ADAPTER & DUAL DATA FEED (UNIVERSAL SPOT FIX)
 # =========================================================
 
 class KotakNeoAdapter:
@@ -1557,13 +1557,18 @@ class KotakNeoAdapter:
             with self.lock:
                 for r in recs:
                     tok = token_from_record(r)
+                    sym_name = str(r.get("display_symbol", "")).upper()
+                    
+                    if not tok and ("NIFTY" in sym_name and "EQ" not in sym_name and "FUT" not in sym_name):
+                        tok = str(self.spot_token)
+                        
                     if tok:
                         r["_parsed_ts"] = now_ts
                         self.latest[tok] = r
                         self.tick_buffer.append(r)
                         self._process_live_tick(tok, r)
                         
-                        if tok == str(self.spot_token) or tok == "99926000" or "NIFTY 50" in str(r.get("display_symbol", "")):
+                        if tok == str(self.spot_token) or tok == "99926000" or ("NIFTY" in sym_name and "FUT" not in sym_name and "EQ" not in sym_name):
                             self.latest[str(self.spot_token)] = r
                         
                         if tok == str(self.future_token):
