@@ -1476,38 +1476,44 @@ class KotakNeoAdapter:
         self.token_to_symbol[self.spot_token] = "NIFTY_SPOT"
         self.discovery_log.append("✓ 10 Nifty Heavyweights (Top 5 Focused) & Spot Mapped.")
 
-        # Strict Regex for Pure NIFTY 50 Futures (e.g. NIFTY26AUGFUT or NIFTY26818FUT)
-        # Rejects NIFTYFPI, FINNIFTY, BANKNIFTY, MIDCPNIFTY, NIFTYIT, etc.
-        nifty_fut_pattern = re.compile(r"^NIFTY\d{2}[A-Z0-9]+FUT$", re.IGNORECASE)
-
-        try:
-            res = self.client.search_scrip(exchange_segment="nse_fo", symbol="NIFTY")
-            records = record_list(res)
-            future_candidates = []
-            now_d = datetime.now().date()
-            for r in records:
-                sym = str(r.get("pTrdSymbol", r.get("ts", r.get("symbol", "")))).upper().strip()
-                inst_type = str(r.get("pInstType", r.get("instrument_type", ""))).upper().strip()
-                
-                if nifty_fut_pattern.match(sym) or (sym.startswith("NIFTY") and ("FUT" in sym or "FUTIDX" in inst_type) and not any(x in sym for x in ["FPI", "FIN", "BANK", "MID", "IT", "AUTO", "MEDIA", "PHARMA"])):
-                    exp = expiry_from_record(r)
-                    tok = token_from_record(r)
-                    if tok and exp and exp.date() >= now_d:
-                        future_candidates.append((exp, tok, sym))
-            
-            if future_candidates:
-                future_candidates.sort(key=lambda x: x[0])
-                self.future_expiry, self.future_token, self.future_symbol = future_candidates[0]
-                self.token_to_symbol[self.future_token] = "NIFTY_FUT"
-                self.discovery_log.append(f"✓ Active Future: {self.future_symbol} ({self.future_token})")
-            else:
-                self.future_token = CONFIG.get("nifty_future_token", "45450")
-                self.token_to_symbol[self.future_token] = "NIFTY_FUT"
-                self.discovery_log.append(f"✓ Future Fallback: Token {self.future_token}")
-        except Exception as exc:
-            self.future_token = CONFIG.get("nifty_future_token", "45450")
+        # Priority 1: Pick explicitly configured token from Secrets / Env if present
+        cfg_fut_tok = str(env_or_secret("NIFTY_FUT_TOKEN") or CONFIG.get("nifty_future_token", "")).strip()
+        if cfg_fut_tok:
+            self.future_token = cfg_fut_tok
+            self.future_symbol = f"NIFTY_FUT ({cfg_fut_tok})"
             self.token_to_symbol[self.future_token] = "NIFTY_FUT"
-            self.discovery_log.append(f"✓ Configured Future Token: {self.future_token}")
+            self.discovery_log.append(f"✓ Configured Active Future: Token {self.future_token}")
+        else:
+            # Priority 2: Strict Regex Match ONLY for NIFTY 50 (e.g. NIFTY26AUGFUT)
+            nifty_fut_pattern = re.compile(r"^NIFTY\d{2}[A-Z0-9]+FUT$", re.IGNORECASE)
+            try:
+                res = self.client.search_scrip(exchange_segment="nse_fo", symbol="NIFTY")
+                records = record_list(res)
+                future_candidates = []
+                now_d = datetime.now().date()
+                for r in records:
+                    sym = str(r.get("pTrdSymbol", r.get("ts", r.get("symbol", "")))).upper().strip()
+                    inst_type = str(r.get("pInstType", r.get("instrument_type", ""))).upper().strip()
+                    
+                    if nifty_fut_pattern.match(sym) and not any(x in sym for x in ["NXT", "FPI", "FIN", "BANK", "MID", "IT", "AUTO"]):
+                        exp = expiry_from_record(r)
+                        tok = token_from_record(r)
+                        if tok and exp and exp.date() >= now_d:
+                            future_candidates.append((exp, tok, sym))
+                
+                if future_candidates:
+                    future_candidates.sort(key=lambda x: x[0])
+                    self.future_expiry, self.future_token, self.future_symbol = future_candidates[0]
+                    self.token_to_symbol[self.future_token] = "NIFTY_FUT"
+                    self.discovery_log.append(f"✓ Active Future: {self.future_symbol} ({self.future_token})")
+                else:
+                    self.future_token = "53000"
+                    self.token_to_symbol[self.future_token] = "NIFTY_FUT"
+                    self.discovery_log.append(f"✓ Configured Future Token: {self.future_token}")
+            except Exception:
+                self.future_token = "53000"
+                self.token_to_symbol[self.future_token] = "NIFTY_FUT"
+                self.discovery_log.append(f"✓ Fallback Future Token: {self.future_token}")
 
         if auto_pcr:
             self.discover_pcr_chain()
@@ -1535,7 +1541,7 @@ class KotakNeoAdapter:
             valid_expiries = []
             for r in records:
                 sym = str(r.get("pTrdSymbol", r.get("ts", r.get("symbol", "")))).upper().strip()
-                if not nifty_opt_pattern.match(sym) and any(x in sym for x in ["FPI", "FIN", "BANK", "MID", "IT"]):
+                if not nifty_opt_pattern.match(sym) and any(x in sym for x in ["NXT", "FPI", "FIN", "BANK", "MID", "IT"]):
                     continue
                 op_type = option_type_from_record(r)
                 if op_type in ("CE", "PE"):
@@ -1552,7 +1558,7 @@ class KotakNeoAdapter:
             discovered = []
             for r in records:
                 sym = str(r.get("pTrdSymbol", r.get("ts", r.get("symbol", "")))).upper().strip()
-                if not nifty_opt_pattern.match(sym) and any(x in sym for x in ["FPI", "FIN", "BANK", "MID", "IT"]):
+                if not nifty_opt_pattern.match(sym) and any(x in sym for x in ["NXT", "FPI", "FIN", "BANK", "MID", "IT"]):
                     continue
                 exp = expiry_from_record(r)
                 strike = strike_from_record(r)
