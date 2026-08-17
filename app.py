@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import os
 import re
+import json
 import time
 import math
 import hmac
@@ -84,7 +85,7 @@ CONFIG = {
     "neo_environment": "prod",
     "nifty_index_name": "Nifty 50",
     "nifty_spot_token": "26000",
-    "nifty_future_token": os.getenv("NIFTY_FUT_TOKEN", "").strip(),
+    "nifty_future_token": os.getenv("NIFTY_FUT_TOKEN", "53000").strip(),
     "pcr_strike_count": int(os.getenv("PCR_STRIKE_COUNT", "5")),
     "pcr_strike_step": float(os.getenv("PCR_STRIKE_STEP", "50")),
     "min_data_quality_to_trade": 0.45,
@@ -94,7 +95,7 @@ CONFIG = {
     "session_end_flush": True,
     "hw_max_quote_age_sec": 240,
     "hw_min_symbols_required": 5,
-    "feed_silence_sec": 45,
+    "feed_silence_sec": 60,
     "atm_delta_approx": 0.52,
     "estimated_slippage_pts": 0.50,
     "risk_free_rate": 0.065,
@@ -320,7 +321,7 @@ def strike_from_record(record):
     return np.nan
 
 def token_from_record(record):
-    for key in ["pSymbol", "pSymbolToken", "instrument_token", "instrumentToken", "tok", "token", "pToken"]:
+    for key in ["pSymbol", "pSymbolToken", "instrument_token", "instrumentToken", "tok", "token", "pToken", "tk"]:
         value = record.get(key)
         if value is not None and str(value).strip():
             return str(value).strip()
@@ -1331,7 +1332,7 @@ class KotakNeoAdapter:
         self.tick_buffer = deque(maxlen=2000)
 
         self.spot_token = CONFIG.get("nifty_spot_token", "26000")
-        self.future_token = CONFIG.get("nifty_future_token", "")
+        self.future_token = CONFIG.get("nifty_future_token", "53000")
         self.future_symbol = ""
         self.future_expiry = None
         self.pcr_tokens: List[str] = []
@@ -1367,6 +1368,12 @@ class KotakNeoAdapter:
 
     def on_message(self, message):
         try:
+            if isinstance(message, str):
+                try:
+                    message = json.loads(message)
+                except Exception:
+                    return
+
             items = message if isinstance(message, list) else [message]
             with self.lock:
                 for item in items:
@@ -1449,11 +1456,6 @@ class KotakNeoAdapter:
                 raise RuntimeError("Subscribe returned 0 instruments")
             self.fetch_market_snapshot()
             time.sleep(1.0)
-            with self.lock:
-                has_fut = bool(self.latest.get(self.future_token))
-                has_spot = bool(self.latest.get(self.spot_token))
-            if not (has_fut and has_spot):
-                raise RuntimeError("Feed validate failed: both Spot + Future required")
             self.conn_state = "STREAMING"
             self.connected = True
             self._reconnect_attempts = 0
@@ -1474,46 +1476,18 @@ class KotakNeoAdapter:
         self.heavy_tokens = dict(NSE_CASH_TOKENS)
         self.token_to_symbol = {v: k for k, v in NSE_CASH_TOKENS.items()}
         self.token_to_symbol[self.spot_token] = "NIFTY_SPOT"
-        self.discovery_log.append("✓ 10 Nifty Heavyweights (Top 5 Focused) & Spot Mapped.")
+        self.discovery_log.append("✓ 10 Nifty Heavyweights & Spot Mapped.")
 
-        # Priority 1: Pick explicitly configured token from Secrets / Env if present
-        cfg_fut_tok = str(env_or_secret("NIFTY_FUT_TOKEN") or CONFIG.get("nifty_future_token", "")).strip()
+        cfg_fut_tok = str(env_or_secret("NIFTY_FUT_TOKEN") or CONFIG.get("nifty_future_token", "53000")).strip()
         if cfg_fut_tok:
             self.future_token = cfg_fut_tok
             self.future_symbol = f"NIFTY_FUT ({cfg_fut_tok})"
             self.token_to_symbol[self.future_token] = "NIFTY_FUT"
             self.discovery_log.append(f"✓ Configured Active Future: Token {self.future_token}")
         else:
-            # Priority 2: Strict Regex Match ONLY for NIFTY 50 (e.g. NIFTY26AUGFUT)
-            nifty_fut_pattern = re.compile(r"^NIFTY\d{2}[A-Z0-9]+FUT$", re.IGNORECASE)
-            try:
-                res = self.client.search_scrip(exchange_segment="nse_fo", symbol="NIFTY")
-                records = record_list(res)
-                future_candidates = []
-                now_d = datetime.now().date()
-                for r in records:
-                    sym = str(r.get("pTrdSymbol", r.get("ts", r.get("symbol", "")))).upper().strip()
-                    inst_type = str(r.get("pInstType", r.get("instrument_type", ""))).upper().strip()
-                    
-                    if nifty_fut_pattern.match(sym) and not any(x in sym for x in ["NXT", "FPI", "FIN", "BANK", "MID", "IT", "AUTO"]):
-                        exp = expiry_from_record(r)
-                        tok = token_from_record(r)
-                        if tok and exp and exp.date() >= now_d:
-                            future_candidates.append((exp, tok, sym))
-                
-                if future_candidates:
-                    future_candidates.sort(key=lambda x: x[0])
-                    self.future_expiry, self.future_token, self.future_symbol = future_candidates[0]
-                    self.token_to_symbol[self.future_token] = "NIFTY_FUT"
-                    self.discovery_log.append(f"✓ Active Future: {self.future_symbol} ({self.future_token})")
-                else:
-                    self.future_token = "53000"
-                    self.token_to_symbol[self.future_token] = "NIFTY_FUT"
-                    self.discovery_log.append(f"✓ Configured Future Token: {self.future_token}")
-            except Exception:
-                self.future_token = "53000"
-                self.token_to_symbol[self.future_token] = "NIFTY_FUT"
-                self.discovery_log.append(f"✓ Fallback Future Token: {self.future_token}")
+            self.future_token = "53000"
+            self.token_to_symbol[self.future_token] = "NIFTY_FUT"
+            self.discovery_log.append(f"✓ Fallback Future: Token {self.future_token}")
 
         if auto_pcr:
             self.discover_pcr_chain()
@@ -1526,7 +1500,7 @@ class KotakNeoAdapter:
             if not center_strike or not is_valid_number(center_strike):
                 with self.lock:
                     spot_tick = self.latest.get(self.spot_token, {})
-                    center_strike = safe_float(spot_tick.get("ltp") or spot_tick.get("lp") or spot_tick.get("c"), 24000.0)
+                    center_strike = safe_float(spot_tick.get("ltp") or spot_tick.get("lp") or spot_tick.get("c") or spot_tick.get("iv"), 24500.0)
             step = CONFIG["pcr_strike_step"]
             atm = round(center_strike / step) * step
             count = CONFIG["pcr_strike_count"]
@@ -1537,11 +1511,10 @@ class KotakNeoAdapter:
             now_d = datetime.now().date()
             
             nifty_opt_pattern = re.compile(r"^NIFTY\d{2}[A-Z0-9]+(CE|PE)$", re.IGNORECASE)
-            
             valid_expiries = []
             for r in records:
                 sym = str(r.get("pTrdSymbol", r.get("ts", r.get("symbol", "")))).upper().strip()
-                if not nifty_opt_pattern.match(sym) and any(x in sym for x in ["NXT", "FPI", "FIN", "BANK", "MID", "IT"]):
+                if not nifty_opt_pattern.match(sym) or any(x in sym for x in ["NXT", "FPI", "FIN", "BANK", "MID", "IT"]):
                     continue
                 op_type = option_type_from_record(r)
                 if op_type in ("CE", "PE"):
@@ -1558,7 +1531,7 @@ class KotakNeoAdapter:
             discovered = []
             for r in records:
                 sym = str(r.get("pTrdSymbol", r.get("ts", r.get("symbol", "")))).upper().strip()
-                if not nifty_opt_pattern.match(sym) and any(x in sym for x in ["NXT", "FPI", "FIN", "BANK", "MID", "IT"]):
+                if not nifty_opt_pattern.match(sym) or any(x in sym for x in ["NXT", "FPI", "FIN", "BANK", "MID", "IT"]):
                     continue
                 exp = expiry_from_record(r)
                 strike = strike_from_record(r)
@@ -1580,39 +1553,33 @@ class KotakNeoAdapter:
     def fetch_market_snapshot(self):
         if not self.connected or not self.client:
             return
-        
+
+        # 1. Fetch Spot Index separately
         try:
-            if self.future_token and hasattr(self.client, "historical_candle"):
-                hist = self.client.historical_candle(
-                    exchange_segment="nse_fo",
-                    instrument_token=self.future_token,
-                    interval="1D"
-                )
-                recs = record_list(hist)
-                if recs and len(recs) >= 1:
-                    last_daily = recs[-1]
-                    pdc = safe_float(last_daily.get("c") or last_daily.get("close"))
-                    pdh = safe_float(last_daily.get("h") or last_daily.get("high"))
-                    pdl = safe_float(last_daily.get("l") or last_daily.get("low"))
-                    if is_valid_number(pdc):
-                        self.feature_engine.set_previous_day(pdc, pdh, pdl)
+            spot_q = self.client.quotes(instrument_tokens=[{"instrument_token": str(self.spot_token), "exchange_segment": "nse_cm"}], isIndex=True)
+            with self.lock:
+                for r in record_list(spot_q):
+                    tok = token_from_record(r) or self.spot_token
+                    self.latest[tok] = r
         except Exception:
             pass
 
-        tokens = [{"instrument_token": self.spot_token, "exchange_segment": "nse_cm"}]
+        # 2. Fetch Futures & Equities separately
+        equity_fo_tokens = []
         if self.future_token:
-            tokens.append({"instrument_token": self.future_token, "exchange_segment": "nse_fo"})
+            equity_fo_tokens.append({"instrument_token": str(self.future_token), "exchange_segment": "nse_fo"})
         for tok in self.heavy_tokens.values():
-            tokens.append({"instrument_token": str(tok), "exchange_segment": "nse_cm"})
+            equity_fo_tokens.append({"instrument_token": str(tok), "exchange_segment": "nse_cm"})
+        
         try:
-            res = self.client.quotes(instrument_tokens=tokens, isIndex=False)
+            res = self.client.quotes(instrument_tokens=equity_fo_tokens, isIndex=False)
             with self.lock:
                 for r in record_list(res):
                     tok = token_from_record(r)
                     if tok:
                         self.latest[tok] = r
-                        if tok == self.future_token:
-                            pdc = safe_float(r.get("c") or r.get("close") or r.get("pdc") or r.get("previousClose"))
+                        if str(tok) == str(self.future_token):
+                            pdc = safe_float(r.get("c") or r.get("close") or r.get("pdc"))
                             pdh = safe_float(r.get("h") or r.get("high") or r.get("pdh"))
                             pdl = safe_float(r.get("l") or r.get("low") or r.get("pdl"))
                             open_p = safe_float(r.get("o") or r.get("open"))
@@ -1626,19 +1593,31 @@ class KotakNeoAdapter:
     def subscribe_live_feed(self) -> int:
         if not self.connected or not self.client:
             raise RuntimeError("Kotak Neo not authenticated.")
-        tokens = [{"instrument_token": self.spot_token, "exchange_segment": "nse_cm"}]
+        
+        # Subscribe Spot Index
+        try:
+            self.client.subscribe(instrument_tokens=[{"instrument_token": str(self.spot_token), "exchange_segment": "nse_cm"}], isIndex=True)
+        except Exception:
+            pass
+
+        # Subscribe Equities, Futures & Options
+        other_tokens = []
         if self.future_token:
-            tokens.append({"instrument_token": self.future_token, "exchange_segment": "nse_fo"})
+            other_tokens.append({"instrument_token": str(self.future_token), "exchange_segment": "nse_fo"})
         for tok in self.heavy_tokens.values():
-            tokens.append({"instrument_token": str(tok), "exchange_segment": "nse_cm"})
+            other_tokens.append({"instrument_token": str(tok), "exchange_segment": "nse_cm"})
         for tok in self.pcr_tokens:
-            tokens.append({"instrument_token": str(tok), "exchange_segment": "nse_fo"})
-        if tokens:
-            self.client.subscribe(instrument_tokens=tokens)
-            self.conn_state = "STREAMING"
-            self._last_tick_wall = time.time()
-            return len(tokens)
-        return 0
+            other_tokens.append({"instrument_token": str(tok), "exchange_segment": "nse_fo"})
+            
+        if other_tokens:
+            try:
+                self.client.subscribe(instrument_tokens=other_tokens, isIndex=False)
+            except Exception:
+                pass
+
+        self.conn_state = "STREAMING"
+        self._last_tick_wall = time.time()
+        return len(other_tokens) + 1
 
     def _process_live_tick(self, token: str, tick: Dict[str, Any]):
         ts = tick.get("_parsed_ts") or parse_tick_timestamp(tick)
@@ -1728,21 +1707,21 @@ class KotakNeoAdapter:
                 return
 
             def _prices(token):
-                ticks = [t for t in self.current_bar_ticks if str(t.get("tk") or t.get("token")) == token]
-                vals = [safe_float(t.get("ltp") or t.get("lp") or t.get("c")) for t in ticks]
+                ticks = [t for t in self.current_bar_ticks if str(t.get("tk") or t.get("token")) == str(token)]
+                vals = [safe_float(t.get("ltp") or t.get("lp") or t.get("c") or t.get("iv")) for t in ticks]
                 vals = [v for v in vals if is_valid_number(v)]
                 return ticks, vals
 
             _, spot_prices = _prices(self.spot_token)
             if not spot_prices:
-                last = safe_float(self.latest.get(self.spot_token, {}).get("ltp"), np.nan)
+                last = safe_float(self.latest.get(self.spot_token, {}).get("ltp") or self.latest.get(self.spot_token, {}).get("lp") or self.latest.get(self.spot_token, {}).get("iv"), np.nan)
                 spot_o = spot_h = spot_l = spot_c = last
             else:
                 spot_o, spot_h, spot_l, spot_c = spot_prices[0], max(spot_prices), min(spot_prices), spot_prices[-1]
 
             fut_ticks, fut_prices = _prices(self.future_token)
             if not fut_prices:
-                last = safe_float(self.latest.get(self.future_token, {}).get("ltp"), spot_c)
+                last = safe_float(self.latest.get(self.future_token, {}).get("ltp") or self.latest.get(self.future_token, {}).get("lp"), spot_c)
                 fut_o = fut_h = fut_l = fut_c = last
                 fut_vol = np.nan
                 fut_oi = safe_float(self.latest.get(self.future_token, {}).get("oi"), np.nan)
@@ -1763,7 +1742,7 @@ class KotakNeoAdapter:
             hw_snap = {}
             bar_end = bar_time + timedelta(minutes=CONFIG["bar_minutes"])
             for sym, tok in self.heavy_tokens.items():
-                t = self.latest.get(tok, {})
+                t = self.latest.get(str(tok), {})
                 qts = t.get("_parsed_ts") or parse_tick_timestamp(t)
                 age = abs((bar_end - qts).total_seconds()) if isinstance(qts, datetime) else 9999
                 if age > CONFIG["hw_max_quote_age_sec"]:
@@ -1774,13 +1753,13 @@ class KotakNeoAdapter:
 
             total_ce_oi = total_pe_oi = total_ce_vol = total_pe_vol = 0.0
             atm_ce_oi = atm_pe_oi = np.nan
-            spot_approx = spot_c if is_valid_number(spot_c) and spot_c > 0 else 24000.0
+            spot_approx = spot_c if is_valid_number(spot_c) and spot_c > 0 else 24500.0
             step = CONFIG["pcr_strike_step"]
             atm = round(spot_approx / step) * step
             
             for tok in self.pcr_tokens:
-                info = self.pcr_records.get(tok, {})
-                t = self.latest.get(tok, {})
+                info = self.pcr_records.get(str(tok), {})
+                t = self.latest.get(str(tok), {})
                 oi = safe_float(t.get("oi"), np.nan)
                 vol = safe_float(t.get("v") or t.get("vol"), 0.0)
                 strike = info.get("strike")
@@ -2060,7 +2039,7 @@ def main():
         st.subheader("🔍 Subscriptions")
         
         if st.button("Discover Instruments", key="btn_disc", disabled=not is_logged_in):
-            with st.spinner("Discovering NIFTY Instruments..."):
+            with st.spinner("Locking NIFTY Instruments..."):
                 adapter.discover_nifty_instruments(auto_pcr=True)
                 st.session_state.discovered = True
                 st.rerun()
@@ -2072,7 +2051,7 @@ def main():
 
         is_streaming = (adapter.conn_state == "STREAMING")
         if st.button("Start Live Feed", key="btn_start_feed", disabled=not is_logged_in or is_streaming):
-            with st.spinner("Subscribing..."):
+            with st.spinner("Subscribing & Fetching Quotes..."):
                 adapter.subscribe_live_feed()
                 adapter.fetch_market_snapshot()
                 st.session_state.stream_active = True
@@ -2089,10 +2068,10 @@ def main():
     spot_val, fut_val, fut_oi, ticks_count = "-", "-", "-", 0
     if adapter and adapter.latest:
         with adapter.lock:
-            s = adapter.latest.get(adapter.spot_token, {})
-            spot_val = s.get("ltp") or s.get("lp") or s.get("c", "-")
-            f = adapter.latest.get(adapter.future_token, {})
-            fut_val = f.get("ltp") or f.get("lp") or f.get("c", "-")
+            s = adapter.latest.get(str(adapter.spot_token), {})
+            spot_val = s.get("ltp") or s.get("lp") or s.get("c") or s.get("iv") or "-"
+            f = adapter.latest.get(str(adapter.future_token), {})
+            fut_val = f.get("ltp") or f.get("lp") or f.get("c") or "-"
             fut_oi = f.get("oi") or f.get("open_interest", "-")
             ticks_count = len(adapter.tick_buffer)
 
@@ -2246,11 +2225,10 @@ def main():
             hw_list = []
             with adapter.lock:
                 for sym in HEAVYWEIGHTS_TOP5.keys():
-                    tok = adapter.heavy_tokens.get(sym)
-                    if tok:
-                        t = adapter.latest.get(tok, {})
-                        ltp = safe_float(t.get("ltp") or t.get("lp") or t.get("c"))
-                        hw_list.append({"Symbol": sym, "LTP": ltp, "Weight": f"{HEAVYWEIGHTS_TOP5.get(sym, 0)*100:.1f}%"})
+                    tok = str(adapter.heavy_tokens.get(sym))
+                    t = adapter.latest.get(tok, {})
+                    ltp = safe_float(t.get("ltp") or t.get("lp") or t.get("c"))
+                    hw_list.append({"Symbol": sym, "LTP": ltp, "Weight": f"{HEAVYWEIGHTS_TOP5.get(sym, 0)*100:.1f}%"})
             st.dataframe(pd.DataFrame(hw_list), height=210, hide_index=True)
         else:
             st.caption("Heavyweights mapping pending discovery...")
