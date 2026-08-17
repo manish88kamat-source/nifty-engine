@@ -15,7 +15,7 @@ NIFTY 3-Min Micro Engine | v5.0 Institutional Prop-Grade Architecture
 - Dual Engine: WebSocket + Auto REST Polling Fallback
 - Thread-Safe Shared State Synchronization
 - Traffic Light Heatmap Visuals (Green/Red/Brown)
-- Dynamic Nifty Future Token Auto-Resolver & Spot Multi-Segment Fallback
+- Dynamic Nifty Future Token & Real Nifty Index Spot Auto-Resolver
 """
 
 from __future__ import annotations
@@ -1318,7 +1318,7 @@ class PaperTradingDesk:
 
 
 # =========================================================
-# 7. KOTAK NEO ADAPTER & DUAL DATA FEED (UNIVERSAL SPOT FIX)
+# 7. KOTAK NEO ADAPTER & DUAL DATA FEED (REAL INDEX AUTO-RESOLVER)
 # =========================================================
 
 class KotakNeoAdapter:
@@ -1456,6 +1456,21 @@ class KotakNeoAdapter:
             self.last_error = f"Future resolution error: {e}"
         return CONFIG.get("nifty_future_token", "53000")
 
+    def resolve_real_nifty_spot_token(self) -> str:
+        """Dynamically finds the correct Nifty Index token via search_scrip"""
+        try:
+            res = self.client.search_scrip(exchange_segment="nse_index", symbol="Nifty 50")
+            records = record_list(res)
+            for r in records:
+                sym = str(r.get("pTrdSymbol", r.get("ts", r.get("symbol", "")))).upper().strip()
+                tok = token_from_record(r)
+                if "NIFTY" in sym and tok:
+                    self.discovery_log.append(f"✓ Auto-Resolved Nifty Spot Index Token: {tok}")
+                    return tok
+        except Exception:
+            pass
+        return "26000"
+
     def discover_nifty_instruments(self, auto_pcr: bool = True) -> bool:
         if not self.connected or not self.client:
             raise RuntimeError("Kotak Neo not authenticated.")
@@ -1463,8 +1478,12 @@ class KotakNeoAdapter:
         
         self.heavy_tokens = dict(NSE_CASH_TOKENS)
         self.token_to_symbol = {v: k for k, v in NSE_CASH_TOKENS.items()}
+        
+        # Auto-resolve spot index token properly
+        self.spot_token = self.resolve_real_nifty_spot_token()
+        CONFIG["nifty_spot_token"] = self.spot_token
         self.token_to_symbol[self.spot_token] = "NIFTY_SPOT"
-        self.discovery_log.append("✓ 10 Nifty Heavyweights & Spot Mapped.")
+        self.discovery_log.append(f"✓ Mapped Nifty Spot Index Token: {self.spot_token}")
 
         self.future_token = self.resolve_current_nifty_future_token()
         self.future_symbol = f"NIFTY_FUT ({self.future_token})"
@@ -1541,6 +1560,7 @@ class KotakNeoAdapter:
             {"instrument_token": str(self.spot_token), "exchange_segment": "nse_index"},
             {"instrument_token": str(self.spot_token), "exchange_segment": "nse_cm"},
             {"instrument_token": str(self.spot_token), "exchange_segment": "nse_fo"},
+            {"instrument_token": "26000", "exchange_segment": "nse_index"},
             {"instrument_token": "99926000", "exchange_segment": "nse_index"},
             {"instrument_token": str(self.future_token), "exchange_segment": "nse_fo"},
         ]
@@ -1568,8 +1588,9 @@ class KotakNeoAdapter:
                         self.tick_buffer.append(r)
                         self._process_live_tick(tok, r)
                         
-                        if tok == str(self.spot_token) or tok == "99926000" or ("NIFTY" in sym_name and "FUT" not in sym_name and "EQ" not in sym_name):
+                        if tok == str(self.spot_token) or tok == "26000" or tok == "99926000" or ("NIFTY" in sym_name and "FUT" not in sym_name and "EQ" not in sym_name):
                             self.latest[str(self.spot_token)] = r
+                            self.latest["26000"] = r
                         
                         if tok == str(self.future_token):
                             pdc = safe_float(r.get("c") or r.get("close") or r.get("pdc"))
@@ -2041,17 +2062,20 @@ def main():
     if is_streaming and adapter:
         adapter.fetch_market_snapshot()
 
-    # Top Metric Strip
+    # Top Metric Strip (Real Index Spot Parser)
     spot_val, fut_val, fut_oi, ticks_count = "-", "-", "-", 0
     if adapter and adapter.latest:
         with adapter.lock:
-            s = adapter.latest.get(str(adapter.spot_token), {})
+            s = adapter.latest.get(str(adapter.spot_token), {}) or adapter.latest.get("26000", {})
             spot_p = extract_tick_price(s)
+            
             if not is_valid_number(spot_p):
                 for k, v in adapter.latest.items():
-                    if "NIFTY" in str(v.get("display_symbol", "")).upper() and "EQ" not in str(v.get("display_symbol", "")) and "FUT" not in str(v.get("display_symbol", "")):
+                    sym_str = str(v.get("display_symbol", "")).upper()
+                    if ("NIFTY" in sym_str or "NIFTY 50" in sym_str) and "EQ" not in sym_str and "FUT" not in sym_str:
                         spot_p = extract_tick_price(v)
                         if is_valid_number(spot_p): break
+
             spot_val = f"{spot_p:.2f}" if is_valid_number(spot_p) else "-"
             
             f = adapter.latest.get(str(adapter.future_token), {})
