@@ -15,7 +15,7 @@ NIFTY 3-Min Micro Engine | v5.0 Institutional Prop-Grade Architecture
 - Dual Engine: WebSocket + Auto REST Polling Fallback
 - Thread-Safe Shared State Synchronization
 - Traffic Light Heatmap Visuals (Green/Red/Brown)
-- Dynamic Nifty Future Token & Real Nifty Index Spot Auto-Resolver
+- Fixed Nifty Spot Index ("Nifty 50" with isIndex=True) & Dynamic Future Token Resolver
 """
 
 from __future__ import annotations
@@ -86,8 +86,8 @@ CONFIG = {
     "model_path": "./model/nifty_lgbm_latest.joblib",
     "neo_environment": "prod",
     "nifty_index_name": "Nifty 50",
-    "nifty_spot_token": "26000",
-    "nifty_future_token": os.getenv("NIFTY_FUT_TOKEN", "53000").strip(),
+    "nifty_spot_token": "Nifty 50",  # Correct Kotak Index Format
+    "nifty_future_token": os.getenv("NIFTY_FUT_TOKEN", "").strip(),
     "pcr_strike_count": int(os.getenv("PCR_STRIKE_COUNT", "5")),
     "pcr_strike_step": float(os.getenv("PCR_STRIKE_STEP", "50")),
     "min_data_quality_to_trade": 0.45,
@@ -1318,7 +1318,7 @@ class PaperTradingDesk:
 
 
 # =========================================================
-# 7. KOTAK NEO ADAPTER & DUAL DATA FEED (REAL INDEX AUTO-RESOLVER)
+# 7. KOTAK NEO ADAPTER & DUAL DATA FEED (CORRECT INDEX SUBSCRIPTION)
 # =========================================================
 
 class KotakNeoAdapter:
@@ -1336,7 +1336,7 @@ class KotakNeoAdapter:
         self.latest: Dict[str, Dict[str, Any]] = {}
         self.tick_buffer = deque(maxlen=2000)
 
-        self.spot_token = CONFIG.get("nifty_spot_token", "26000")
+        self.spot_token = CONFIG.get("nifty_spot_token", "Nifty 50")
         self.future_token = CONFIG.get("nifty_future_token", "53000")
         self.future_symbol = ""
         self.future_expiry = None
@@ -1441,7 +1441,7 @@ class KotakNeoAdapter:
             futures = []
             for r in records:
                 sym = str(r.get("pTrdSymbol", r.get("ts", r.get("symbol", "")))).upper().strip()
-                if "NIFTY" in sym and ("FUT" in sym or sym.endswith("FUT")) and not any(x in sym for x in ["BANK", "FIN", "MID"]):
+                if "NIFTY" in sym and "FUT" in sym and "BANK" not in sym and "FIN" not in sym and "MID" not in sym:
                     exp = expiry_from_record(r)
                     tok = token_from_record(r)
                     if exp and exp.date() >= now_d and tok:
@@ -1456,21 +1456,6 @@ class KotakNeoAdapter:
             self.last_error = f"Future resolution error: {e}"
         return CONFIG.get("nifty_future_token", "53000")
 
-    def resolve_real_nifty_spot_token(self) -> str:
-        """Dynamically finds the correct Nifty Index token via search_scrip"""
-        try:
-            res = self.client.search_scrip(exchange_segment="nse_index", symbol="Nifty 50")
-            records = record_list(res)
-            for r in records:
-                sym = str(r.get("pTrdSymbol", r.get("ts", r.get("symbol", "")))).upper().strip()
-                tok = token_from_record(r)
-                if "NIFTY" in sym and tok:
-                    self.discovery_log.append(f"✓ Auto-Resolved Nifty Spot Index Token: {tok}")
-                    return tok
-        except Exception:
-            pass
-        return "26000"
-
     def discover_nifty_instruments(self, auto_pcr: bool = True) -> bool:
         if not self.connected or not self.client:
             raise RuntimeError("Kotak Neo not authenticated.")
@@ -1479,11 +1464,9 @@ class KotakNeoAdapter:
         self.heavy_tokens = dict(NSE_CASH_TOKENS)
         self.token_to_symbol = {v: k for k, v in NSE_CASH_TOKENS.items()}
         
-        # Auto-resolve spot index token properly
-        self.spot_token = self.resolve_real_nifty_spot_token()
-        CONFIG["nifty_spot_token"] = self.spot_token
+        self.spot_token = "Nifty 50"
         self.token_to_symbol[self.spot_token] = "NIFTY_SPOT"
-        self.discovery_log.append(f"✓ Mapped Nifty Spot Index Token: {self.spot_token}")
+        self.discovery_log.append("✓ Configured Nifty Spot Index: Nifty 50")
 
         self.future_token = self.resolve_current_nifty_future_token()
         self.future_symbol = f"NIFTY_FUT ({self.future_token})"
@@ -1500,7 +1483,7 @@ class KotakNeoAdapter:
         try:
             if not center_strike or not is_valid_number(center_strike):
                 with self.lock:
-                    spot_tick = self.latest.get(self.spot_token, {})
+                    spot_tick = self.latest.get(str(self.spot_token), {})
                     center_strike = extract_tick_price(spot_tick) or 24500.0
             step = CONFIG["pcr_strike_step"]
             atm = round(center_strike / step) * step
@@ -1556,12 +1539,9 @@ class KotakNeoAdapter:
             return
 
         now_ts = datetime.now()
+        # Correct Kotak Neo API format for Index using isIndex=True
         tokens_to_poll = [
-            {"instrument_token": str(self.spot_token), "exchange_segment": "nse_index"},
-            {"instrument_token": str(self.spot_token), "exchange_segment": "nse_cm"},
-            {"instrument_token": str(self.spot_token), "exchange_segment": "nse_fo"},
-            {"instrument_token": "26000", "exchange_segment": "nse_index"},
-            {"instrument_token": "99926000", "exchange_segment": "nse_index"},
+            {"instrument_token": "Nifty 50", "exchange_segment": "nse_cm"},
             {"instrument_token": str(self.future_token), "exchange_segment": "nse_fo"},
         ]
         
@@ -1580,7 +1560,7 @@ class KotakNeoAdapter:
                     sym_name = str(r.get("display_symbol", "")).upper()
                     
                     if not tok and ("NIFTY" in sym_name and "EQ" not in sym_name and "FUT" not in sym_name):
-                        tok = str(self.spot_token)
+                        tok = "Nifty 50"
                         
                     if tok:
                         r["_parsed_ts"] = now_ts
@@ -1588,9 +1568,8 @@ class KotakNeoAdapter:
                         self.tick_buffer.append(r)
                         self._process_live_tick(tok, r)
                         
-                        if tok == str(self.spot_token) or tok == "26000" or tok == "99926000" or ("NIFTY" in sym_name and "FUT" not in sym_name and "EQ" not in sym_name):
-                            self.latest[str(self.spot_token)] = r
-                            self.latest["26000"] = r
+                        if tok == "Nifty 50" or "NIFTY 50" in sym_name:
+                            self.latest["Nifty 50"] = r
                         
                         if tok == str(self.future_token):
                             pdc = safe_float(r.get("c") or r.get("close") or r.get("pdc"))
@@ -1612,8 +1591,7 @@ class KotakNeoAdapter:
         self.fetch_market_snapshot()
 
         sub_tokens = [
-            {"instrument_token": str(self.spot_token), "exchange_segment": "nse_index"},
-            {"instrument_token": str(self.spot_token), "exchange_segment": "nse_cm"},
+            {"instrument_token": "Nifty 50", "exchange_segment": "nse_cm"},
             {"instrument_token": str(self.future_token), "exchange_segment": "nse_fo"},
         ]
         for tok in self.heavy_tokens.values():
@@ -1622,7 +1600,8 @@ class KotakNeoAdapter:
             sub_tokens.append({"instrument_token": str(tok), "exchange_segment": "nse_fo"})
             
         try:
-            self.client.subscribe(instrument_tokens=sub_tokens)
+            # isIndex=True parameter passed correctly for index subscription per Kotak Neo SDK
+            self.client.subscribe(instrument_tokens=sub_tokens, isIndex=True)
         except Exception as exc:
             self.last_error = f"Subscribe error: {exc}"
 
@@ -2062,11 +2041,11 @@ def main():
     if is_streaming and adapter:
         adapter.fetch_market_snapshot()
 
-    # Top Metric Strip (Real Index Spot Parser)
+    # Top Metric Strip (Correct Index Spot Parser via "Nifty 50")
     spot_val, fut_val, fut_oi, ticks_count = "-", "-", "-", 0
     if adapter and adapter.latest:
         with adapter.lock:
-            s = adapter.latest.get(str(adapter.spot_token), {}) or adapter.latest.get("26000", {})
+            s = adapter.latest.get("Nifty 50", {}) or adapter.latest.get("26000", {})
             spot_p = extract_tick_price(s)
             
             if not is_valid_number(spot_p):
