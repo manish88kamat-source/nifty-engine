@@ -191,6 +191,8 @@ def safe_float(value, default=np.nan):
     try:
         if value is None:
             return default
+        if isinstance(value, (int, float)):
+            return float(value)
         if isinstance(value, str):
             value = value.replace(",", "").strip()
             if not value:
@@ -322,6 +324,8 @@ def strike_from_record(record):
     return np.nan
 
 def token_from_record(record):
+    if not isinstance(record, dict):
+        return ""
     for key in ["pSymbol", "pSymbolToken", "instrument_token", "instrumentToken", "tok", "token", "pToken", "tk"]:
         value = record.get(key)
         if value is not None and str(value).strip():
@@ -331,7 +335,7 @@ def token_from_record(record):
 def extract_tick_price(tick: Dict[str, Any]) -> float:
     if not isinstance(tick, dict):
         return np.nan
-    for k in ("ltp", "lp", "c", "iv", "last_price", "last_traded_price", "close", "lastPrice"):
+    for k in ("ltp", "lp", "last_price", "last_traded_price", "c", "close", "lastPrice", "iv"):
         val = safe_float(tick.get(k))
         if is_valid_number(val) and val > 0:
             return val
@@ -342,12 +346,12 @@ def record_list(response):
         return response
     if not isinstance(response, dict):
         return []
-    for key in ["data", "result", "records", "data_list", "scrips", "list"]:
+    for key in ["data", "result", "records", "data_list", "scrips", "list", "message"]:
         value = response.get(key)
         if isinstance(value, list):
             return value
         if isinstance(value, dict):
-            for k in ["data", "records", "result"]:
+            for k in ["data", "records", "result", "scrips"]:
                 if isinstance(value.get(k), list):
                     return value[k]
     return []
@@ -1520,7 +1524,7 @@ class KotakNeoAdapter:
 
         now_ts = datetime.now()
 
-        # Build list of token objects for quotes() API without unsupported arguments
+        # Universal quotes format
         tokens_to_poll = [
             {"instrument_token": str(self.spot_token), "exchange_segment": "nse_cm"}
         ]
@@ -1559,7 +1563,6 @@ class KotakNeoAdapter:
         if not self.connected or not self.client:
             raise RuntimeError("Kotak Neo not authenticated.")
         
-        # Dual Fire: Initial REST snapshot immediate load
         self.fetch_market_snapshot()
 
         sub_tokens = [{"instrument_token": str(self.spot_token), "exchange_segment": "nse_cm"}]
