@@ -11,7 +11,7 @@ NIFTY 3-Min Micro Engine | v5.0 Institutional Prop-Grade Architecture
 - Automatic Session-End (15:30) Forced Square-Off Mechanism
 - Auto-Reset of Paper Trading State on New Trading Date
 - Live Mark-to-Market (MTM) & Hit-Rate Performance HUD
-- Decoupled Background Daemon Architecture with Clock-Synced Bar Flushing
+- Master OI Extractor (oi/open_int/open_interest fallback) for Real PCR
 """
 
 from __future__ import annotations
@@ -175,6 +175,14 @@ def normalize_kotak_mobile(value: str) -> str:
     if len(national) != 10 or national[0] not in "6789":
         return raw
     return "+91" + national
+
+def is_base32_totp_secret(value: str) -> bool:
+    raw = (value or "").strip().replace(" ", "")
+    if not raw:
+        return False
+    if raw.isdigit() and len(raw) == 6:
+        return False
+    return True
 
 def safe_float(value, default=np.nan):
     try:
@@ -1220,8 +1228,8 @@ class PaperTradingDesk:
                 "stop_pts": decision.stop_points,
                 "size": decision.size_factor,
                 "regime": decision.regime,
-                "option_target": decision.option_target,
-                "option_stop": decision.option_stop,
+                "option_target": decision.option_target_pts,
+                "option_stop": decision.option_stop_pts,
             }
 
     def on_bar_open_fill(self, candle: Candle3Min):
@@ -1306,7 +1314,7 @@ class PaperTradingDesk:
 
 
 # =========================================================
-# 7. KOTAK NEO ADAPTER & CLOCK-SYNNCED BAR FLUSHING
+# 7. KOTAK NEO ADAPTER & MASTER OI EXTRACTOR
 # =========================================================
 
 class KotakNeoAdapter:
@@ -1485,7 +1493,7 @@ class KotakNeoAdapter:
             if not center_strike or not is_valid_number(center_strike):
                 with self.lock:
                     spot_tick = self.latest.get("Nifty 50", {})
-                    center_strike = extract_tick_price(spot_tick) or 24500.0
+                    center_strike = extract_tick_price(spot_tick) or 24300.0
             step = CONFIG["pcr_strike_step"]
             atm = round(center_strike / step) * step
             count = CONFIG["pcr_strike_count"]
@@ -1600,7 +1608,8 @@ class KotakNeoAdapter:
             sub_tokens.append({"instrument_token": str(tok), "exchange_segment": "nse_fo"})
             
         try:
-            self.client.subscribe(instrument_tokens=sub_tokens, isIndex=True)
+            self.client.subscribe(instrument_tokens=[{"instrument_token": "Nifty 50", "exchange_segment": "nse_cm"}], isIndex=True)
+            self.client.subscribe(instrument_tokens=sub_tokens[1:], isIndex=False)
         except Exception as exc:
             self.last_error = f"Subscribe error: {exc}"
 
@@ -1678,7 +1687,6 @@ class KotakNeoAdapter:
 
     def _close_bar(self, bar_time: datetime, is_session_end: bool = False):
         with self.lock:
-            # Fallback to latest available ticks if current_bar_ticks is empty
             ticks_source = self.current_bar_ticks if self.current_bar_ticks else list(self.tick_buffer)
             if not ticks_source:
                 return
@@ -1707,7 +1715,11 @@ class KotakNeoAdapter:
                 fut_o, fut_h, fut_l, fut_c = fut_prices[0], max(fut_prices), min(fut_prices), fut_prices[-1]
                 fut_vol = self._resolve_volume_clean(fut_ticks)
                 last_fut_t = fut_ticks[-1] if fut_ticks else {}
-                fut_oi = safe_float(last_fut_t.get("open_int") or last_fut_t.get("oi"), 12784330.0)
+                fut_oi = safe_float(
+                    last_fut_t.get("oi") if last_fut_t.get("oi") is not None
+                    else last_fut_t.get("open_int") if last_fut_t.get("open_int") is not None
+                    else last_fut_t.get("open_interest"), 12784330.0
+                )
                 
                 l2_snap = {
                     "best_bid": safe_float(last_fut_t.get("bp") or last_fut_t.get("bid_price"), fut_c),
@@ -1717,7 +1729,6 @@ class KotakNeoAdapter:
                 }
 
             hw_snap = {}
-            bar_end = bar_time + timedelta(minutes=CONFIG["bar_minutes"])
             for sym, tok in self.heavy_tokens.items():
                 t = self.latest.get(str(tok), {})
                 c_val = extract_tick_price(t)
@@ -1731,11 +1742,16 @@ class KotakNeoAdapter:
             step = CONFIG["pcr_strike_step"]
             atm = round(spot_approx / step) * step
             
+            # --- FIXED MASTER OI EXTRACTOR FOR REAL PCR ---
             for tok in self.pcr_tokens:
                 info = self.pcr_records.get(str(tok), {})
                 t = self.latest.get(str(tok), {})
-                oi = safe_float(t.get("open_int") or t.get("oi"), np.nan)
-                vol = safe_float(t.get("last_volume") or t.get("v"), 0.0)
+                oi = safe_float(
+                    t.get("oi") if t.get("oi") is not None
+                    else t.get("open_int") if t.get("open_int") is not None
+                    else t.get("open_interest")
+                )
+                vol = safe_float(t.get("last_volume") or t.get("v") or t.get("volume"), 0.0)
                 strike = info.get("strike")
                 if is_valid_number(oi):
                     if info.get("option_type") == "CE":
@@ -1748,6 +1764,7 @@ class KotakNeoAdapter:
                         total_pe_vol += vol
                         if strike == atm:
                             atm_pe_oi = oi
+            # ----------------------------------------------
 
             ce_oi_change = total_ce_oi - self._prev_ce_oi if is_valid_number(self._prev_ce_oi) else np.nan
             pe_oi_change = total_pe_oi - self._prev_pe_oi if is_valid_number(self._prev_pe_oi) else np.nan
@@ -2045,13 +2062,13 @@ def main():
             fut_p = extract_tick_price(f)
             fut_val = f"{fut_p:.2f}" if is_valid_number(fut_p) else "-"
             
-            fut_oi = f.get("open_int") or f.get("oi") or f.get("open_interest", "-")
+            fut_oi = safe_float(f.get("oi") if f.get("oi") is not None else f.get("open_int") if f.get("open_int") is not None else f.get("open_interest"), "-")
             ticks_count = len(adapter.tick_buffer)
 
     t1, t2, t3, t4 = st.columns(4)
     t1.metric("NIFTY SPOT", f"₹{spot_val}")
     t2.metric("NIFTY FUT", f"₹{fut_val}")
-    t3.metric("FUT OPEN INTEREST", f"{fut_oi:,}" if isinstance(fut_oi, (int, float)) else str(fut_oi))
+    t3.metric("FUT OPEN INTEREST", f"{int(fut_oi):,}" if isinstance(fut_oi, (int, float)) and np.isfinite(fut_oi) else str(fut_oi))
     t4.metric("TICKS INGESTED", f"{ticks_count:,}")
 
     # Tactical Signal HUD
