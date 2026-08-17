@@ -96,8 +96,8 @@ CONFIG = {
     "feed_silence_sec": 45,
     "atm_delta_approx": 0.52,
     "estimated_slippage_pts": 0.50,
-    "risk_free_rate": 0.065,  # 6.5% RBI repo baseline
-    "default_atm_iv": 0.135,  # 13.5% India VIX baseline
+    "risk_free_rate": 0.065,
+    "default_atm_iv": 0.135,
     "dq_weights": {
         "missing_future": 0.25,
         "missing_spot": 0.20,
@@ -111,7 +111,6 @@ CONFIG = {
     },
 }
 
-# Top 5 Core Heavyweights (Dominant ~39.3% Weight)
 HEAVYWEIGHTS_TOP5 = {
     "HDFCBANK": 0.115,
     "RELIANCE": 0.098,
@@ -347,7 +346,6 @@ def record_list(response):
 # =========================================================
 
 class KalmanPriceEngine:
-    """1D State-Space Kalman Filter for True Latent Drift & Noise Filtering"""
     def __init__(self, process_variance=1e-4, measurement_variance=0.08):
         self.q = process_variance
         self.r = measurement_variance
@@ -366,11 +364,9 @@ class KalmanPriceEngine:
             self.post_error_estimate = 1.0
             return measurement, 0.0
 
-        # Predict Step
         prior_estimate = self.post_estimate
         prior_error_estimate = self.post_error_estimate + self.q
 
-        # Update Step
         blending_factor = prior_error_estimate / (prior_error_estimate + self.r)
         self.post_estimate = prior_estimate + blending_factor * (measurement - prior_estimate)
         self.post_error_estimate = (1.0 - blending_factor) * prior_error_estimate
@@ -380,7 +376,6 @@ class KalmanPriceEngine:
 
 
 class GreeksEngine:
-    """Analytical 2nd-Order Greeks (Vanna, Charm & Delta Decay)"""
     @staticmethod
     def compute_second_order_greeks(
         spot: float, strike: float, minutes_to_exp: float,
@@ -389,17 +384,14 @@ class GreeksEngine:
         if not (is_valid_number(spot) and is_valid_number(strike) and spot > 0 and strike > 0):
             return {"vanna": 0.0, "charm_ce": 0.0, "charm_pe": 0.0, "d1": 0.0, "d2": 0.0}
 
-        tau = max(minutes_to_exp / (375.0 * 252.0), 1e-6)  # Annualized trading time
+        tau = max(minutes_to_exp / (375.0 * 252.0), 1e-6)
         vol_sqrt_tau = iv * math.sqrt(tau)
 
         d1 = (math.log(spot / strike) + (r + 0.5 * iv * iv) * tau) / vol_sqrt_tau
         d2 = d1 - vol_sqrt_tau
         pdf_d1 = norm_pdf(d1)
 
-        # Vanna: dDelta / dIV = -phi(d1) * d2 / IV
         vanna = float(-pdf_d1 * d2 / max(iv, 1e-4))
-
-        # Charm (Delta Decay): dDelta / dTau
         term1 = pdf_d1 * (r / vol_sqrt_tau - d2 / (2.0 * tau))
         charm_ce = float(-term1)
         charm_pe = float(charm_ce + r * math.exp(-r * tau))
@@ -498,7 +490,6 @@ class SessionContextEngine:
 
 
 class OptionChainEngine:
-    """Option Chain Engine with Vanna, Charm, 0DTE & Normalized GEX Flow"""
     def __init__(self, maxlen=150):
         self.pcr_history = deque(maxlen=maxlen)
 
@@ -539,7 +530,6 @@ class OptionChainEngine:
         atm_imbalance = (atm_pe - atm_ce) / (atm_sum + 1e-5) if atm_sum > 0 else 0.0
         atm_strike = safe_float(chain.get("atm_strike"), round(spot_price / 50.0) * 50.0 if spot_price > 0 else 24000.0)
 
-        # Expiry Time Context & 0DTE Intensity
         exp_dt = chain.get("active_expiry")
         if isinstance(exp_dt, datetime):
             exp_day_end = exp_dt.replace(hour=15, minute=30, second=0)
@@ -551,7 +541,6 @@ class OptionChainEngine:
             days_to_exp = mins_to_exp = np.nan
             exp_flag = 0
 
-        # Normalized Scale-Invariant GEX Proxy
         if exp_flag and is_valid_number(mins_to_exp) and mins_to_exp <= 375:
             zero_dte_intensity = max(0.0, 1.0 - (mins_to_exp / 375.0))
             if mins_to_exp <= 90:
@@ -567,7 +556,6 @@ class OptionChainEngine:
         atm_gamma_imb = (atm_ce - atm_pe) / (atm_sum + 1e-5) if atm_sum > 0 else 0.0
         gex_x_0dte = float(gex_proxy * zero_dte_intensity)
 
-        # 2nd-Order Greeks Ingestion (Vanna & Charm)
         greeks = GreeksEngine.compute_second_order_greeks(
             spot=spot_price, strike=atm_strike, minutes_to_exp=mins_to_exp if is_valid_number(mins_to_exp) else 375.0,
             iv=CONFIG["default_atm_iv"], r=CONFIG["risk_free_rate"]
@@ -608,7 +596,6 @@ class OptionChainEngine:
 
 
 class HeavyweightEngine:
-    """Top 5 Core Heavyweights Synchronous Lead-Lag Pressure (SLP-5) + Top 10 TWC"""
     def __init__(self, weights_all: Dict[str, float], weights_top5: Dict[str, float]):
         self.weights_all = weights_all
         self.weights_top5 = weights_top5
@@ -642,7 +629,6 @@ class HeavyweightEngine:
             if close_price >= vwap:
                 bullish += 1
 
-            # Top 5 Synchronous Lead-Lag Momentum Pressure
             if symbol in self.weights_top5:
                 top5_w = self.weights_top5[symbol]
                 top5_pressures.append(top5_w * ((close_price - vwap) / (vwap + 1e-5)))
@@ -722,7 +708,6 @@ class FeatureEngine:
         self.tr_history.append(tr)
         atr = atr_prev
 
-        # Kalman Filter Latent State Estimation
         kalman_price, kalman_velocity = self.kalman.update(candle.fut_c)
 
         all_closes = list(self.preloaded_closes) + [c.spot_c for c in prev]
@@ -744,7 +729,6 @@ class FeatureEngine:
         stretch_slope = calc_3bar_slope(list(self.stretch_history))
         spread_slope = calc_3bar_slope(list(self.spread_history))
 
-        # Order Book Imbalance (OBI) & Stoikov Micro-Price from L2 Depth
         l2 = candle.l2_depth or {}
         best_bid = safe_float(l2.get("best_bid"), candle.fut_c)
         best_ask = safe_float(l2.get("best_ask"), candle.fut_c)
@@ -951,7 +935,6 @@ class LabelEngine:
 # =========================================================
 
 class RegimeEngine:
-    """Microstructure, GEX & Kalman-Aware Quantitative Regime Engine"""
     def detect(self, feats: Dict[str, Any]) -> str:
         dq = safe_float(feats.get("data_quality_score"), 0.0)
         atr_warm = int(feats.get("atr_warmup_flag") or 0)
@@ -968,15 +951,12 @@ class RegimeEngine:
         twc = safe_float(feats.get("twc"), 0.0)
         breadth = safe_float(feats.get("breadth_10"), 0.5)
 
-        # 0DTE & Dealer Gamma Sensitivity
         gex_val = safe_float(feats.get("gex_proxy"), 0.0)
         z_dte = safe_float(feats.get("zero_dte_intensity"), 0.0)
 
-        # Dealer Long Gamma Pinning Bias
         if z_dte > 0.5 and gex_val > 0.70 and abs(k_stretch) <= 0.65:
             return "GRIND"
 
-        # Dealer Short Gamma Squeeze Bias
         if z_dte > 0.4 and gex_val < -0.70 and abs(k_stretch) > 0.40:
             return "IMPULSE_UP" if k_stretch > 0 else "IMPULSE_DOWN"
 
@@ -1098,7 +1078,6 @@ class DecisionEngine:
         twc_term = float(np.clip(twc * 50.0, -0.8, 0.8))
         breadth_term = (safe_float(feats.get("breadth_10"), 0.5) - 0.5) * 1.5
         
-        # Microstructure & Prop Alpha Terms
         slp_top5 = safe_float(feats.get("slp_top5_pressure"), 0.0)
         slp_term = float(np.clip(slp_top5 * 0.5, -0.5, 0.5))
         
@@ -1198,7 +1177,7 @@ class DatasetManager:
 @dataclass
 class PaperPosition:
     entry_time: datetime
-    direction: int  # +1 CE, -1 PE
+    direction: int
     entry_price: float
     target_price: float
     stop_price: float
@@ -1418,7 +1397,6 @@ class KotakNeoAdapter:
         if NeoAPI is None:
             raise RuntimeError("neo_api_client missing. Install official Kotak Neo API v2 package.")
         
-        # Fresh credentials lookup on demand
         self.consumer_key = env_or_secret("KOTAK_CONSUMER_KEY")
         self.mobile = normalize_kotak_mobile(env_or_secret("KOTAK_MOBILE"))
         self.ucc = env_or_secret("KOTAK_UCC")
@@ -1506,7 +1484,8 @@ class KotakNeoAdapter:
             for r in records:
                 sym = str(r.get("pTrdSymbol", r.get("ts", r.get("symbol", "")))).upper()
                 inst_type = str(r.get("pInstType", r.get("instrument_type", ""))).upper()
-                if "NIFTY" in sym and ("FUT" in sym or "FUTIDX" in inst_type):
+                # Strict check: Exclude FINNIFTY, BANKNIFTY, MIDCPNIFTY
+                if (sym.startswith("NIFTY") and not sym.startswith("FINNIFTY") and not sym.startswith("BANKNIFTY") and not sym.startswith("MIDCPNIFTY")) and ("FUT" in sym or "FUTIDX" in inst_type):
                     exp = expiry_from_record(r)
                     tok = token_from_record(r)
                     if tok and exp and exp.date() >= now_d:
@@ -1548,6 +1527,9 @@ class KotakNeoAdapter:
             
             valid_expiries = []
             for r in records:
+                sym = str(r.get("pTrdSymbol", r.get("ts", r.get("symbol", "")))).upper()
+                if not (sym.startswith("NIFTY") and not sym.startswith("FINNIFTY") and not sym.startswith("BANKNIFTY")):
+                    continue
                 op_type = option_type_from_record(r)
                 if op_type in ("CE", "PE"):
                     exp = expiry_from_record(r)
@@ -1562,6 +1544,9 @@ class KotakNeoAdapter:
             
             discovered = []
             for r in records:
+                sym = str(r.get("pTrdSymbol", r.get("ts", r.get("symbol", "")))).upper()
+                if not (sym.startswith("NIFTY") and not sym.startswith("FINNIFTY") and not sym.startswith("BANKNIFTY")):
+                    continue
                 exp = expiry_from_record(r)
                 strike = strike_from_record(r)
                 op_type = option_type_from_record(r)
@@ -1755,7 +1740,6 @@ class KotakNeoAdapter:
                 last_fut_t = fut_ticks[-1]
                 fut_oi = safe_float(last_fut_t.get("oi") or last_fut_t.get("open_interest"), np.nan)
                 
-                # Extract L2 Depth Quotes
                 l2_snap = {
                     "best_bid": safe_float(last_fut_t.get("bp") or last_fut_t.get("bid_price"), fut_c),
                     "best_ask": safe_float(last_fut_t.get("ap") or last_fut_t.get("ask_price"), fut_c),
@@ -1821,7 +1805,6 @@ class KotakNeoAdapter:
                 heavy=hw_snap, option_chain=pcr_chain, l2_depth=l2_snap
             )
             
-            # Paper Desk Execution & Session-End Forced Exit
             self.paper_desk.on_bar_open_fill(candle)
             self.paper_desk.on_bar_update_and_exit_eval(candle, is_session_end=is_session_end)
 
@@ -2002,7 +1985,6 @@ def run_unit_tests() -> bool:
     })
     assert d_bad.action == "SKIP"
     
-    # Greeks & Kalman Verification
     g = GreeksEngine.compute_second_order_greeks(24000.0, 24000.0, 120.0)
     assert is_valid_number(g["vanna"])
     
@@ -2013,6 +1995,12 @@ def run_unit_tests() -> bool:
     return True
 
 
+if st is not None:
+    @st.cache_resource
+    def get_global_adapter():
+        return KotakNeoAdapter()
+
+
 def main():
     if st is None:
         print("Streamlit not installed.")
@@ -2021,10 +2009,7 @@ def main():
     st.set_page_config(page_title="NIFTY 3M | Micro Engine v5.0", page_icon="⚡", layout="wide", initial_sidebar_state="expanded")
     inject_custom_css()
 
-    if "neo" not in st.session_state:
-        st.session_state.neo = KotakNeoAdapter()
-    
-    adapter: KotakNeoAdapter = st.session_state.neo
+    adapter: KotakNeoAdapter = get_global_adapter()
     is_logged_in = adapter.connected
 
     # Sidebar: Controls & Diagnostics
@@ -2062,7 +2047,7 @@ def main():
         st.subheader("🔍 Subscriptions")
         
         if st.button("Discover Instruments", key="btn_disc", disabled=not is_logged_in):
-            with st.spinner("Discovering..."):
+            with st.spinner("Discovering NIFTY Instruments..."):
                 adapter.discover_nifty_instruments(auto_pcr=True)
                 st.session_state.discovered = True
                 st.rerun()
