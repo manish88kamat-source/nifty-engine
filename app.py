@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/init/env python3
 """
 NIFTY 3-Min Micro Engine | v5.0 Institutional Prop-Grade Architecture
 - Single Self-Contained File Architecture
@@ -11,7 +11,7 @@ NIFTY 3-Min Micro Engine | v5.0 Institutional Prop-Grade Architecture
 - Automatic Session-End (15:30) Forced Square-Off Mechanism
 - Auto-Reset of Paper Trading State on New Trading Date
 - Live Mark-to-Market (MTM) & Hit-Rate Performance HUD
-- Master OI Extractor (oi/open_int/open_interest fallback) for Real PCR
+- Dedicated Option Chain Polling (nse_fo segment) for 100% Real PCR & OI Data
 """
 
 from __future__ import annotations
@@ -175,14 +175,6 @@ def normalize_kotak_mobile(value: str) -> str:
     if len(national) != 10 or national[0] not in "6789":
         return raw
     return "+91" + national
-
-def is_base32_totp_secret(value: str) -> bool:
-    raw = (value or "").strip().replace(" ", "")
-    if not raw:
-        return False
-    if raw.isdigit() and len(raw) == 6:
-        return False
-    return True
 
 def safe_float(value, default=np.nan):
     try:
@@ -1314,7 +1306,7 @@ class PaperTradingDesk:
 
 
 # =========================================================
-# 7. KOTAK NEO ADAPTER & MASTER OI EXTRACTOR
+# 7. KOTAK NEO ADAPTER & DEDICATED OPTION POLLING
 # =========================================================
 
 class KotakNeoAdapter:
@@ -1543,6 +1535,30 @@ class KotakNeoAdapter:
         except Exception:
             return 0
 
+    def fetch_real_option_oi(self):
+        if not self.connected or not self.client or not self.pcr_tokens:
+            return
+        try:
+            tokens_to_poll = [{"instrument_token": str(tok), "exchange_segment": "nse_fo"} for tok in self.pcr_tokens[:25]]
+            res = self.client.quotes(instrument_tokens=tokens_to_poll)
+            recs = record_list(res)
+            with self.lock:
+                for r in recs:
+                    tok = token_from_record(r)
+                    if tok:
+                        oi = safe_float(
+                            r.get("oi") if r.get("oi") is not None
+                            else r.get("open_int") if r.get("open_int") is not None
+                            else r.get("open_interest")
+                        )
+                        if is_valid_number(oi):
+                            if tok not in self.latest:
+                                self.latest[tok] = {}
+                            self.latest[tok]["open_int"] = oi
+                            self.latest[tok]["oi"] = oi
+        except Exception as e:
+            self.last_error = f"Option OI Fetch Error: {e}"
+
     def fetch_market_snapshot(self):
         if not self.connected or not self.client:
             return
@@ -1589,6 +1605,9 @@ class KotakNeoAdapter:
                             if is_valid_number(open_p):
                                 self.feature_engine.set_today_open(open_p)
                 self.last_error = ""
+            
+            # Fetch real dedicated option OI explicitly
+            self.fetch_real_option_oi()
         except Exception as exc:
             self.last_error = f"Poll error: {exc}"
 
@@ -1742,7 +1761,7 @@ class KotakNeoAdapter:
             step = CONFIG["pcr_strike_step"]
             atm = round(spot_approx / step) * step
             
-            # --- FIXED MASTER OI EXTRACTOR FOR REAL PCR ---
+            # --- MASTER OI EXTRACTOR FOR REAL PCR ---
             for tok in self.pcr_tokens:
                 info = self.pcr_records.get(str(tok), {})
                 t = self.latest.get(str(tok), {})
@@ -1764,7 +1783,7 @@ class KotakNeoAdapter:
                         total_pe_vol += vol
                         if strike == atm:
                             atm_pe_oi = oi
-            # ----------------------------------------------
+            # ----------------------------------------
 
             ce_oi_change = total_ce_oi - self._prev_ce_oi if is_valid_number(self._prev_ce_oi) else np.nan
             pe_oi_change = total_pe_oi - self._prev_pe_oi if is_valid_number(self._prev_pe_oi) else np.nan
