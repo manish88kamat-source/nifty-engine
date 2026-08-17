@@ -11,8 +11,7 @@ NIFTY 3-Min Micro Engine | v5.0 Institutional Prop-Grade Architecture
 - Automatic Session-End (15:30) Forced Square-Off Mechanism
 - Auto-Reset of Paper Trading State on New Trading Date
 - Live Mark-to-Market (MTM) & Hit-Rate Performance HUD
-- Kotak Historical API Fallback for Daily Range Context
-- Dual Engine: WebSocket + Auto REST Polling Fallback
+- Instant Live Diagnostic Probe Tool
 - Thread-Safe Shared State Synchronization
 - Traffic Light Heatmap Visuals (Green/Red/Brown)
 """
@@ -1523,8 +1522,6 @@ class KotakNeoAdapter:
             return
 
         now_ts = datetime.now()
-
-        # Universal quotes format
         tokens_to_poll = [
             {"instrument_token": str(self.spot_token), "exchange_segment": "nse_cm"}
         ]
@@ -2000,6 +1997,16 @@ def main():
                 st.session_state.stream_active = True
                 st.rerun()
 
+        st.markdown("---")
+        st.subheader("🛠️ Live Broker Probe")
+        if st.button("Probe Kotak Live Quote", key="btn_probe", disabled=not is_logged_in):
+            with st.spinner("Fetching Raw Broker Response..."):
+                try:
+                    probe_res = adapter.client.quotes(instrument_tokens=[{"instrument_token": "2885", "exchange_segment": "nse_cm"}])
+                    st.json(probe_res)
+                except Exception as p_err:
+                    st.error(f"Probe Error: {p_err}")
+
         if adapter.last_error:
             st.warning(f"Engine Log: {adapter.last_error}")
 
@@ -2009,6 +2016,10 @@ def main():
                 st.success("Engine Verification Passed (v5.0)" if run_unit_tests() else "Test Failed")
             except Exception as exc:
                 st.error(str(exc))
+
+    # Automatic polling update directly in UI loop
+    if is_streaming and adapter:
+        adapter.fetch_market_snapshot()
 
     # Top Metric Strip
     spot_val, fut_val, fut_oi, ticks_count = "-", "-", "-", 0
