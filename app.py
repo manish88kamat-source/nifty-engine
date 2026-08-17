@@ -1530,8 +1530,8 @@ class KotakNeoAdapter:
                     self.latest[tok] = r
                     self.tick_buffer.append(r)
                     self._process_live_tick(tok, r)
-        except Exception:
-            pass
+        except Exception as e:
+            self.last_error = f"Spot Quote Error: {e}"
 
         # 2. Futures, Equities & Options Quotes (Live Polling Fallback)
         tokens_to_poll = []
@@ -1582,8 +1582,8 @@ class KotakNeoAdapter:
             
         try:
             self.client.subscribe(instrument_tokens=sub_tokens)
-        except Exception:
-            pass
+        except Exception as exc:
+            self.last_error = f"Subscribe error: {exc}"
 
         self.conn_state = "STREAMING"
         self._last_tick_wall = time.time()
@@ -1807,7 +1807,6 @@ class KotakNeoAdapter:
                 try:
                     self.maybe_flush_bars()
                     if self.conn_state == "STREAMING":
-                        # Continuous Background Polling Fallback ensures non-zero ticks
                         self.fetch_market_snapshot()
                 except Exception as exc:
                     self.last_error = f"watchdog: {exc}"
@@ -2007,6 +2006,9 @@ def main():
                 adapter.start_bar_watchdog()
                 st.session_state.stream_active = True
                 st.rerun()
+
+        if adapter.last_error:
+            st.warning(f"Engine Log: {adapter.last_error}")
 
         st.markdown("---")
         if st.button("Run Unit Tests", key="btn_tests"):
