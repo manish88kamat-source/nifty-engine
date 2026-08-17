@@ -135,7 +135,7 @@ NSE_CASH_TOKENS = {
 
 
 # =========================================================
-# 2. MATHEMATICAL & SECURITY UTILITIES (FIXED FOR KOTAK JSON KEYS)
+# 2. MATHEMATICAL & SECURITY UTILITIES
 # =========================================================
 
 def norm_pdf(x: float) -> float:
@@ -2001,7 +2001,7 @@ def main():
     if is_streaming and adapter:
         adapter.fetch_market_snapshot()
 
-    # Top Metric Strip
+    # Top Metric Strip (Fixed to match exchange_token & ltp keys)
     spot_val, fut_val, fut_oi, ticks_count = "-", "-", "-", 0
     if adapter and adapter.latest:
         with adapter.lock:
@@ -2144,7 +2144,7 @@ def main():
                     c_dq1, c_dq2 = st.columns(2)
                     with c_dq1:
                         st.write(f"• Top 5 Lead Pressure ($SLP_5$): `{latest_row.get('slp_top5_pressure', 0.0):.3f}`")
-                        st.write(f"• Order Book Imbalance (OBI): `{latest_row.get('order_badge_imbalance', 0.0):.3f}`")
+                        st.write(f"• Order Book Imbalance (OBI): `{latest_row.get('order_book_imbalance', 0.0):.3f}`")
                         st.write(f"• Dealer Vanna Flow: `{latest_row.get('dealer_vanna_flow', 0.0):.3f}`")
                         st.write(f"• Dealer Charm Flow: `{latest_row.get('dealer_charm_flow', 0.0):.3f}`")
                         st.write(f"• Dealer GEX Proxy: `{latest_row.get('gex_proxy', 0.0):.3f}`")
