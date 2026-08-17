@@ -15,7 +15,7 @@ NIFTY 3-Min Micro Engine | v5.0 Institutional Prop-Grade Architecture
 - Dual Engine: WebSocket + Auto REST Polling Fallback
 - Thread-Safe Shared State Synchronization
 - Traffic Light Heatmap Visuals (Green/Red/Brown)
-- Dynamic Nifty Future Token Auto-Resolver (No Monthly Manual Changes)
+- Dynamic Nifty Future Token Auto-Resolver & Spot Multi-Segment Fallback
 """
 
 from __future__ import annotations
@@ -1318,7 +1318,7 @@ class PaperTradingDesk:
 
 
 # =========================================================
-# 7. KOTAK NEO ADAPTER & DUAL DATA FEED (AUTO-RESOLVER)
+# 7. KOTAK NEO ADAPTER & DUAL DATA FEED (FIXED SPOT & FUT)
 # =========================================================
 
 class KotakNeoAdapter:
@@ -1433,7 +1433,6 @@ class KotakNeoAdapter:
         return True
 
     def resolve_current_nifty_future_token(self) -> str:
-        """Dynamically finds the nearest active Nifty Future token using search_scrip"""
         try:
             res = self.client.search_scrip(exchange_segment="nse_fo", symbol="NIFTY")
             records = record_list(res)
@@ -1467,7 +1466,6 @@ class KotakNeoAdapter:
         self.token_to_symbol[self.spot_token] = "NIFTY_SPOT"
         self.discovery_log.append("✓ 10 Nifty Heavyweights & Spot Mapped.")
 
-        # Automatically resolve current live Nifty Future Token
         self.future_token = self.resolve_current_nifty_future_token()
         self.future_symbol = f"NIFTY_FUT ({self.future_token})"
         self.token_to_symbol[self.future_token] = "NIFTY_FUT"
@@ -1542,6 +1540,8 @@ class KotakNeoAdapter:
         tokens_to_poll = [
             {"instrument_token": str(self.spot_token), "exchange_segment": "nse_index"},
             {"instrument_token": str(self.spot_token), "exchange_segment": "nse_cm"},
+            {"instrument_token": str(self.spot_token), "exchange_segment": "nse_fo"},
+            {"instrument_token": "99926000", "exchange_segment": "nse_index"},
             {"instrument_token": str(self.future_token), "exchange_segment": "nse_fo"},
         ]
         
@@ -1562,6 +1562,9 @@ class KotakNeoAdapter:
                         self.latest[tok] = r
                         self.tick_buffer.append(r)
                         self._process_live_tick(tok, r)
+                        
+                        if tok == str(self.spot_token) or tok == "99926000" or "NIFTY 50" in str(r.get("display_symbol", "")):
+                            self.latest[str(self.spot_token)] = r
                         
                         if tok == str(self.future_token):
                             pdc = safe_float(r.get("c") or r.get("close") or r.get("pdc"))
