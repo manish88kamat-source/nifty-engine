@@ -1520,21 +1520,10 @@ class KotakNeoAdapter:
 
         now_ts = datetime.now()
 
-        # 1. Spot Index Quote
-        try:
-            spot_q = self.client.quotes(instrument_tokens=[{"instrument_token": str(self.spot_token), "exchange_segment": "nse_cm"}], isIndex=True)
-            for r in record_list(spot_q):
-                tok = str(token_from_record(r) or self.spot_token)
-                r["_parsed_ts"] = now_ts
-                with self.lock:
-                    self.latest[tok] = r
-                    self.tick_buffer.append(r)
-                    self._process_live_tick(tok, r)
-        except Exception as e:
-            self.last_error = f"Spot Quote Error: {e}"
-
-        # 2. Futures, Equities & Options Quotes (Live Polling Fallback)
-        tokens_to_poll = []
+        # Build list of token objects for quotes() API without unsupported arguments
+        tokens_to_poll = [
+            {"instrument_token": str(self.spot_token), "exchange_segment": "nse_cm"}
+        ]
         if self.future_token:
             tokens_to_poll.append({"instrument_token": str(self.future_token), "exchange_segment": "nse_fo"})
         for tok in self.heavy_tokens.values():
@@ -1543,7 +1532,7 @@ class KotakNeoAdapter:
             tokens_to_poll.append({"instrument_token": str(tok), "exchange_segment": "nse_fo"})
         
         try:
-            res = self.client.quotes(instrument_tokens=tokens_to_poll, isIndex=False)
+            res = self.client.quotes(instrument_tokens=tokens_to_poll)
             recs = record_list(res)
             with self.lock:
                 for r in recs:
@@ -1562,6 +1551,7 @@ class KotakNeoAdapter:
                                 self.feature_engine.set_previous_day(pdc, pdh, pdl)
                             if is_valid_number(open_p):
                                 self.feature_engine.set_today_open(open_p)
+                self.last_error = ""
         except Exception as exc:
             self.last_error = f"Poll error: {exc}"
 
