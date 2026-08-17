@@ -11,9 +11,11 @@ NIFTY 3-Min Micro Engine | v5.0 Institutional Prop-Grade Architecture
 - Automatic Session-End (15:30) Forced Square-Off Mechanism
 - Auto-Reset of Paper Trading State on New Trading Date
 - Live Mark-to-Market (MTM) & Hit-Rate Performance HUD
-- Dual Ingestion Engine: Live WebSocket + Active REST Polling
+- Kotak Historical API Fallback for Daily Range Context
+- Dual Engine: WebSocket + Auto REST Polling Fallback
 - Thread-Safe Shared State Synchronization
 - Traffic Light Heatmap Visuals (Green/Red/Brown)
+- Integrated F&O Live Token Debugger
 """
 
 from __future__ import annotations
@@ -1316,7 +1318,7 @@ class PaperTradingDesk:
 
 
 # =========================================================
-# 7. KOTAK NEO ADAPTER & DUAL DATA FEED (WS + REST POLLING)
+# 7. KOTAK NEO ADAPTER & DUAL DATA FEED (FIXED SPOT/FUT/OPTIONS)
 # =========================================================
 
 class KotakNeoAdapter:
@@ -1513,15 +1515,17 @@ class KotakNeoAdapter:
 
         now_ts = datetime.now()
         
-        # Spot index needs specific exchange segment or index polling handling
+        # Robust multi-segment polling for Spot, Futures, and Options
         tokens_to_poll = [
             {"instrument_token": str(self.spot_token), "exchange_segment": "nse_index"},
             {"instrument_token": str(self.spot_token), "exchange_segment": "nse_cm"},
-            {"instrument_token": str(self.future_token), "exchange_segment": "nse_fo"}
+            {"instrument_token": str(self.future_token), "exchange_segment": "nse_fo"},
         ]
+        
         for tok in self.heavy_tokens.values():
             tokens_to_poll.append({"instrument_token": str(tok), "exchange_segment": "nse_cm"})
-        for tok in self.pcr_tokens[:10]:
+            
+        for tok in self.pcr_tokens[:20]:
             tokens_to_poll.append({"instrument_token": str(tok), "exchange_segment": "nse_fo"})
         
         try:
@@ -1535,6 +1539,7 @@ class KotakNeoAdapter:
                         self.latest[tok] = r
                         self.tick_buffer.append(r)
                         self._process_live_tick(tok, r)
+                        
                         if tok == str(self.future_token):
                             pdc = safe_float(r.get("c") or r.get("close") or r.get("pdc"))
                             pdh = safe_float(r.get("h") or r.get("high") or r.get("pdh"))
@@ -1557,7 +1562,7 @@ class KotakNeoAdapter:
         sub_tokens = [
             {"instrument_token": str(self.spot_token), "exchange_segment": "nse_index"},
             {"instrument_token": str(self.spot_token), "exchange_segment": "nse_cm"},
-            {"instrument_token": str(self.future_token), "exchange_segment": "nse_fo"}
+            {"instrument_token": str(self.future_token), "exchange_segment": "nse_fo"},
         ]
         for tok in self.heavy_tokens.values():
             sub_tokens.append({"instrument_token": str(tok), "exchange_segment": "nse_cm"})
@@ -1804,7 +1809,7 @@ class KotakNeoAdapter:
 
 
 # =========================================================
-# 8. STREAMLIT UI & MAIN ENTRY (HEATMAP + PAPER DESK)
+# 8. STREAMLIT UI & MAIN ENTRY (HEATMAP + PAPER DESK + DEBUGGER)
 # =========================================================
 
 def inject_custom_css():
@@ -1991,6 +1996,23 @@ def main():
                 st.session_state.stream_active = True
                 st.rerun()
 
+        st.markdown("---")
+        st.subheader("🔍 F&O Live Token Debugger")
+        if st.button("Check Future & Option Token Response", key="btn_dbg_fo", disabled=not is_logged_in):
+            try:
+                fut_tok = adapter.future_token
+                res_fut = adapter.client.quotes(instrument_tokens=[{"instrument_token": fut_tok, "exchange_segment": "nse_fo"}])
+                st.write(f"Future Token ({fut_tok}) Response:", res_fut)
+                
+                if adapter.pcr_tokens:
+                    opt_tok = adapter.pcr_tokens[0]
+                    res_opt = adapter.client.quotes(instrument_tokens=[{"instrument_token": opt_tok, "exchange_segment": "nse_fo"}])
+                    st.write(f"Option Token ({opt_tok}) Response:", res_opt)
+                else:
+                    st.warning("Discover instruments first to check options.")
+            except Exception as dbg_err:
+                st.error(f"API Error: {dbg_err}")
+
         if adapter.last_error:
             st.warning(f"Engine Log: {adapter.last_error}")
 
@@ -2009,8 +2031,14 @@ def main():
     spot_val, fut_val, fut_oi, ticks_count = "-", "-", "-", 0
     if adapter and adapter.latest:
         with adapter.lock:
+            # Fallback check for spot across keys
             s = adapter.latest.get(str(adapter.spot_token), {})
             spot_p = extract_tick_price(s)
+            if not is_valid_number(spot_p):
+                for k, v in adapter.latest.items():
+                    if "NIFTY" in str(v.get("display_symbol", "")).upper() and "EQ" not in str(v.get("display_symbol", "")):
+                        spot_p = extract_tick_price(v)
+                        if is_valid_number(spot_p): break
             spot_val = f"{spot_p:.2f}" if is_valid_number(spot_p) else "-"
             
             f = adapter.latest.get(str(adapter.future_token), {})
