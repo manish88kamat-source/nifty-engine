@@ -11,11 +11,7 @@ NIFTY 3-Min Micro Engine | v5.0 Institutional Prop-Grade Architecture
 - Automatic Session-End (15:30) Forced Square-Off Mechanism
 - Auto-Reset of Paper Trading State on New Trading Date
 - Live Mark-to-Market (MTM) & Hit-Rate Performance HUD
-- Kotak Historical API Fallback for Daily Range Context
-- Dual Engine: WebSocket + Auto REST Polling Fallback
-- Thread-Safe Shared State Synchronization
-- Traffic Light Heatmap Visuals (Green/Red/Brown)
-- Fixed Nifty Spot Index ("Nifty 50" with isIndex=True) & Strict Future Filter (FPI/Bank/Fin excluded)
+- Decoupled Background Daemon Architecture (UI as Light Read-Only Viewer)
 """
 
 from __future__ import annotations
@@ -1443,7 +1439,7 @@ class KotakNeoAdapter:
                 sym = str(r.get("pTrdSymbol", r.get("ts", r.get("symbol", "")))).upper().strip()
                 inst = str(r.get("pInstType", "")).upper()
                 
-                # Strict Tightened Filter as suggested by you
+                # Strict Tightened Filter as suggested
                 is_nifty_fut = (
                     sym.startswith("NIFTY") and 
                     ("FUT" in sym or "FUTIDX" in inst) and
