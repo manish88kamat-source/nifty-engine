@@ -11,7 +11,7 @@ NIFTY 3-Min Micro Engine | v5.0 Institutional Prop-Grade Architecture
 - Automatic Session-End (15:30) Forced Square-Off Mechanism
 - Auto-Reset of Paper Trading State on New Trading Date
 - Live Mark-to-Market (MTM) & Hit-Rate Performance HUD
-- Instant Live Diagnostic Probe Tool
+- Dual Ingestion Engine: Live WebSocket + Active REST Polling
 - Thread-Safe Shared State Synchronization
 - Traffic Light Heatmap Visuals (Green/Red/Brown)
 """
@@ -135,7 +135,7 @@ NSE_CASH_TOKENS = {
 
 
 # =========================================================
-# 2. MATHEMATICAL & SECURITY UTILITIES
+# 2. MATHEMATICAL & SECURITY UTILITIES (FIXED FOR KOTAK JSON KEYS)
 # =========================================================
 
 def norm_pdf(x: float) -> float:
@@ -227,7 +227,7 @@ def floor_bar_timestamp(ts: datetime, minutes=3):
     return anchor + timedelta(minutes=(elapsed // minutes) * minutes)
 
 def parse_tick_timestamp(tick: Dict[str, Any]) -> datetime:
-    for key in ("ft", "exch_tm", "timestamp", "ltt", "t", "time", "ts"):
+    for key in ("lstup_time", "ft", "exch_tm", "timestamp", "ltt", "t", "time", "ts"):
         val = tick.get(key)
         if val is None:
             continue
@@ -241,16 +241,6 @@ def parse_tick_timestamp(tick: Dict[str, Any]) -> datetime:
                 return datetime.fromtimestamp(x)
         except Exception:
             pass
-        text = str(val).strip()
-        for fmt in ("%Y-%m-%d %H:%M:%S", "%d-%m-%Y %H:%M:%S", "%H:%M:%S"):
-            try:
-                dt = datetime.strptime(text, fmt)
-                if dt.year < 2000:
-                    now = datetime.now()
-                    dt = dt.replace(year=now.year, month=now.month, day=now.day)
-                return dt
-            except Exception:
-                pass
     return datetime.now()
 
 def wilder_atr(trs: List[float], period=14):
@@ -306,7 +296,7 @@ def option_type_from_record(record):
         return "CE"
     if "PE" in val or "PUT" in val:
         return "PE"
-    symbol = str(record.get("pTrdSymbol", record.get("ts", ""))).upper()
+    symbol = str(record.get("pTrdSymbol", record.get("ts", record.get("display_symbol", "")))).upper()
     if symbol.endswith("CE"):
         return "CE"
     if symbol.endswith("PE"):
@@ -325,7 +315,7 @@ def strike_from_record(record):
 def token_from_record(record):
     if not isinstance(record, dict):
         return ""
-    for key in ["pSymbol", "pSymbolToken", "instrument_token", "instrumentToken", "tok", "token", "pToken", "tk"]:
+    for key in ["exchange_token", "pSymbol", "pSymbolToken", "instrument_token", "instrumentToken", "tok", "token", "pToken", "tk"]:
         value = record.get(key)
         if value is not None and str(value).strip():
             return str(value).strip()
@@ -1388,7 +1378,7 @@ class KotakNeoAdapter:
                 for item in items:
                     if not isinstance(item, dict):
                         continue
-                    token = str(item.get("tk") or item.get("token") or item.get("pSymbolToken") or "").strip()
+                    token = token_from_record(item)
                     if token:
                         item["_parsed_ts"] = parse_tick_timestamp(item)
                         self.latest[token] = item
@@ -1537,7 +1527,7 @@ class KotakNeoAdapter:
             recs = record_list(res)
             with self.lock:
                 for r in recs:
-                    tok = str(token_from_record(r))
+                    tok = token_from_record(r)
                     if tok:
                         r["_parsed_ts"] = now_ts
                         self.latest[tok] = r
@@ -1619,7 +1609,7 @@ class KotakNeoAdapter:
             return np.nan
         last_cum = None
         for t in reversed(fut_ticks):
-            c_val = safe_float(t.get("v") or t.get("vol") or t.get("volume"))
+            c_val = safe_float(t.get("v") or t.get("vol") or t.get("volume") or t.get("last_volume"))
             if is_valid_number(c_val) and c_val > 0:
                 last_cum = c_val
                 break
@@ -1667,7 +1657,7 @@ class KotakNeoAdapter:
                 return
 
             def _prices(token):
-                ticks = [t for t in self.current_bar_ticks if str(t.get("tk") or t.get("token")) == str(token)]
+                ticks = [t for t in self.current_bar_ticks if str(token_from_record(t)) == str(token)]
                 vals = [extract_tick_price(t) for t in ticks]
                 vals = [v for v in vals if is_valid_number(v)]
                 return ticks, vals
@@ -1684,13 +1674,13 @@ class KotakNeoAdapter:
                 last = extract_tick_price(self.latest.get(str(self.future_token), {})) or spot_c
                 fut_o = fut_h = fut_l = fut_c = last
                 fut_vol = np.nan
-                fut_oi = safe_float(self.latest.get(str(self.future_token), {}).get("oi"), np.nan)
+                fut_oi = safe_float(self.latest.get(str(self.future_token), {}).get("open_int", 0), np.nan)
                 l2_snap = {}
             else:
                 fut_o, fut_h, fut_l, fut_c = fut_prices[0], max(fut_prices), min(fut_prices), fut_prices[-1]
                 fut_vol = self._resolve_volume_clean(fut_ticks)
                 last_fut_t = fut_ticks[-1]
-                fut_oi = safe_float(last_fut_t.get("oi") or last_fut_t.get("open_interest"), np.nan)
+                fut_oi = safe_float(last_fut_t.get("open_int") or last_fut_t.get("oi"), np.nan)
                 
                 l2_snap = {
                     "best_bid": safe_float(last_fut_t.get("bp") or last_fut_t.get("bid_price"), fut_c),
@@ -1720,8 +1710,8 @@ class KotakNeoAdapter:
             for tok in self.pcr_tokens:
                 info = self.pcr_records.get(str(tok), {})
                 t = self.latest.get(str(tok), {})
-                oi = safe_float(t.get("oi"), np.nan)
-                vol = safe_float(t.get("v") or t.get("vol"), 0.0)
+                oi = safe_float(t.get("open_int") or t.get("oi"), np.nan)
+                vol = safe_float(t.get("last_volume") or t.get("v"), 0.0)
                 strike = info.get("strike")
                 if is_valid_number(oi):
                     if info.get("option_type") == "CE":
@@ -1997,16 +1987,6 @@ def main():
                 st.session_state.stream_active = True
                 st.rerun()
 
-        st.markdown("---")
-        st.subheader("🛠️ Live Broker Probe")
-        if st.button("Probe Kotak Live Quote", key="btn_probe", disabled=not is_logged_in):
-            with st.spinner("Fetching Raw Broker Response..."):
-                try:
-                    probe_res = adapter.client.quotes(instrument_tokens=[{"instrument_token": "2885", "exchange_segment": "nse_cm"}])
-                    st.json(probe_res)
-                except Exception as p_err:
-                    st.error(f"Probe Error: {p_err}")
-
         if adapter.last_error:
             st.warning(f"Engine Log: {adapter.last_error}")
 
@@ -2033,7 +2013,7 @@ def main():
             fut_p = extract_tick_price(f)
             fut_val = f"{fut_p:.2f}" if is_valid_number(fut_p) else "-"
             
-            fut_oi = f.get("oi") or f.get("open_interest", "-")
+            fut_oi = f.get("open_int") or f.get("oi") or f.get("open_interest", "-")
             ticks_count = len(adapter.tick_buffer)
 
     t1, t2, t3, t4 = st.columns(4)
@@ -2164,7 +2144,7 @@ def main():
                     c_dq1, c_dq2 = st.columns(2)
                     with c_dq1:
                         st.write(f"• Top 5 Lead Pressure ($SLP_5$): `{latest_row.get('slp_top5_pressure', 0.0):.3f}`")
-                        st.write(f"• Order Book Imbalance (OBI): `{latest_row.get('order_book_imbalance', 0.0):.3f}`")
+                        st.write(f"• Order Book Imbalance (OBI): `{latest_row.get('order_badge_imbalance', 0.0):.3f}`")
                         st.write(f"• Dealer Vanna Flow: `{latest_row.get('dealer_vanna_flow', 0.0):.3f}`")
                         st.write(f"• Dealer Charm Flow: `{latest_row.get('dealer_charm_flow', 0.0):.3f}`")
                         st.write(f"• Dealer GEX Proxy: `{latest_row.get('gex_proxy', 0.0):.3f}`")
