@@ -1176,6 +1176,25 @@ class DecisionEngine:
 # 6. PAPER TRADING SIMULATOR & PERSISTENCE
 # =========================================================
 
+class DatasetManager:
+    def __init__(self, path=None):
+        self.base = Path(path or CONFIG["dataset_path"])
+        self.base.mkdir(parents=True, exist_ok=True)
+
+    def write_parquet(self, df: pd.DataFrame, name="features"):
+        if df.empty:
+            return
+        data = df.copy()
+        if "timestamp" in data.columns:
+            data["date"] = pd.to_datetime(data["timestamp"]).dt.date.astype(str)
+        table = pa.Table.from_pandas(data, preserve_index=False)
+        pq.write_to_dataset(
+            table, root_path=str(self.base / name),
+            partition_cols=["date"] if "date" in data.columns else None,
+            existing_data_behavior="overwrite_or_ignore",
+        )
+
+
 @dataclass
 class PaperPosition:
     entry_time: datetime
@@ -1313,27 +1332,8 @@ class PaperTradingDesk:
 
 
 # =========================================================
-# 7. DATASET MANAGER & KOTAK NEO ADAPTER
+# 7. KOTAK NEO ADAPTER & DATA FEED
 # =========================================================
-
-class DatasetManager:
-    def __init__(self, path=None):
-        self.base = Path(path or CONFIG["dataset_path"])
-        self.base.mkdir(parents=True, exist_ok=True)
-
-    def write_parquet(self, df: pd.DataFrame, name="features"):
-        if df.empty:
-            return
-        data = df.copy()
-        if "timestamp" in data.columns:
-            data["date"] = pd.to_datetime(data["timestamp"]).dt.date.astype(str)
-        table = pa.Table.from_pandas(data, preserve_index=False)
-        pq.write_to_dataset(
-            table, root_path=str(self.base / name),
-            partition_cols=["date"] if "date" in data.columns else None,
-            existing_data_behavior="overwrite_or_ignore",
-        )
-
 
 class KotakNeoAdapter:
     def __init__(self):
@@ -1374,7 +1374,7 @@ class KotakNeoAdapter:
         self.last_decision: Optional[TradeDecision] = None
         self._prev_ce_oi = np.nan
         self._prev_pe_oi = np.nan
-        self._last_tick_wall = time.time()
+        self._last_tick_wall = None
         self._last_cum_volume: Optional[float] = None
         self._unlabeled_decisions = deque(maxlen=150)
 
@@ -1629,6 +1629,7 @@ class KotakNeoAdapter:
         if tokens:
             self.client.subscribe(instrument_tokens=tokens)
             self.conn_state = "STREAMING"
+            self._last_tick_wall = time.time()
             return len(tokens)
         return 0
 
@@ -1745,7 +1746,6 @@ class KotakNeoAdapter:
                 last_fut_t = fut_ticks[-1]
                 fut_oi = safe_float(last_fut_t.get("oi") or last_fut_t.get("open_interest"), np.nan)
                 
-                # Extract L2 Depth Quotes
                 l2_snap = {
                     "best_bid": safe_float(last_fut_t.get("bp") or last_fut_t.get("bid_price"), fut_c),
                     "best_ask": safe_float(last_fut_t.get("ap") or last_fut_t.get("ask_price"), fut_c),
@@ -1851,12 +1851,13 @@ class KotakNeoAdapter:
             while not self._watchdog_stop.is_set():
                 try:
                     self.maybe_flush_bars()
-                    silent = time.time() - self._last_tick_wall
-                    if self.conn_state == "STREAMING" and silent > CONFIG["feed_silence_sec"]:
-                        self.conn_state = "DISCONNECTED"
-                        self.connected = False
+                    if self._last_tick_wall is not None:
+                        silent = time.time() - self._last_tick_wall
+                        if self.conn_state == "STREAMING" and silent > CONFIG["feed_silence_sec"]:
+                            self.conn_state = "DISCONNECTED"
+                            self.connected = False
 
-                    if self.conn_state == "DISCONNECTED":
+                    if self.conn_state == "DISCONNECTED" and self._last_tick_wall is not None:
                         if not self._can_auto_reconnect():
                             self._reconnect_attempts = self._max_reconnect_attempts
                             self._next_reconnect_ts = time.time() + 3600
@@ -2010,8 +2011,11 @@ def main():
     st.set_page_config(page_title="NIFTY 3M | Micro Engine v5.0", page_icon="⚡", layout="wide", initial_sidebar_state="expanded")
     inject_custom_css()
 
-    adapter: Optional[KotakNeoAdapter] = st.session_state.get("neo")
-    is_logged_in = adapter is not None and getattr(adapter, "connected", False)
+    if "neo" not in st.session_state:
+        st.session_state.neo = KotakNeoAdapter()
+    
+    adapter: KotakNeoAdapter = st.session_state.neo
+    is_logged_in = adapter.connected
 
     # Sidebar: Controls & Diagnostics
     with st.sidebar:
@@ -2030,45 +2034,44 @@ def main():
         
         col_sb1, col_sb2 = st.columns(2)
         with col_sb1:
-            if st.button("Connect", use_container_width=True):
+            if st.button("Connect", key="btn_conn"):
                 try:
                     with st.spinner("Connecting..."):
-                        ad = KotakNeoAdapter()
-                        ad.login(live_totp_override=user_live_totp)
-                        ad.start_bar_watchdog()
-                        st.session_state.neo = ad
+                        adapter.login(live_totp_override=user_live_totp)
+                        adapter.start_bar_watchdog()
                         st.session_state.discovered = False
                         st.rerun()
                 except Exception as exc:
                     st.error(f"{exc}")
         with col_sb2:
-            if st.button("Reconnect", use_container_width=True, disabled=not adapter):
-                if adapter:
-                    adapter.try_reconnect_and_resubscribe(live_totp_override=user_live_totp)
-                    st.rerun()
+            if st.button("Reconnect", key="btn_reconn", disabled=not is_logged_in):
+                adapter.try_reconnect_and_resubscribe(live_totp_override=user_live_totp)
+                st.rerun()
 
         st.markdown("---")
         st.subheader("🔍 Subscriptions")
         
-        if st.button("Discover Instruments", use_container_width=True, disabled=not is_logged_in):
-            adapter.discover_nifty_instruments(auto_pcr=True)
-            st.session_state.discovered = True
-            st.rerun()
+        if st.button("Discover Instruments", key="btn_disc", disabled=not is_logged_in):
+            with st.spinner("Discovering..."):
+                adapter.discover_nifty_instruments(auto_pcr=True)
+                st.session_state.discovered = True
+                st.rerun()
 
-        if st.session_state.get("discovered") and adapter:
+        if st.session_state.get("discovered") and adapter.discovery_log:
             st.success("✓ Instruments Mapped!")
             for l in adapter.discovery_log:
                 st.caption(l)
 
-        if st.button("Start Live Feed", use_container_width=True, disabled=not is_logged_in):
-            n = adapter.subscribe_live_feed()
-            adapter.fetch_market_snapshot()
-            adapter.start_bar_watchdog()
-            st.session_state.stream_active = True
-            st.rerun()
+        is_streaming = (adapter.conn_state == "STREAMING")
+        if st.button("Start Live Feed", key="btn_start_feed", disabled=not is_logged_in or is_streaming):
+            with st.spinner("Subscribing..."):
+                adapter.subscribe_live_feed()
+                adapter.fetch_market_snapshot()
+                st.session_state.stream_active = True
+                st.rerun()
 
         st.markdown("---")
-        if st.button("Run Unit Tests", use_container_width=True):
+        if st.button("Run Unit Tests", key="btn_tests"):
             try:
                 st.success("Engine Verification Passed (v5.0)" if run_unit_tests() else "Test Failed")
             except Exception as exc:
@@ -2142,7 +2145,6 @@ def main():
         else:
             col_p4.markdown("**Active Position:** `FLAT (NO POSITION)`", unsafe_allow_html=True)
 
-        # Recent Closed Trades Table with Colored PnL
         if desk.closed_trades:
             st.markdown("---")
             col_tbl_head, col_tbl_dl = st.columns([3, 1])
@@ -2158,8 +2160,7 @@ def main():
                     label="📥 Download Journal (.csv)",
                     data=csv_data,
                     file_name=f"nifty_paper_trades_{datetime.now().strftime('%Y%m%d')}.csv",
-                    mime="text/csv",
-                    use_container_width=True
+                    mime="text/csv"
                 )
             
             recent_trades_data = []
@@ -2181,7 +2182,7 @@ def main():
                 return f'color: {color}; font-weight: bold;'
             
             styled_df = df_trades.style.format({"PnL (pt)": "{:+.2f}"}).map(style_pnl, subset=["PnL (pt)"])
-            st.dataframe(styled_df, use_container_width=True, hide_index=True)
+            st.dataframe(styled_df, hide_index=True)
 
     st.markdown('</div>', unsafe_allow_html=True)
 
@@ -2242,11 +2243,11 @@ def main():
                         t = adapter.latest.get(tok, {})
                         ltp = safe_float(t.get("ltp") or t.get("lp") or t.get("c"))
                         hw_list.append({"Symbol": sym, "LTP": ltp, "Weight": f"{HEAVYWEIGHTS_TOP5.get(sym, 0)*100:.1f}%"})
-            st.dataframe(pd.DataFrame(hw_list), height=210, use_container_width=True, hide_index=True)
+            st.dataframe(pd.DataFrame(hw_list), height=210, hide_index=True)
         else:
             st.caption("Heavyweights mapping pending discovery...")
 
-    if is_logged_in and st.session_state.get("stream_active", False):
+    if is_streaming:
         time.sleep(CONFIG["ui_refresh_sec"])
         st.rerun()
 
