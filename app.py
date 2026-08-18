@@ -2150,6 +2150,7 @@ def main():
 
     if is_streaming and adapter:
         adapter.fetch_market_snapshot()
+        adapter.maybe_flush_bars()
 
     # Top Metric Strip
     spot_val, fut_val, fut_oi, ticks_count = "-", "-", "-", 0
