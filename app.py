@@ -4,6 +4,7 @@ NIFTY 3-Min Micro Engine | v5.1 Institutional Prop-Grade Architecture
 FIXED:
 1. Kotak Neo library 'NoneType += str' crash hardened
 2. All timing forced to IST (Asia/Kolkata) — Streamlit Cloud UTC issue fixed
+3. Safe integer conversion for NaN/missing feature values in RegimeEngine
 """
 
 from __future__ import annotations
@@ -60,7 +61,6 @@ def to_ist(dt: datetime) -> datetime:
     if dt is None:
         return None
     if dt.tzinfo is None:
-        # Assume naive datetime is already IST (common in this codebase)
         return dt.replace(tzinfo=IST)
     return dt.astimezone(IST)
 
@@ -202,6 +202,17 @@ def safe_float(value, default=np.nan):
     except Exception:
         return default
 
+def safe_int(value, default=0) -> int:
+    try:
+        if value is None:
+            return default
+        val = float(value)
+        if not np.isfinite(val):
+            return default
+        return int(val)
+    except Exception:
+        return default
+
 def is_valid_number(value):
     try:
         return value is not None and np.isfinite(float(value))
@@ -222,9 +233,7 @@ def env_or_secret(name):
     return ""
 
 def floor_bar_timestamp(ts: datetime, minutes=3) -> datetime:
-    """Floor to 3-min bar using IST market open (09:15)"""
     ts = to_ist(ts)
-    # Remove timezone for arithmetic, then re-attach
     naive = ts.replace(tzinfo=None)
     anchor = naive.replace(hour=9, minute=15, second=0, microsecond=0)
     if naive < anchor:
@@ -954,34 +963,20 @@ class LabelEngine:
 class RegimeEngine:
     def detect(self, feats: Dict[str, Any]) -> str:
         dq = safe_float(feats.get("data_quality_score"), 0.0)
-        atr_warm = int(feats.get("atr_warmup_flag") or 0)
+        atr_warm = safe_int(feats.get("atr_warmup_flag"), 0)
         
         if dq < CONFIG["min_data_quality_to_trade"] or atr_warm == 1:
             return "DATA_BAD"
         
-                        k_stretch = safe_float(
-            feats.get("kalman_stretch"),
-            feats.get("normalized_stretch", 0.0)
-        )
+        k_stretch = safe_float(feats.get("kalman_stretch"), feats.get("normalized_stretch", 0.0))
         slope = safe_float(feats.get("stretch_slope_3"), 0.0)
-        or_state = int(feats.get("or_breakout_state") or 0)
-        oi_long = int(feats.get("oi_long_buildup") or 0)
-        oi_short = int(feats.get("oi_short_buildup") or 0)
-        oi_unwind = (
-            int(feats.get("oi_long_unwinding") or 0)
-            or int(feats.get("oi_short_covering") or 0)
-        )
+        or_state = safe_int(feats.get("or_breakout_state"), 0)
+        oi_long = safe_int(feats.get("oi_long_buildup"), 0)
+        oi_short = safe_int(feats.get("oi_short_buildup"), 0)
+        oi_unwind = safe_int(feats.get("oi_long_unwinding"), 0) or safe_int(feats.get("oi_short_covering"), 0)
         twc = safe_float(feats.get("twc"), 0.0)
         breadth = safe_float(feats.get("breadth_10"), 0.5)
 
-        gex_val = safe_float(feats.get("gex_proxy"), 0.0)
-        z_dte = safe_float(feats.get("zero_dte_intensity"), 0.0)
-
-        twc = safe_float(feats.get("twc"), 0.0)
-        breadth = safe_float(feats.get("breadth_10"), 0.5)
-
-        gex_val = safe_float(feats.get("gex_proxy"), 0.0)
-        z_dte = safe_float(feats.get("zero_dte_intensity"), 0.0)
         gex_val = safe_float(feats.get("gex_proxy"), 0.0)
         z_dte = safe_float(feats.get("zero_dte_intensity"), 0.0)
 
@@ -1099,7 +1094,7 @@ class DecisionEngine:
         atr = safe_float(feats.get("atr_14_prev"), 15.0)
         stretch = safe_float(feats.get("kalman_stretch"), feats.get("normalized_stretch", 0.0))
         slope = safe_float(feats.get("stretch_slope_3"), 0.0)
-        or_state = int(feats.get("or_breakout_state") or 0)
+        or_state = safe_int(feats.get("or_breakout_state"), 0)
         dq = safe_float(feats.get("data_quality_score"), 0.0)
         twc = safe_float(feats.get("twc"), 0.0)
         breadth = safe_float(feats.get("breadth_10"), 0.5)
@@ -1190,7 +1185,7 @@ class DecisionEngine:
         combined_conf = (rule_w * rule_conf) + (ml_w * abs(ml_prob - 0.5) * 2.0)
         conf = float(np.clip(combined_conf, 0.28, 0.88))
 
-        hw_seen = int(feats.get("hw_symbols_seen") or 0)
+        hw_seen = safe_int(feats.get("hw_symbols_seen"), 0)
         min_hw = CONFIG.get("hw_min_symbols_required", 5)
         if hw_seen < min_hw:
             size *= 0.55
@@ -1629,7 +1624,6 @@ class KotakNeoAdapter:
             return 0
 
     def fetch_real_option_oi(self):
-        """Hardened against Kotak library NoneType += str bug"""
         if not self.connected or not self.client or not self.pcr_tokens:
             return
         try:
@@ -1656,13 +1650,11 @@ class KotakNeoAdapter:
         except Exception as e:
             err_msg = str(e)
             if "NoneType" in err_msg and ("+=" in err_msg or "unsupported operand" in err_msg):
-                # Library internal bug — ignore
                 pass
             else:
                 self.last_error = f"Option OI: {err_msg}"
 
     def fetch_market_snapshot(self):
-        """HARDENED against Kotak library 'NoneType += str' crash + IST timing"""
         if not self.connected or not self.client:
             return
 
@@ -1722,7 +1714,6 @@ class KotakNeoAdapter:
         except Exception as exc:
             err_msg = str(exc)
             if "NoneType" in err_msg and ("+=" in err_msg or "unsupported operand" in err_msg):
-                # This is the exact library bug — swallow it so bars can continue
                 self.last_error = "Poll: Kotak library internal bug ignored (using live ticks)"
             else:
                 self.last_error = f"Poll error: {err_msg}"
@@ -2164,9 +2155,7 @@ def main():
 
     if is_streaming and adapter:
         adapter.fetch_market_snapshot()
-        adapter.maybe_flush_bars()
 
-    # Top Metric Strip
     spot_val, fut_val, fut_oi, ticks_count = "-", "-", "-", 0
     if adapter and adapter.latest:
         with adapter.lock:
@@ -2195,7 +2184,6 @@ def main():
     t3.metric("FUT OPEN INTEREST", f"{int(fut_oi):,}" if isinstance(fut_oi, (int, float)) and np.isfinite(fut_oi) else str(fut_oi))
     t4.metric("TICKS INGESTED", f"{ticks_count:,}")
 
-    # Tactical Signal HUD
     st.markdown('<div class="terminal-card">', unsafe_allow_html=True)
     col_hud1, col_hud2, col_hud3, col_hud4, col_hud5 = st.columns([1.5, 1.2, 1.2, 1, 2])
     
@@ -2220,7 +2208,6 @@ def main():
         st.info("Awaiting first completed 3-minute bar to establish baseline regime and signal...")
     st.markdown('</div>', unsafe_allow_html=True)
 
-    # Paper Trading Desk
     st.markdown('<div class="terminal-card">', unsafe_allow_html=True)
     st.markdown("**⚡ Live Paper Trading Desk & Journal**")
     
@@ -2281,7 +2268,6 @@ def main():
 
     st.markdown('</div>', unsafe_allow_html=True)
 
-    # Analytics Grid
     grid_left, grid_right = st.columns([1.2, 0.8])
     latest_row = None
     with grid_left:
