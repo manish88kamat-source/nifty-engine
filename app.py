@@ -959,19 +959,25 @@ class RegimeEngine:
         if dq < CONFIG["min_data_quality_to_trade"] or atr_warm == 1:
             return "DATA_BAD"
         
-        k_stretch = safe_float(feats.get("kalman_stretch"), feats.get("normalized_stretch", 0.0))
+                k_stretch = safe_float(
+            feats.get("kalman_stretch"),
+            feats.get("normalized_stretch", 0.0)
+        )
         slope = safe_float(feats.get("stretch_slope_3"), 0.0)
         or_state = safe_int(feats.get("or_breakout_state"), 0)
-oi_long = safe_int(feats.get("oi_long_buildup"), 0)
-oi_short = safe_int(feats.get("oi_short_buildup"), 0)
+        oi_long = safe_int(feats.get("oi_long_buildup"), 0)
+        oi_short = safe_int(feats.get("oi_short_buildup"), 0)
 
-oi_unwind = (
-    safe_int(feats.get("oi_long_unwinding"), 0)
-    or safe_int(feats.get("oi_short_covering"), 0)
-)
+        oi_unwind = (
+            safe_int(feats.get("oi_long_unwinding"), 0)
+            or safe_int(feats.get("oi_short_covering"), 0)
+        )
+
         twc = safe_float(feats.get("twc"), 0.0)
         breadth = safe_float(feats.get("breadth_10"), 0.5)
 
+        gex_val = safe_float(feats.get("gex_proxy"), 0.0)
+        z_dte = safe_float(feats.get("zero_dte_intensity"), 0.0)
         gex_val = safe_float(feats.get("gex_proxy"), 0.0)
         z_dte = safe_float(feats.get("zero_dte_intensity"), 0.0)
 
