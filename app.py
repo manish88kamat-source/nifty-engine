@@ -961,10 +961,14 @@ class RegimeEngine:
         
         k_stretch = safe_float(feats.get("kalman_stretch"), feats.get("normalized_stretch", 0.0))
         slope = safe_float(feats.get("stretch_slope_3"), 0.0)
-        or_state = int(feats.get("or_breakout_state") or 0)
-        oi_long = int(feats.get("oi_long_buildup") or 0)
-        oi_short = int(feats.get("oi_short_buildup") or 0)
-        oi_unwind = int(feats.get("oi_long_unwinding") or 0) or int(feats.get("oi_short_covering") or 0)
+        or_state = safe_int(feats.get("or_breakout_state"), 0)
+oi_long = safe_int(feats.get("oi_long_buildup"), 0)
+oi_short = safe_int(feats.get("oi_short_buildup"), 0)
+
+oi_unwind = (
+    safe_int(feats.get("oi_long_unwinding"), 0)
+    or safe_int(feats.get("oi_short_covering"), 0)
+)
         twc = safe_float(feats.get("twc"), 0.0)
         breadth = safe_float(feats.get("breadth_10"), 0.5)
 
