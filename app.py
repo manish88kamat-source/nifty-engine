@@ -1,6 +1,6 @@
-#!/usr/init/env python3
+#!/usr/bin/env python3
 """
-NIFTY 3-Min Micro Engine | v5.0 Institutional Prop-Grade Architecture
+NIFTY 3-Min Micro Engine | v5.1 Institutional Prop-Grade Architecture
 - Single Self-Contained File Architecture
 - 2nd-Order Options Greeks Engine (Vanna & Charm Dealer Delta Rebalancing Flow)
 - 1D State-Space Kalman Filter for True Drift & Noise-Free Volatility Regimes
@@ -12,6 +12,7 @@ NIFTY 3-Min Micro Engine | v5.0 Institutional Prop-Grade Architecture
 - Auto-Reset of Paper Trading State on New Trading Date
 - Live Mark-to-Market (MTM) & Hit-Rate Performance HUD
 - Dedicated Option Chain Polling (nse_fo segment) for 100% Real PCR & OI Data
+- IMPROVED: Robust live OI extraction + Strategy-aware Decision Engine (Trend + Mean-Reversion on original regimes)
 """
 
 from __future__ import annotations
@@ -58,7 +59,7 @@ except ImportError:
 # =========================================================
 
 CONFIG = {
-    "app_version": "v5.0_institutional_prop",
+    "app_version": "v5.1_institutional_prop",
     "feature_version": "v4.0_vanna_charm_kalman_lob",
     "label_version": "TB_v3.0_clean",
     "schema_version": "4.0",
@@ -926,10 +927,11 @@ class LabelEngine:
 
 
 # =========================================================
-# 5. REGIME & SCHEMA-ALIGNED ML DECISION ENGINE
+# 5. REGIME & SCHEMA-ALIGNED ML DECISION ENGINE  (IMPROVED)
 # =========================================================
 
 class RegimeEngine:
+    """Original regimes kept exactly as-is."""
     def detect(self, feats: Dict[str, Any]) -> str:
         dq = safe_float(feats.get("data_quality_score"), 0.0)
         atr_warm = int(feats.get("atr_warmup_flag") or 0)
@@ -986,6 +988,12 @@ class TradeDecision:
 
 
 class DecisionEngine:
+    """
+    Strategy-aware Decision Engine on top of original regimes.
+    - IMPULSE / STAIRCASE → Trend strategy
+    - GRIND / NEUTRAL → Mean-reversion (boundary rejection) when stretch elevated
+    - Otherwise SKIP
+    """
     def __init__(self):
         self.regime_engine = RegimeEngine()
         self.last_action: Optional[str] = None
@@ -1015,24 +1023,24 @@ class DecisionEngine:
 
     def get_adaptive_weights(self, regime: str) -> Tuple[float, float]:
         if regime in ["IMPULSE_UP", "IMPULSE_DOWN", "STAIRCASE_UP", "STAIRCASE_DOWN"]:
-            return 0.85, 0.15
-        elif regime == "FAILURE":
-            return 0.40, 0.60
-        elif regime == "GRIND":
-            return 0.50, 0.50
+            return 0.82, 0.18
+        if regime in ["GRIND", "NEUTRAL"]:
+            return 0.55, 0.45
+        if regime == "FAILURE":
+            return 0.35, 0.65
         return 0.70, 0.30
 
-    def _realistic_target(self, atr: float, regime: str) -> Tuple[float, float, float]:
+    def _realistic_target(self, atr: float, regime: str, strategy: str) -> Tuple[float, float, float]:
         if not is_valid_number(atr) or atr <= 0:
             atr = 15.0
-        if regime in ("IMPULSE_UP", "IMPULSE_DOWN"):
-            return 1.1 * atr, 0.7 * atr, 1.0
-        if regime in ("STAIRCASE_UP", "STAIRCASE_DOWN"):
-            return 0.85 * atr, 0.65 * atr, 0.85
-        if regime == "FAILURE":
-            return 0.55 * atr, 0.45 * atr, 0.6
-        if regime == "GRIND":
-            return 0.45 * atr, 0.40 * atr, 0.45
+        if strategy == "TREND":
+            if regime in ("IMPULSE_UP", "IMPULSE_DOWN"):
+                return 1.15 * atr, 0.70 * atr, 1.00
+            if regime in ("STAIRCASE_UP", "STAIRCASE_DOWN"):
+                return 0.90 * atr, 0.65 * atr, 0.85
+            return 0.70 * atr, 0.55 * atr, 0.70
+        if strategy == "MEAN_REVERSION":
+            return 0.55 * atr, 0.40 * atr, 0.75
         return 0.60 * atr, 0.50 * atr, 0.55
 
     def _predict_real_ml_proba(self, feats: Dict[str, Any]) -> float:
@@ -1065,85 +1073,135 @@ class DecisionEngine:
         slope = safe_float(feats.get("stretch_slope_3"), 0.0)
         or_state = int(feats.get("or_breakout_state") or 0)
         dq = safe_float(feats.get("data_quality_score"), 0.0)
+        twc = safe_float(feats.get("twc"), 0.0)
+        breadth = safe_float(feats.get("breadth_10"), 0.5)
+        pcr = safe_float(feats.get("pcr_oi"), 1.0)
+        pcr_vel = safe_float(feats.get("pcr_velocity"), 0.0)
+        vanna = safe_float(feats.get("dealer_vanna_flow"), 0.0)
+        gex_x = safe_float(feats.get("gex_x_0dte"), 0.0)
+        obi = safe_float(feats.get("order_book_imbalance"), 0.0)
 
         if regime == "DATA_BAD" or dq < CONFIG["min_data_quality_to_trade"]:
-            return TradeDecision("SKIP", regime, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, "Data quality low / warmup pending", feats.get("timestamp"), now_ts)
+            return TradeDecision("SKIP", regime, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                                "Data quality low / warmup pending", feats.get("timestamp"), now_ts)
 
-        twc = safe_float(feats.get("twc"), 0.0)
-        twc_term = float(np.clip(twc * 50.0, -0.8, 0.8))
-        breadth_term = (safe_float(feats.get("breadth_10"), 0.5) - 0.5) * 1.5
-        
-        slp_top5 = safe_float(feats.get("slp_top5_pressure"), 0.0)
-        slp_term = float(np.clip(slp_top5 * 0.5, -0.5, 0.5))
-        
-        obi = safe_float(feats.get("order_book_imbalance"), 0.0)
-        obi_term = float(np.clip(obi * 0.4, -0.4, 0.4))
-
-        pcr_val = safe_float(feats.get("pcr_oi"), 1.0)
-        pcr_term = float(np.clip((pcr_val - 1.0) * 0.5, -0.5, 0.5))
-        pcr_vel = safe_float(feats.get("pcr_velocity"), 0.0)
-        pcr_vel_term = float(np.clip(pcr_vel * 2.0, -0.3, 0.3))
-        
-        gex_x_0dte = safe_float(feats.get("gex_x_0dte"), 0.0)
-        gex_term = float(np.clip(gex_x_0dte * 0.8, -0.8, 0.8))
-        
-        vanna_flow = safe_float(feats.get("dealer_vanna_flow"), 0.0)
-        vanna_term = float(np.clip(vanna_flow * 0.35, -0.35, 0.35))
-        
-        score = (np.clip(stretch, -2, 2) * 1.2 +
-                 np.clip(slope, -1, 1) * 0.8 +
-                 or_state * 0.5 +
-                 twc_term + breadth_term + slp_term + obi_term + pcr_term + pcr_vel_term + gex_term + vanna_term)
-
-        raw_action = "CE" if score >= 0 else "PE"
-        hold = CONFIG["signal_min_hold_bars"]
+        strategy = "NONE"
+        action = "SKIP"
+        reason = ""
         conf_penalty = 0.0
-        if self.last_action and self.last_action != "SKIP":
-            bars_since = self.bar_counter - self.last_action_bar_idx
-            if bars_since < hold and raw_action != self.last_action:
-                action = self.last_action
-                conf_penalty = 0.15
-                reason = f"Stability hold ({bars_since}/{hold}) — kept {action}"
+
+        # ============================================================
+        # 1. TREND PATH (original strong regimes)
+        # ============================================================
+        if regime in ("IMPULSE_UP", "IMPULSE_DOWN", "STAIRCASE_UP", "STAIRCASE_DOWN"):
+            strategy = "TREND"
+            score = (
+                np.clip(stretch, -2, 2) * 1.25 +
+                np.clip(slope, -1, 1) * 0.85 +
+                or_state * 0.45 +
+                np.clip(twc * 55.0, -0.9, 0.9) +
+                (breadth - 0.5) * 1.4 +
+                np.clip(obi * 0.35, -0.35, 0.35) +
+                np.clip((pcr - 1.0) * 0.45, -0.45, 0.45) +
+                np.clip(pcr_vel * 1.8, -0.30, 0.30) +
+                np.clip(gex_x * 0.70, -0.70, 0.70) +
+                np.clip(vanna * 0.30, -0.30, 0.30)
+            )
+            raw_action = "CE" if score >= 0.18 else ("PE" if score <= -0.18 else "SKIP")
+
+            hold = CONFIG["signal_min_hold_bars"]
+            if self.last_action and self.last_action != "SKIP":
+                bars_since = self.bar_counter - self.last_action_bar_idx
+                if bars_since < hold and raw_action != self.last_action and raw_action != "SKIP":
+                    action = self.last_action
+                    conf_penalty = 0.12
+                    reason = f"Trend hold ({bars_since}/{hold}) | {regime}"
+                else:
+                    action = raw_action
+                    reason = f"Trend strategy | {regime} | score={score:.2f}"
             else:
                 action = raw_action
-                reason = f"Regime={regime}, score={score:.2f} [composite]"
-        else:
-            action = raw_action
-            reason = f"Regime={regime}, score={score:.2f} [composite]"
+                reason = f"Trend strategy | {regime} | score={score:.2f}"
 
-        target, stop, size = self._realistic_target(atr, regime)
-        
+        # ============================================================
+        # 2. MEAN-REVERSION PATH on GRIND / NEUTRAL (your key improvement)
+        # ============================================================
+        elif regime in ("GRIND", "NEUTRAL"):
+            strategy = "MEAN_REVERSION"
+
+            # Upper boundary rejection → PE
+            upper_rej = (
+                stretch > 0.25 and
+                slope < 0.05 and
+                (breadth < 0.53 or twc < 0.0005 or pcr > 1.04 or vanna < -0.05 or obi < -0.15)
+            )
+            # Lower boundary rejection → CE
+            lower_rej = (
+                stretch < -0.25 and
+                slope > -0.05 and
+                (breadth > 0.47 or twc > -0.0005 or pcr < 0.96 or vanna > 0.05 or obi > 0.15)
+            )
+
+            if upper_rej:
+                action = "PE"
+                reason = f"Mean-reversion (upper rejection) | {regime} | stretch={stretch:.2f}"
+            elif lower_rej:
+                action = "CE"
+                reason = f"Mean-reversion (lower rejection) | {regime} | stretch={stretch:.2f}"
+            else:
+                action = "SKIP"
+                reason = f"Range middle / no clear boundary | {regime} | stretch={stretch:.2f}"
+
+        # ============================================================
+        # 3. FAILURE → SKIP
+        # ============================================================
+        else:
+            action = "SKIP"
+            reason = f"No edge regime: {regime}"
+
+        # ============================================================
+        # TARGET / SIZE / CONFIDENCE
+        # ============================================================
+        target, stop, size = self._realistic_target(atr, regime, strategy)
+
         ml_prob = self._predict_real_ml_proba(feats)
-        rule_conf = 0.50 + min(0.30, abs(score) * 0.12) - conf_penalty
-        if regime.startswith("IMPULSE"):
-            rule_conf += 0.10
-        if regime == "GRIND":
-            rule_conf -= 0.08
-            
+        rule_conf = 0.52 + min(0.28, abs(stretch) * 0.18) - conf_penalty
+
+        if strategy == "TREND" and regime.startswith("IMPULSE"):
+            rule_conf += 0.09
+        if strategy == "MEAN_REVERSION" and action != "SKIP":
+            rule_conf += 0.05
+
         rule_w, ml_w = self.get_adaptive_weights(regime)
         combined_conf = (rule_w * rule_conf) + (ml_w * abs(ml_prob - 0.5) * 2.0)
-        conf = float(np.clip(combined_conf, 0.30, 0.90))
+        conf = float(np.clip(combined_conf, 0.28, 0.88))
 
         hw_seen = int(feats.get("hw_symbols_seen") or 0)
         min_hw = CONFIG.get("hw_min_symbols_required", 5)
-        if hw_seen >= 8:
-            pass
-        elif hw_seen >= min_hw:
-            size *= 0.85
-            conf = max(0.30, conf - 0.05)
-            reason += f" | HW soft ({hw_seen})"
-        else:
-            size *= 0.60
-            conf = max(0.30, conf - 0.12)
+        if hw_seen < min_hw:
+            size *= 0.55
+            conf = max(0.28, conf - 0.14)
             reason += f" | HW weak ({hw_seen})"
+        elif hw_seen < 8:
+            size *= 0.85
+            conf = max(0.28, conf - 0.05)
 
         delta = CONFIG["atm_delta_approx"]
         opt_target = round(target * delta, 1)
         opt_stop = round(stop * delta, 1)
 
-        self.last_action = action
-        self.last_action_bar_idx = self.bar_counter
-        return TradeDecision(action, regime, round(target, 1), round(stop, 1), opt_target, opt_stop, round(size, 2), round(conf, 3), reason, feats.get("timestamp"), now_ts, ml_prob)
+        if action in ("CE", "PE"):
+            self.last_action = action
+            self.last_action_bar_idx = self.bar_counter
+
+        return TradeDecision(
+            action, regime,
+            round(target, 1), round(stop, 1),
+            opt_target, opt_stop,
+            round(size, 2), round(conf, 3),
+            reason,
+            feats.get("timestamp"), now_ts, ml_prob
+        )
 
 
 # =========================================================
@@ -1306,7 +1364,7 @@ class PaperTradingDesk:
 
 
 # =========================================================
-# 7. KOTAK NEO ADAPTER & DEDICATED OPTION POLLING
+# 7. KOTAK NEO ADAPTER & DEDICATED OPTION POLLING  (OI FIXED)
 # =========================================================
 
 class KotakNeoAdapter:
@@ -1355,6 +1413,29 @@ class KotakNeoAdapter:
         self._watchdog_stop = threading.Event()
         self._watchdog_thread: Optional[threading.Thread] = None
 
+    def _extract_oi(self, record: dict) -> float:
+        """Robust OI extractor for Kotak Neo FO quotes / websocket."""
+        if not isinstance(record, dict):
+            return np.nan
+
+        # Direct common keys (order of likelihood from Kotak Neo)
+        for key in ("oi", "open_interest", "openInterest", "OpenInterest", "oI", "OI",
+                    "open_int", "opnInterest", "openInt", "dOpenInterest"):
+            val = safe_float(record.get(key))
+            if is_valid_number(val) and val >= 0:
+                return val
+
+        # Nested under common wrappers
+        for wrapper in ("data", "quote", "marketDepth", "depth", "ohlc"):
+            nested = record.get(wrapper)
+            if isinstance(nested, dict):
+                for key in ("oi", "open_interest", "openInterest", "OpenInterest", "oI"):
+                    val = safe_float(nested.get(key))
+                    if is_valid_number(val) and val >= 0:
+                        return val
+
+        return np.nan
+
     def on_message(self, message):
         try:
             if isinstance(message, str):
@@ -1371,6 +1452,11 @@ class KotakNeoAdapter:
                     token = token_from_record(item)
                     if token:
                         item["_parsed_ts"] = parse_tick_timestamp(item)
+                        # Also extract OI if present in live feed
+                        oi_val = self._extract_oi(item)
+                        if is_valid_number(oi_val):
+                            item["oi"] = oi_val
+                            item["open_interest"] = oi_val
                         self.latest[token] = item
                         self.tick_buffer.append(item)
                         self.current_bar_ticks.append(item)
@@ -1536,26 +1622,29 @@ class KotakNeoAdapter:
             return 0
 
     def fetch_real_option_oi(self):
+        """Dedicated OI poll with robust extraction + quote_type=all."""
         if not self.connected or not self.client or not self.pcr_tokens:
             return
         try:
-            tokens_to_poll = [{"instrument_token": str(tok), "exchange_segment": "nse_fo"} for tok in self.pcr_tokens[:25]]
-            res = self.client.quotes(instrument_tokens=tokens_to_poll)
+            tokens_to_poll = [
+                {"instrument_token": str(tok), "exchange_segment": "nse_fo"}
+                for tok in self.pcr_tokens[:25]
+            ]
+            # Force full payload so OI is present
+            res = self.client.quotes(instrument_tokens=tokens_to_poll, quote_type="all")
             recs = record_list(res)
             with self.lock:
                 for r in recs:
                     tok = token_from_record(r)
-                    if tok:
-                        oi = safe_float(
-                            r.get("oi") if r.get("oi") is not None
-                            else r.get("open_int") if r.get("open_int") is not None
-                            else r.get("open_interest")
-                        )
-                        if is_valid_number(oi):
-                            if tok not in self.latest:
-                                self.latest[tok] = {}
-                            self.latest[tok]["open_int"] = oi
-                            self.latest[tok]["oi"] = oi
+                    if not tok:
+                        continue
+                    oi = self._extract_oi(r)
+                    if is_valid_number(oi):
+                        if tok not in self.latest:
+                            self.latest[tok] = {}
+                        self.latest[tok]["oi"] = oi
+                        self.latest[tok]["open_interest"] = oi
+                        self.latest[tok]["open_int"] = oi
         except Exception as e:
             self.last_error = f"Option OI Fetch Error: {e}"
 
@@ -1576,7 +1665,7 @@ class KotakNeoAdapter:
             tokens_to_poll.append({"instrument_token": str(tok), "exchange_segment": "nse_fo"})
         
         try:
-            res = self.client.quotes(instrument_tokens=tokens_to_poll)
+            res = self.client.quotes(instrument_tokens=tokens_to_poll, quote_type="all")
             recs = record_list(res)
             with self.lock:
                 for r in recs:
@@ -1588,6 +1677,11 @@ class KotakNeoAdapter:
                         
                     if tok:
                         r["_parsed_ts"] = now_ts
+                        # Extract OI here too
+                        oi_val = self._extract_oi(r)
+                        if is_valid_number(oi_val):
+                            r["oi"] = oi_val
+                            r["open_interest"] = oi_val
                         self.latest[tok] = r
                         self.tick_buffer.append(r)
                         self.current_bar_ticks.append(r)
@@ -1606,7 +1700,7 @@ class KotakNeoAdapter:
                                 self.feature_engine.set_today_open(open_p)
                 self.last_error = ""
             
-            # Fetch real dedicated option OI explicitly
+            # Explicit dedicated option OI refresh
             self.fetch_real_option_oi()
         except Exception as exc:
             self.last_error = f"Poll error: {exc}"
@@ -1728,17 +1822,13 @@ class KotakNeoAdapter:
                 last = extract_tick_price(self.latest.get(str(self.future_token), {})) or spot_c
                 fut_o = fut_h = fut_l = fut_c = last if is_valid_number(last) else 24400.0
                 fut_vol = 1000.0
-                fut_oi = safe_float(self.latest.get(str(self.future_token), {}).get("open_int", 12784330), 12784330.0)
+                fut_oi = self._extract_oi(self.latest.get(str(self.future_token), {})) or 12784330.0
                 l2_snap = {}
             else:
                 fut_o, fut_h, fut_l, fut_c = fut_prices[0], max(fut_prices), min(fut_prices), fut_prices[-1]
                 fut_vol = self._resolve_volume_clean(fut_ticks)
                 last_fut_t = fut_ticks[-1] if fut_ticks else {}
-                fut_oi = safe_float(
-                    last_fut_t.get("oi") if last_fut_t.get("oi") is not None
-                    else last_fut_t.get("open_int") if last_fut_t.get("open_int") is not None
-                    else last_fut_t.get("open_interest"), 12784330.0
-                )
+                fut_oi = self._extract_oi(last_fut_t) or self._extract_oi(self.latest.get(str(self.future_token), {})) or 12784330.0
                 
                 l2_snap = {
                     "best_bid": safe_float(last_fut_t.get("bp") or last_fut_t.get("bid_price"), fut_c),
@@ -1761,15 +1851,11 @@ class KotakNeoAdapter:
             step = CONFIG["pcr_strike_step"]
             atm = round(spot_approx / step) * step
             
-            # --- MASTER OI EXTRACTOR FOR REAL PCR ---
+            # --- MASTER OI EXTRACTOR (FIXED) ---
             for tok in self.pcr_tokens:
                 info = self.pcr_records.get(str(tok), {})
                 t = self.latest.get(str(tok), {})
-                oi = safe_float(
-                    t.get("oi") if t.get("oi") is not None
-                    else t.get("open_int") if t.get("open_int") is not None
-                    else t.get("open_interest")
-                )
+                oi = self._extract_oi(t)
                 vol = safe_float(t.get("last_volume") or t.get("v") or t.get("volume"), 0.0)
                 strike = info.get("strike")
                 if is_valid_number(oi):
@@ -1989,7 +2075,7 @@ def main():
         print("Streamlit not installed.")
         return
 
-    st.set_page_config(page_title="NIFTY 3M | Micro Engine v5.0", page_icon="⚡", layout="wide", initial_sidebar_state="expanded")
+    st.set_page_config(page_title="NIFTY 3M | Micro Engine v5.1", page_icon="⚡", layout="wide", initial_sidebar_state="expanded")
     inject_custom_css()
 
     adapter: KotakNeoAdapter = get_global_adapter()
@@ -2053,7 +2139,7 @@ def main():
         st.markdown("---")
         if st.button("Run Unit Tests", key="btn_tests"):
             try:
-                st.success("Engine Verification Passed (v5.0)" if run_unit_tests() else "Test Failed")
+                st.success("Engine Verification Passed (v5.1)" if run_unit_tests() else "Test Failed")
             except Exception as exc:
                 st.error(str(exc))
 
@@ -2061,7 +2147,7 @@ def main():
     if is_streaming and adapter:
         adapter.fetch_market_snapshot()
 
-    # Top Metric Strip (Accurate Nifty Spot & Future Extraction)
+    # Top Metric Strip
     spot_val, fut_val, fut_oi, ticks_count = "-", "-", "-", 0
     if adapter and adapter.latest:
         with adapter.lock:
@@ -2081,7 +2167,7 @@ def main():
             fut_p = extract_tick_price(f)
             fut_val = f"{fut_p:.2f}" if is_valid_number(fut_p) else "-"
             
-            fut_oi = safe_float(f.get("oi") if f.get("oi") is not None else f.get("open_int") if f.get("open_int") is not None else f.get("open_interest"), "-")
+            fut_oi = adapter._extract_oi(f) if hasattr(adapter, "_extract_oi") else safe_float(f.get("oi") or f.get("open_interest"), "-")
             ticks_count = len(adapter.tick_buffer)
 
     t1, t2, t3, t4 = st.columns(4)
@@ -2172,17 +2258,11 @@ def main():
                 })
             
             df_trades = pd.DataFrame(recent_trades_data)
-            
-            def style_pnl(val):
-                color = '#34d399' if val > 0 else ('#f87171' if val < 0 else '#9ca3af')
-                return f'color: {color}; font-weight: bold;'
-            
-            styled_df = df_trades.style.format({"PnL (pt)": "{:+.2f}"}).map(style_pnl, subset=["PnL (pt)"])
             st.dataframe(df_trades, hide_index=True)
 
     st.markdown('</div>', unsafe_allow_html=True)
 
-    # 2-Column Analytics Grid: Heatmap + Heavyweights
+    # 2-Column Analytics Grid
     grid_left, grid_right = st.columns([1.2, 0.8])
     latest_row = None
     with grid_left:
@@ -2211,7 +2291,7 @@ def main():
                     
                     c_dq1, c_dq2 = st.columns(2)
                     with c_dq1:
-                        st.write(f"• Top 5 Lead Pressure ($SLP_5$): `{latest_row.get('slp_top5_pressure', 0.0):.3f}`")
+                        st.write(f"• Top 5 Lead Pressure (\( SLP_5 \)): `{latest_row.get('slp_top5_pressure', 0.0):.3f}`")
                         st.write(f"• Order Book Imbalance (OBI): `{latest_row.get('order_book_imbalance', 0.0):.3f}`")
                         st.write(f"• Dealer Vanna Flow: `{latest_row.get('dealer_vanna_flow', 0.0):.3f}`")
                         st.write(f"• Dealer Charm Flow: `{latest_row.get('dealer_charm_flow', 0.0):.3f}`")
