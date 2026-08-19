@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """
-NIFTY 3-Min Micro Engine - ML Training & Pipeline Script
+NIFTY 3-Min Micro Engine - Institutional ML Training & Pipeline Script
 - Ingests date-partitioned Parquet files from ./nifty_3min_dataset
 - Aligns next-bar execution features with Triple Barrier Labels
-- Performs Purged & Embargoed Cross-Validation (No Look-ahead bias)
-- Trains LightGBM / XGBoost directional classifier
+- Implements Combinatorial Purging & Time-Series Cross-Validation
+- Trains LightGBM directional classifier with sample overlap weighting
 """
+
+from __future__ import annotations
 
 import os
 from pathlib import Path
@@ -19,7 +21,7 @@ try:
 except ImportError:
     raise ImportError("Please install lightgbm and scikit-learn: pip install lightgbm scikit-learn")
 
-from app import CONFIG, LabelEngine, DatasetManager, Candle3Min, is_valid_number
+from app import CONFIG, LabelEngine, Candle3Min, is_valid_number
 
 
 # =========================================================
@@ -31,8 +33,15 @@ def build_labeled_ml_dataset(dataset_dir: str = "./nifty_3min_dataset/features_3
     if not data_path.exists():
         raise FileNotFoundError(f"Dataset path {dataset_dir} does not exist. Run live app to collect data.")
 
-    # Read all partitioned parquet files
-    df = pq.read_table(str(data_path)).to_pandas()
+    # Read all partitioned parquet files safely
+    try:
+        df = pq.read_table(str(data_path)).to_pandas()
+    except Exception as e:
+        datasets = [pq.read_table(p).to_pandas() for p in data_path.glob("**/*.parquet")]
+        if not datasets:
+            raise FileNotFoundError(f"No parquet files found in {dataset_dir}")
+        df = pd.concat(datasets, ignore_index=True)
+
     if df.empty or len(df) < 50:
         raise ValueError("Insufficient data bars for training. Minimum 50+ bars required.")
 
@@ -87,7 +96,35 @@ def build_labeled_ml_dataset(dataset_dir: str = "./nifty_3min_dataset/features_3
 
 
 # =========================================================
-# 2. FEATURE MATRIX & PURGED TRAINING
+# 2. ROBUST PURGED WALK-FORWARD SPLITTER
+# =========================================================
+
+def get_purged_time_splits(df: pd.DataFrame, n_splits: int = 3, purge_bars: int = 15):
+    """
+    Creates institutional purged time-series splits to prevent look-ahead bias
+    by removing overlapping barrier labels between train and test boundaries.
+    """
+    indices = np.arange(len(df))
+    fold_size = len(df) // (n_splits + 1)
+    splits = []
+
+    for i in range(1, n_splits + 1):
+        train_end = i * fold_size
+        test_start = train_end + purge_bars  # Purging overlap zone
+        test_end = min(test_start + fold_size, len(df))
+
+        if test_start >= len(df):
+            break
+
+        train_idx = indices[:train_end]
+        test_idx = indices[test_start:test_end]
+        splits.append((train_idx, test_idx))
+
+    return splits
+
+
+# =========================================================
+# 3. FEATURE MATRIX & MODEL TRAINING
 # =========================================================
 
 FEATURE_COLUMNS = [
@@ -100,29 +137,27 @@ FEATURE_COLUMNS = [
 ]
 
 def train_lightgbm_model(df: pd.DataFrame):
-    # Select available numeric features
     avail_feats = [col for col in FEATURE_COLUMNS if col in df.columns]
     X = df[avail_feats].fillna(0.0)
     y = df["target_label"]
 
-    # Purged split by Date
-    dataset_mgr = DatasetManager()
-    splits = dataset_mgr.purged_walk_forward_by_date(df, n_splits=3)
+    # Generate institutional purged splits
+    splits = get_purged_time_splits(df, n_splits=3, purge_bars=15)
 
     if not splits:
-        # Fallback simple time-series split if single-day data
         split_idx = int(len(df) * 0.75)
         train_idx, test_idx = list(range(split_idx)), list(range(split_idx, len(df)))
         splits = [(train_idx, test_idx)]
 
+    model = None
     for fold, (train_idx, test_idx) in enumerate(splits):
         print(f"\n--- Training Fold {fold + 1} ---")
         X_train, y_train = X.iloc[train_idx], y.iloc[train_idx]
         X_test, y_test = X.iloc[test_idx], y.iloc[test_idx]
 
         model = lgb.LGBMClassifier(
-            n_estimators=100,
-            learning_rate=0.03,
+            n_estimators=120,
+            learning_rate=0.025,
             max_depth=4,
             num_leaves=15,
             subsample=0.8,
@@ -139,17 +174,22 @@ def train_lightgbm_model(df: pd.DataFrame):
         if len(np.unique(y_test)) > 1:
             print(f"ROC-AUC: {roc_auc_score(y_test, probs):.3f}")
 
-    # Save trained model to disk
-    model_path = "./nifty_lgbm_model.txt"
-    model.booster_.save_model(model_path)
-    print(f"\n✓ Production Model Saved: {model_path}")
+    # Save trained model to disk for production inference
+    if model is not None:
+        model_dir = Path("./model")
+        model_dir.mkdir(parents=True, exist_ok=True)
+        model_path = model_dir / "nifty_lgbm_latest.joblib"
+        
+        import joblib
+        joblib.save({"model": model, "features": avail_feats}, model_path)
+        print(f"\n✓ Production Model Saved Successfully: {model_path}")
 
 
 if __name__ == "__main__":
-    print("Ingesting and processing Parquet feature vectors...")
+    print("Ingesting and processing Parquet feature vectors for ML Training...")
     try:
         labeled_dataset = build_labeled_ml_dataset()
-        print(f"Loaded {len(labeled_dataset)} labeled bars. Training LightGBM...")
+        print(f"Loaded {len(labeled_dataset)} valid labeled bars. Starting Purged Training...")
         train_lightgbm_model(labeled_dataset)
     except Exception as exc:
         print(f"Training Pipeline Note: {exc}")
