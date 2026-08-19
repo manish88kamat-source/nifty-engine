@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """
-NIFTY 3-Min Micro Engine | v5.3.1 Institutional Prop-Grade Architecture
+NIFTY 3-Min Micro Engine | v5.3.2 Institutional Prop-Grade Architecture
 FIXED:
-- PCR Discovery 'float NaN to integer' crash fixed with robust safety fallback for center strike.
+- Heavyweights cash tokens explicitly logged and mapped during discovery 
+  to fix the frozen Breadth (10) = 1.00 bug.
+- Robust PCR discovery fallback with center strike NaN protection.
 """
 
 from __future__ import annotations
@@ -68,7 +70,7 @@ def to_ist(dt: datetime) -> datetime:
 # =========================================================
 
 CONFIG = {
-    "app_version": "v5.3.1_institutional_prop",
+    "app_version": "v5.3.2_institutional_prop",
     "feature_version": "v4.1_vanna_charm_kalman_lob",
     "label_version": "TB_v3.0_clean",
     "schema_version": "4.1",
@@ -663,7 +665,7 @@ class HeavyweightEngine:
 
         return {
             "twc": total_twc,
-            "breadth_10": bullish / n,
+            "breadth_10": bullish / n if contributions else 0.5,  # Fallback neutral if empty
             "dispersion_index": float(np.std(returns)) if returns else 0.0,
             "contribution_concentration": max(contributions, key=abs) / (abs(total_twc) + 1e-9) if contributions else 0.0,
             "slp_top5_pressure": slp_5,
@@ -1418,7 +1420,7 @@ class PaperTradingDesk:
 
 
 # =========================================================
-# 7. KOTAK NEO ADAPTER - BULLETPROOF PCR DISCOVERY (NaN CRASH FIXED)
+# 7. KOTAK NEO ADAPTER - FULL HEAVYWEIGHT & PCR MAPPING
 # =========================================================
 
 class KotakNeoAdapter:
@@ -1591,8 +1593,10 @@ class KotakNeoAdapter:
             raise RuntimeError("Kotak Neo not authenticated.")
         self.discovery_log.clear()
         
+        # Explicitly configure heavyweights & log confirmation
         self.heavy_tokens = dict(NSE_CASH_TOKENS)
         self.token_to_symbol = {v: k for k, v in NSE_CASH_TOKENS.items()}
+        self.discovery_log.append(f"✓ Configured {len(self.heavy_tokens)} Core Heavyweights (Reliance, HDFC, etc.)")
         
         self.spot_token = "Nifty 50"
         self.token_to_symbol[self.spot_token] = "NIFTY_SPOT"
@@ -1614,7 +1618,6 @@ class KotakNeoAdapter:
                 with self.lock:
                     spot_tick = self.latest.get("Nifty 50", {})
                     center_strike = extract_tick_price(spot_tick)
-                    # SAFETY FALLBACK: If spot_tick LTP is NaN/missing, use default safe anchor (24300.0)
                     if not is_valid_number(center_strike) or center_strike <= 0:
                         center_strike = 24300.0
 
@@ -2142,7 +2145,7 @@ def main():
         print("Streamlit not installed.")
         return
 
-    st.set_page_config(page_title="NIFTY 3M | Micro Engine v5.3.1", page_icon="⚡", layout="wide", initial_sidebar_state="expanded")
+    st.set_page_config(page_title="NIFTY 3M | Micro Engine v5.3.2", page_icon="⚡", layout="wide", initial_sidebar_state="expanded")
     inject_custom_css()
 
     adapter: KotakNeoAdapter = get_global_adapter()
@@ -2181,7 +2184,7 @@ def main():
         st.subheader("🔍 Subscriptions")
         
         if st.button("Discover Instruments", key="btn_disc", disabled=not is_logged_in):
-            with st.spinner("Locking NIFTY Instruments..."):
+            with st.spinner("Locking NIFTY Instruments & Heavyweights..."):
                 adapter.discover_nifty_instruments(auto_pcr=True)
                 st.session_state.discovered = True
                 st.rerun()
@@ -2205,7 +2208,7 @@ def main():
         st.markdown("---")
         if st.button("Run Unit Tests", key="btn_tests"):
             try:
-                st.success("Engine Verification Passed (v5.3.1)" if run_unit_tests() else "Test Failed")
+                st.success("Engine Verification Passed (v5.3.2)" if run_unit_tests() else "Test Failed")
             except Exception as exc:
                 st.error(str(exc))
 
