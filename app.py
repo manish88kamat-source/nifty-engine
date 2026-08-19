@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-NIFTY 3-Min Micro Engine | v5.3.2 Institutional Prop-Grade Architecture
-FIXED:
-- Heavyweights cash tokens explicitly logged and mapped during discovery 
-  to fix the frozen Breadth (10) = 1.00 bug.
-- Robust PCR discovery fallback with center strike NaN protection.
+NIFTY 3-Min Micro Engine | v6.4 Institutional Prop-Grade Architecture
+DYNAMIC OPTION BASELINE & SECURE POSITION STATE:
+- Price action, Kalman filter, ATR, and slope strictly use Future (fut_vwap / fut_c).
+- PCR, OI changes, Greeks (Vanna/Charm), and GEX strictly use Option Chain (22 strikes).
+- Dynamic ATM Option Baseline Pricing & Position-Encapsulated Future Reference.
+- All previous runtime bugs, discovery crashes, and risk management guards secured.
 """
 
 from __future__ import annotations
@@ -70,8 +71,8 @@ def to_ist(dt: datetime) -> datetime:
 # =========================================================
 
 CONFIG = {
-    "app_version": "v5.3.2_institutional_prop",
-    "feature_version": "v4.1_vanna_charm_kalman_lob",
+    "app_version": "v6.4_institutional_prop",
+    "feature_version": "v5.2_dynamic_baseline_premium",
     "label_version": "TB_v3.0_clean",
     "schema_version": "4.1",
     "weight_version": "NIFTY_STATIC_2025Q1",
@@ -106,8 +107,9 @@ CONFIG = {
     "hw_max_quote_age_sec": 240,
     "hw_min_symbols_required": 5,
     "feed_silence_sec": 60,
-    "atm_delta_approx": 0.52,
+    "base_delta": 0.52,
     "base_slippage_pts": 0.35,
+    "option_exit_spread_penalty": 0.65,
     "max_daily_loss_pts": 120.0,
     "risk_free_rate": 0.065,
     "default_atm_iv": 0.135,
@@ -333,7 +335,7 @@ def strike_from_record(record):
 def token_from_record(record):
     if not isinstance(record, dict):
         return ""
-    for key in ["exchange_token", "pSymbol", "pSymbolToken", "instrument_token", "instrumentToken", "tok", "token", "pToken", "tk"]:
+    for key in ("exchange_token", "pSymbol", "pSymbolToken", "instrument_token", "instrumentToken", "tok", "token", "pToken", "tk"):
         value = record.get(key)
         if value is not None and str(value).strip():
             return str(value).strip()
@@ -353,12 +355,12 @@ def record_list(response):
         return response
     if not isinstance(response, dict):
         return []
-    for key in ["data", "result", "records", "data_list", "scrips", "list", "message"]:
+    for key in ("data", "result", "records", "data_list", "scrips", "list", "message"):
         value = response.get(key)
         if isinstance(value, list):
             return value
         if isinstance(value, dict):
-            for k in ["data", "records", "result", "scrips"]:
+            for k in ("data", "records", "result", "scrips"):
                 if isinstance(value.get(k), list):
                     return value[k]
     return []
@@ -429,7 +431,7 @@ class GreeksEngine:
 
 
 # =========================================================
-# 4. RESEARCH ENGINES
+# 4. RESEARCH ENGINES (FUTURE VWAP ANCHORED)
 # =========================================================
 
 @dataclass
@@ -651,7 +653,8 @@ class HeavyweightEngine:
             ret = (close_price - open_price) / open_price
             contributions.append(weight * ret)
             returns.append(ret)
-            vwap = safe_float(data.get("vwap"), close_price)
+            
+            vwap = safe_float(data.get("vwap") or data.get("avp") or data.get("average_price"), open_price)
             if close_price >= vwap:
                 bullish += 1
 
@@ -665,7 +668,7 @@ class HeavyweightEngine:
 
         return {
             "twc": total_twc,
-            "breadth_10": bullish / n if contributions else 0.5,  # Fallback neutral if empty
+            "breadth_10": bullish / n if contributions else 0.5,
             "dispersion_index": float(np.std(returns)) if returns else 0.0,
             "contribution_concentration": max(contributions, key=abs) / (abs(total_twc) + 1e-9) if contributions else 0.0,
             "slp_top5_pressure": slp_5,
@@ -1009,6 +1012,7 @@ class TradeDecision:
     stop_points: float
     option_target_pts: float
     option_stop_pts: float
+    effective_delta: float
     size_factor: float
     confidence: float
     reason: str
@@ -1096,7 +1100,7 @@ class DecisionEngine:
         cutoff_hour, cutoff_min = (15, 25) if expiry_flag == 1 else (15, 0)
         
         if now_ts.hour > cutoff_hour or (now_ts.hour == cutoff_hour and now_ts.minute >= cutoff_min):
-            return TradeDecision("SKIP", "TIME_GUARD_ACTIVE", 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+            return TradeDecision("SKIP", "TIME_GUARD_ACTIVE", 0.0, 0.0, 0.0, 0.0, CONFIG["base_delta"], 0.0, 0.0,
                                 f"Time guard active: Cutoff reached ({cutoff_hour}:{cutoff_min:02d})", feats.get("timestamp"), now_ts)
 
         regime = self.regime_engine.detect(feats)
@@ -1117,7 +1121,7 @@ class DecisionEngine:
         micro_drift = safe_float(feats.get("micro_price_drift"), 0.0)
 
         if regime == "DATA_BAD" or dq < CONFIG["min_data_quality_to_trade"]:
-            return TradeDecision("SKIP", regime, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+            return TradeDecision("SKIP", regime, 0.0, 0.0, 0.0, 0.0, CONFIG["base_delta"], 0.0, 0.0,
                                 "Data quality low / warmup pending", feats.get("timestamp"), now_ts)
 
         strategy = "NONE"
@@ -1216,9 +1220,27 @@ class DecisionEngine:
             size *= 0.85
             conf = max(0.28, conf - 0.05)
 
-        delta = CONFIG["atm_delta_approx"]
-        opt_target = round(target * delta, 1)
-        opt_stop = round(stop * delta, 1)
+        # ASYMMETRIC GAMMA-AWARE OPTION SCALING WITH NON-LINEAR GAMMA ACCELERATION
+        base_delta = CONFIG.get("base_delta", 0.52)
+        zero_dte = safe_float(feats.get("zero_dte_intensity"), 0.0)
+        dte_boost = 1.0 + (0.45 * zero_dte)
+
+        if regime.startswith("IMPULSE"):
+            regime_mult = 1.30  # Enhanced non-linear gamma acceleration in impulse
+        elif regime.startswith("STAIRCASE"):
+            regime_mult = 1.12
+        else:
+            regime_mult = 1.00
+
+        gamma_proxy = abs(safe_float(feats.get("atm_gamma_imbalance"), 0.0))
+        gamma_boost = 1.0 + (0.20 * min(gamma_proxy, 1.0))
+
+        effective_delta = base_delta * dte_boost * regime_mult * gamma_boost
+        effective_delta = float(np.clip(effective_delta, 0.48, 0.95))
+
+        opt_target = round(target * effective_delta, 1)
+        stop_scale = 0.75 + (0.25 * (effective_delta / base_delta))
+        opt_stop = round(stop * stop_scale, 1)
 
         if action in ("CE", "PE"):
             self.last_action = action
@@ -1228,6 +1250,7 @@ class DecisionEngine:
             action, regime,
             round(target, 1), round(stop, 1),
             opt_target, opt_stop,
+            round(effective_delta, 3),
             round(size, 2), round(conf, 3),
             reason,
             feats.get("timestamp"), now_ts, ml_prob
@@ -1235,7 +1258,7 @@ class DecisionEngine:
 
 
 # =========================================================
-# 6. PAPER TRADING & DATASET
+# 6. OPTION-CENTRIC PAPER TRADING DESK & JOURNAL
 # =========================================================
 
 class DatasetManager:
@@ -1261,17 +1284,18 @@ class DatasetManager:
 class PaperPosition:
     entry_time: datetime
     direction: int
-    entry_price: float
-    target_price: float
-    stop_price: float
-    size: float
-    regime: str
+    entry_future_price: float
+    entry_option_price: float
     option_target: float
     option_stop: float
+    effective_delta: float
+    size: float
+    regime: str
     bars_held: int = 0
     status: str = "OPEN"
     exit_time: Optional[datetime] = None
-    exit_price: Optional[float] = None
+    exit_future_price: Optional[float] = None
+    exit_option_price: Optional[float] = None
     pnl_pts: float = 0.0
     exit_reason: str = ""
 
@@ -1316,12 +1340,11 @@ class PaperTradingDesk:
             self.pending_order = {
                 "target_fill_time": next_bar_time,
                 "direction": direction,
-                "target_pts": decision.target_points,
-                "stop_pts": decision.stop_points,
-                "size": decision.size_factor,
-                "regime": decision.regime,
                 "option_target": decision.option_target_pts,
                 "option_stop": decision.option_stop_pts,
+                "effective_delta": decision.effective_delta,
+                "size": decision.size_factor,
+                "regime": decision.regime,
             }
 
     def on_bar_open_fill(self, candle: Candle3Min, atr: float):
@@ -1337,24 +1360,20 @@ class PaperTradingDesk:
             vol_factor = max(0.5, min(2.0, (atr / 15.0))) if is_valid_number(atr) and atr > 0 else 1.0
             slippage = CONFIG["base_slippage_pts"] * vol_factor * direction
             fill_price = candle.fut_o + slippage
-            
-            if direction == 1:
-                target_p = fill_price + order["target_pts"]
-                stop_p = fill_price - order["stop_pts"]
-            else:
-                target_p = fill_price - order["target_pts"]
-                stop_p = fill_price + order["stop_pts"]
+
+            # Dynamic ATM Option Baseline Pricing based on underlying price & ATM IV
+            dynamic_atm_baseline = round(max(80.0, (fill_price * CONFIG["default_atm_iv"] * math.sqrt(1.0 / 252.0)) * 2.2), 2)
 
             self.active_position = PaperPosition(
                 entry_time=candle.timestamp,
                 direction=direction,
-                entry_price=round(fill_price, 2),
-                target_price=round(target_p, 2),
-                stop_price=round(stop_p, 2),
+                entry_future_price=round(fill_price, 2),
+                entry_option_price=dynamic_atm_baseline,
+                option_target=order["option_target"],
+                option_stop=order["option_stop"],
+                effective_delta=order["effective_delta"],
                 size=order["size"],
                 regime=order["regime"],
-                option_target=order["option_target"],
-                option_stop=order["option_stop"]
             )
             self.pending_order = None
 
@@ -1371,42 +1390,57 @@ class PaperTradingDesk:
         pos.bars_held += 1
         
         if pos.direction == 1:
-            self.unrealized_pnl_pts = round((candle.fut_c - pos.entry_price) * pos.size, 2)
-            hit_target = candle.fut_h >= pos.target_price
-            hit_stop = candle.fut_l <= pos.stop_price
+            fut_high_move = candle.fut_h - pos.entry_future_price
+            fut_low_move = pos.entry_future_price - candle.fut_l
+            fut_close_move = candle.fut_c - pos.entry_future_price
         else:
-            self.unrealized_pnl_pts = round((pos.entry_price - candle.fut_c) * pos.size, 2)
-            hit_target = candle.fut_l <= pos.target_price
-            hit_stop = candle.fut_h >= pos.stop_price
+            fut_high_move = pos.entry_future_price - candle.fut_l
+            fut_low_move = candle.fut_h - pos.entry_future_price
+            fut_close_move = pos.entry_future_price - candle.fut_c
+
+        option_high_pnl = fut_high_move * pos.effective_delta
+        option_low_pnl = - (fut_low_move * pos.effective_delta)
+        option_close_pnl = fut_close_move * pos.effective_delta
+
+        self.unrealized_pnl_pts = round(option_close_pnl * pos.size, 2)
+
+        hit_target = option_high_pnl >= pos.option_target
+        hit_stop = option_low_pnl <= -pos.option_stop
 
         self.check_total_risk_limit()
         timeout = pos.bars_held >= (CONFIG["time_barrier_min"] // CONFIG["bar_minutes"])
 
         if is_session_end or hit_target or hit_stop or timeout or self.risk_locked:
             if self.risk_locked and not (is_session_end or hit_target or hit_stop or timeout):
-                exit_p = candle.fut_c
+                exit_pnl = option_close_pnl
                 reason = "KILL-SWITCH MAX LOSS BREACH"
             elif is_session_end:
-                exit_p = candle.fut_c
+                exit_pnl = option_close_pnl
                 reason = "SESSION END AUTO-EXIT"
             elif hit_target and hit_stop:
-                exit_p = pos.stop_price
+                exit_pnl = -pos.option_stop
                 reason = "AMBIGUOUS (SL ASSUMED)"
             elif hit_target:
-                exit_p = pos.target_price
+                exit_pnl = pos.option_target
                 reason = "TARGET HIT"
             elif hit_stop:
-                exit_p = pos.stop_price
+                exit_pnl = -pos.option_stop
                 reason = "STOP LOSS HIT"
             else:
-                exit_p = candle.fut_c
+                exit_pnl = option_close_pnl
                 reason = "TIME BARRIER EXIT"
 
             pos.exit_time = candle.timestamp
-            pos.exit_price = round(exit_p, 2)
-            pos.pnl_pts = round(((exit_p - pos.entry_price) if pos.direction == 1 else (pos.entry_price - exit_p)) * pos.size, 2)
+            pos.exit_future_price = round(candle.fut_c, 2)
+            pos.exit_option_price = round(max(5.0, pos.entry_option_price + exit_pnl), 2)
+            
+            base_penalty = CONFIG.get("option_exit_spread_penalty", 0.65)
+            net_spread_penalty = min(1.40, base_penalty * max(1.0, abs(exit_pnl) / 10.0))
+
+            net_option_pnl = (exit_pnl - net_spread_penalty) * pos.size
+            pos.pnl_pts = round(net_option_pnl, 2)
             pos.status = "CLOSED"
-            pos.exit_reason = reason
+            pos.exit_reason = reason + f" (Spread Penalty: -{net_spread_penalty:.2f}pt)"
 
             self.realized_pnl_pts = round(self.realized_pnl_pts + pos.pnl_pts, 2)
             self.closed_trades.append(pos)
@@ -1420,7 +1454,7 @@ class PaperTradingDesk:
 
 
 # =========================================================
-# 7. KOTAK NEO ADAPTER - FULL HEAVYWEIGHT & PCR MAPPING
+# 7. KOTAK NEO ADAPTER
 # =========================================================
 
 class KotakNeoAdapter:
@@ -1593,7 +1627,6 @@ class KotakNeoAdapter:
             raise RuntimeError("Kotak Neo not authenticated.")
         self.discovery_log.clear()
         
-        # Explicitly configure heavyweights & log confirmation
         self.heavy_tokens = dict(NSE_CASH_TOKENS)
         self.token_to_symbol = {v: k for k, v in NSE_CASH_TOKENS.items()}
         self.discovery_log.append(f"✓ Configured {len(self.heavy_tokens)} Core Heavyweights (Reliance, HDFC, etc.)")
@@ -1907,7 +1940,7 @@ class KotakNeoAdapter:
                 c_val = extract_tick_price(t)
                 o_val = safe_float(t.get("o") or t.get("open"), c_val)
                 if is_valid_number(c_val):
-                    hw_snap[sym] = {"o": o_val if is_valid_number(o_val) else c_val, "c": c_val, "vwap": safe_float(t.get("vwap"), c_val)}
+                    hw_snap[sym] = {"o": o_val if is_valid_number(o_val) else c_val, "c": c_val, "vwap": safe_float(t.get("vwap") or t.get("avp") or t.get("average_price"), o_val if is_valid_number(o_val) else c_val)}
 
             total_ce_oi = total_pe_oi = total_ce_vol = total_pe_vol = 0.0
             atm_ce_oi = atm_pe_oi = np.nan
@@ -2145,7 +2178,7 @@ def main():
         print("Streamlit not installed.")
         return
 
-    st.set_page_config(page_title="NIFTY 3M | Micro Engine v5.3.2", page_icon="⚡", layout="wide", initial_sidebar_state="expanded")
+    st.set_page_config(page_title="NIFTY 3M | Micro Engine v6.4", page_icon="⚡", layout="wide", initial_sidebar_state="expanded")
     inject_custom_css()
 
     adapter: KotakNeoAdapter = get_global_adapter()
@@ -2208,7 +2241,7 @@ def main():
         st.markdown("---")
         if st.button("Run Unit Tests", key="btn_tests"):
             try:
-                st.success("Engine Verification Passed (v5.3.2)" if run_unit_tests() else "Test Failed")
+                st.success("Engine Verification Passed (v6.4)" if run_unit_tests() else "Test Failed")
             except Exception as exc:
                 st.error(str(exc))
 
@@ -2256,8 +2289,8 @@ def main():
         with col_hud2:
             st.metric("Regime", d.regime)
         with col_hud3:
-            st.metric("Spot Target / SL", f"+{d.target_points} / -{d.stop_points} pt")
-            st.caption(f"**Theoretical Option Move:** +{d.option_target_pts} / -{d.option_stop_pts} pt")
+            st.metric("Option Target / SL", f"+{d.option_target_pts} / -{d.option_stop_pts} pt")
+            st.caption(f"**Effective Delta:** {d.effective_delta:.2f}")
         with col_hud4:
             st.metric("Confidence", f"{d.confidence * 100:.0f}%")
         with col_hud5:
@@ -2268,7 +2301,7 @@ def main():
     st.markdown('</div>', unsafe_allow_html=True)
 
     st.markdown('<div class="terminal-card">', unsafe_allow_html=True)
-    st.markdown("**⚡ Live Paper Trading Desk & Journal**")
+    st.markdown("**⚡ Live Option-Centric Paper Trading Desk & Journal**")
     
     col_p1, col_p2, col_p3, col_p4 = st.columns(4)
     if adapter:
@@ -2288,7 +2321,7 @@ def main():
             col_p4.markdown(f"**Status:** <span style='color:red; font-weight:bold;'>KILL-SWITCH LOCKED (Max Daily Loss Reached)</span>", unsafe_allow_html=True)
         elif active_pos:
             dir_str = "CE (LONG)" if active_pos.direction == 1 else "PE (SHORT)"
-            col_p4.markdown(f"**Active Position:** `{dir_str}`<br>Entry: `₹{active_pos.entry_price}` | SL: `₹{active_pos.stop_price}`", unsafe_allow_html=True)
+            col_p4.markdown(f"**Active Position:** `{dir_str}`<br>Entry Opt: `₹{active_pos.entry_option_price}` | Target Opt: `+{active_pos.option_target}` pt", unsafe_allow_html=True)
         elif desk.pending_order:
             p_dir = "CE" if desk.pending_order["direction"] == 1 else "PE"
             col_p4.markdown(f"**Order Staged:** `{p_dir}` (Filling Next Open)", unsafe_allow_html=True)
@@ -2299,7 +2332,7 @@ def main():
             st.markdown("---")
             col_tbl_head, col_tbl_dl = st.columns([3, 1])
             with col_tbl_head:
-                st.caption("Recent Closed Paper Trades (Real-Time)")
+                st.caption("Recent Closed Option Paper Trades (Option-Centric Journal)")
             
             trades_raw = [asdict(t) for t in desk.closed_trades]
             df_full_journal = pd.DataFrame(trades_raw)
@@ -2309,7 +2342,7 @@ def main():
                 st.download_button(
                     label="📥 Download Journal (.csv)",
                     data=csv_data,
-                    file_name=f"nifty_paper_trades_{now_ist().strftime('%Y%m%d')}.csv",
+                    file_name=f"nifty_option_journal_v64_{now_ist().strftime('%Y%m%d')}.csv",
                     mime="text/csv"
                 )
             
@@ -2318,9 +2351,9 @@ def main():
                 recent_trades_data.append({
                     "Exit Time": t.exit_time.strftime("%H:%M:%S") if t.exit_time else "-",
                     "Type": "CE (LONG)" if t.direction == 1 else "PE (SHORT)",
-                    "Entry (₹)": f"{t.entry_price:.2f}",
-                    "Exit (₹)": f"{t.exit_price:.2f}",
-                    "PnL (pt)": t.pnl_pts,
+                    "Entry Opt (₹)": f"{t.entry_option_price:.2f}",
+                    "Exit Opt (₹)": f"{t.exit_option_price:.2f}" if t.exit_option_price else "-",
+                    "Option PnL (pt)": t.pnl_pts,
                     "Bars Held": t.bars_held,
                     "Exit Reason": t.exit_reason
                 })
