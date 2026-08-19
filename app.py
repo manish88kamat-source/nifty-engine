@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
-NIFTY 3-Min Micro Engine | v6.4 Institutional Prop-Grade Architecture
-DYNAMIC OPTION BASELINE & SECURE POSITION STATE:
-- Price action, Kalman filter, ATR, and slope strictly use Future (fut_vwap / fut_c).
-- PCR, OI changes, Greeks (Vanna/Charm), and GEX strictly use Option Chain (22 strikes).
-- Dynamic ATM Option Baseline Pricing & Position-Encapsulated Future Reference.
-- All previous runtime bugs, discovery crashes, and risk management guards secured.
+NIFTY 3-Min Micro Engine | v6.5 Institutional Prop-Grade Architecture
+HEAVYWEIGHTS QUOTE EXTRACTION & BREADTH FIX:
+- Robust nested field extraction for Open, Close, and VWAP across Kotak Neo wrappers.
+- Breadth strictly reflects whether heavyweight stocks are trading above their Day Open / VWAP.
+- All previous option-level paper trading desk, asymmetric scaling, and risk guards secured.
 """
 
 from __future__ import annotations
@@ -71,8 +70,8 @@ def to_ist(dt: datetime) -> datetime:
 # =========================================================
 
 CONFIG = {
-    "app_version": "v6.4_institutional_prop",
-    "feature_version": "v5.2_dynamic_baseline_premium",
+    "app_version": "v6.5_institutional_prop",
+    "feature_version": "v5.3_robust_heavyweight_quotes",
     "label_version": "TB_v3.0_clean",
     "schema_version": "4.1",
     "weight_version": "NIFTY_STATIC_2025Q1",
@@ -348,6 +347,22 @@ def extract_tick_price(tick: Dict[str, Any]) -> float:
         val = safe_float(tick.get(k))
         if is_valid_number(val) and val > 0:
             return val
+    return np.nan
+
+def extract_quote_field(record: Dict[str, Any], keys: Tuple[str, ...]) -> float:
+    if not isinstance(record, dict):
+        return np.nan
+    for k in keys:
+        val = safe_float(record.get(k))
+        if is_valid_number(val) and val > 0:
+            return val
+    for wrapper in ("data", "quote", "ohlc", "marketDepth", "depth"):
+        nested = record.get(wrapper)
+        if isinstance(nested, dict):
+            for k in keys:
+                val = safe_float(nested.get(k))
+                if is_valid_number(val) and val > 0:
+                    return val
     return np.nan
 
 def record_list(response):
@@ -641,12 +656,16 @@ class HeavyweightEngine:
             data = candle.heavy.get(symbol)
             if not data:
                 continue
+            
             open_price = self.day_open.get(symbol)
-            if open_price is None:
-                open_price = safe_float(data.get("o", data.get("c")))
+            if open_price is None or not is_valid_number(open_price):
+                open_price = extract_quote_field(data, ("o", "open", "pOpen", "openPrice", "op"))
+                if not is_valid_number(open_price) or open_price <= 0:
+                    open_price = extract_tick_price(data)
                 if is_valid_number(open_price) and open_price > 0:
                     self.day_open[symbol] = open_price
-            close_price = safe_float(data.get("c"))
+
+            close_price = extract_tick_price(data)
             if not is_valid_number(open_price) or open_price <= 0 or not is_valid_number(close_price):
                 continue
 
@@ -654,7 +673,10 @@ class HeavyweightEngine:
             contributions.append(weight * ret)
             returns.append(ret)
             
-            vwap = safe_float(data.get("vwap") or data.get("avp") or data.get("average_price"), open_price)
+            vwap = extract_quote_field(data, ("vwap", "avp", "averagePrice", "average_price", "a"))
+            if not is_valid_number(vwap) or vwap <= 0:
+                vwap = open_price
+
             if close_price >= vwap:
                 bullish += 1
 
@@ -1220,13 +1242,12 @@ class DecisionEngine:
             size *= 0.85
             conf = max(0.28, conf - 0.05)
 
-        # ASYMMETRIC GAMMA-AWARE OPTION SCALING WITH NON-LINEAR GAMMA ACCELERATION
         base_delta = CONFIG.get("base_delta", 0.52)
         zero_dte = safe_float(feats.get("zero_dte_intensity"), 0.0)
         dte_boost = 1.0 + (0.45 * zero_dte)
 
         if regime.startswith("IMPULSE"):
-            regime_mult = 1.30  # Enhanced non-linear gamma acceleration in impulse
+            regime_mult = 1.30
         elif regime.startswith("STAIRCASE"):
             regime_mult = 1.12
         else:
@@ -1938,9 +1959,15 @@ class KotakNeoAdapter:
             for sym, tok in self.heavy_tokens.items():
                 t = self.latest.get(str(tok), {})
                 c_val = extract_tick_price(t)
-                o_val = safe_float(t.get("o") or t.get("open"), c_val)
+                o_val = extract_quote_field(t, ("o", "open", "pOpen", "openPrice", "op"))
+                if not is_valid_number(o_val):
+                    o_val = c_val
+                vwap_val = extract_quote_field(t, ("vwap", "avp", "averagePrice", "average_price", "a"))
+                if not is_valid_number(vwap_val):
+                    vwap_val = o_val
+
                 if is_valid_number(c_val):
-                    hw_snap[sym] = {"o": o_val if is_valid_number(o_val) else c_val, "c": c_val, "vwap": safe_float(t.get("vwap") or t.get("avp") or t.get("average_price"), o_val if is_valid_number(o_val) else c_val)}
+                    hw_snap[sym] = {"o": o_val, "c": c_val, "vwap": vwap_val}
 
             total_ce_oi = total_pe_oi = total_ce_vol = total_pe_vol = 0.0
             atm_ce_oi = atm_pe_oi = np.nan
@@ -2178,7 +2205,7 @@ def main():
         print("Streamlit not installed.")
         return
 
-    st.set_page_config(page_title="NIFTY 3M | Micro Engine v6.4", page_icon="⚡", layout="wide", initial_sidebar_state="expanded")
+    st.set_page_config(page_title="NIFTY 3M | Micro Engine v6.5", page_icon="⚡", layout="wide", initial_sidebar_state="expanded")
     inject_custom_css()
 
     adapter: KotakNeoAdapter = get_global_adapter()
@@ -2241,7 +2268,7 @@ def main():
         st.markdown("---")
         if st.button("Run Unit Tests", key="btn_tests"):
             try:
-                st.success("Engine Verification Passed (v6.4)" if run_unit_tests() else "Test Failed")
+                st.success("Engine Verification Passed (v6.5)" if run_unit_tests() else "Test Failed")
             except Exception as exc:
                 st.error(str(exc))
 
@@ -2332,7 +2359,7 @@ def main():
             st.markdown("---")
             col_tbl_head, col_tbl_dl = st.columns([3, 1])
             with col_tbl_head:
-                st.caption("Recent Closed Option Paper Trades (Option-Centric Journal)")
+                st.caption("Recent Closed Option Paper Trades (Option-Centric Journal v6.5)")
             
             trades_raw = [asdict(t) for t in desk.closed_trades]
             df_full_journal = pd.DataFrame(trades_raw)
@@ -2342,7 +2369,7 @@ def main():
                 st.download_button(
                     label="📥 Download Journal (.csv)",
                     data=csv_data,
-                    file_name=f"nifty_option_journal_v64_{now_ist().strftime('%Y%m%d')}.csv",
+                    file_name=f"nifty_option_journal_v65_{now_ist().strftime('%Y%m%d')}.csv",
                     mime="text/csv"
                 )
             
