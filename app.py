@@ -1,14 +1,11 @@
 #!/usr/bin/env python3
 """
-NIFTY 3-Min Micro Engine | v5.1 Institutional Prop-Grade Architecture
-FIXED & OPTIMIZED:
-1. Kotak Neo library 'NoneType += str' crash hardened
-2. All timing forced to IST (Asia/Kolkata) — Streamlit Cloud UTC issue fixed
-3. Safe integer conversion for NaN/missing feature values in RegimeEngine
-4. Strict Nifty Option/Future filtering (blocking FPI/FIN/BANK) to fix PCR/OI 'nan' bug
-5. Early-stage momentum alpha integration for pre-bar move detection
-6. Time guard to block new trades after 3:00 PM IST
-7. Precision Entry/Exit mathematical model for slippage reduction & pin-point execution
+NIFTY 3-Min Micro Engine | v5.2.1 Institutional Prop-Grade Architecture
+OPTIMIZED & HARDENED (Peer Review Feedback Fully Addressed):
+1. Clean time guard cutoff logic for expiry vs non-expiry days.
+2. Proper Wilder's ATR (`atr_14_prev`) passed to dynamic slippage model.
+3. Total Kill-Switch (Realized + Unrealized MTM combined risk check).
+4. 0DTE size scaling for high-gamma closing protection.
 """
 
 from __future__ import annotations
@@ -74,10 +71,10 @@ def to_ist(dt: datetime) -> datetime:
 # =========================================================
 
 CONFIG = {
-    "app_version": "v5.1_institutional_prop",
-    "feature_version": "v4.0_vanna_charm_kalman_lob",
+    "app_version": "v5.2.1_institutional_prop",
+    "feature_version": "v4.1_vanna_charm_kalman_lob",
     "label_version": "TB_v3.0_clean",
-    "schema_version": "4.0",
+    "schema_version": "4.1",
     "weight_version": "NIFTY_STATIC_2025Q1",
     "atr_period": 14,
     "sma_period": 20,
@@ -111,7 +108,8 @@ CONFIG = {
     "hw_min_symbols_required": 5,
     "feed_silence_sec": 60,
     "atm_delta_approx": 0.52,
-    "estimated_slippage_pts": 0.25,  # Optimized tighter slippage model
+    "base_slippage_pts": 0.35,
+    "max_daily_loss_pts": 120.0,
     "risk_free_rate": 0.065,
     "default_atm_iv": 0.135,
     "dq_weights": {
@@ -1095,10 +1093,13 @@ class DecisionEngine:
         self.bar_counter += 1
         now_ts = now_ist()
         
-        # TIME GUARD: Block new trades after 3:00 PM IST (15:00) to avoid expiry closing erratic volatility
-        if now_ts.hour >= 15:
-            return TradeDecision("SKIP", "SESSION_CLOSE_GUARD", 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
-                                "Time guard active: No new trades after 3:00 PM", feats.get("timestamp"), now_ts)
+        # PEER REVIEW FIX: Clean time guard cutoff logic for expiry vs non-expiry days
+        expiry_flag = safe_int(feats.get("expiry_day_flag"), 0)
+        cutoff_hour, cutoff_min = (15, 25) if expiry_flag == 1 else (15, 0)
+        
+        if now_ts.hour > cutoff_hour or (now_ts.hour == cutoff_hour and now_ts.minute >= cutoff_min):
+            return TradeDecision("SKIP", "TIME_GUARD_ACTIVE", 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                                f"Time guard active: Cutoff reached ({cutoff_hour}:{cutoff_min:02d})", feats.get("timestamp"), now_ts)
 
         regime = self.regime_engine.detect(feats)
         atr = safe_float(feats.get("atr_14_prev"), 15.0)
@@ -1114,7 +1115,7 @@ class DecisionEngine:
         gex_x = safe_float(feats.get("gex_x_0dte"), 0.0)
         obi = safe_float(feats.get("order_book_imbalance"), 0.0)
         
-        # EARLY MOMENTUM ALPHA ENHANCEMENT: Kalman Velocity & Micro-Price Drift Boost for pre-candle moves
+        # EARLY MOMENTUM ALPHA: Kalman Velocity & Micro-Price Drift Boost
         k_velocity = safe_float(feats.get("kalman_velocity"), 0.0)
         micro_drift = safe_float(feats.get("micro_price_drift"), 0.0)
 
@@ -1132,8 +1133,8 @@ class DecisionEngine:
             score = (
                 np.clip(stretch, -2, 2) * 1.25 +
                 np.clip(slope, -1, 1) * 0.85 +
-                np.clip(k_velocity * 2.8, -1.2, 1.2) +  # Enhanced early pre-candle velocity multiplier
-                np.clip(micro_drift * 1.8, -0.9, 0.9) +  # Enhanced micro-price drift multiplier
+                np.clip(k_velocity * 2.8, -1.2, 1.2) +
+                np.clip(micro_drift * 1.8, -0.9, 0.9) +
                 or_state * 0.45 +
                 np.clip(twc * 55.0, -0.9, 0.9) +
                 (breadth - 0.5) * 1.4 +
@@ -1189,7 +1190,16 @@ class DecisionEngine:
 
         target, stop, size = self._realistic_target(atr, regime, strategy)
 
+        # PEER REVIEW FIX: 0DTE Size Scaling / reduction for high-gamma closing protection
+        if expiry_flag == 1 and now_ts.hour >= 14 and now_ts.minute >= 45:
+            size *= 0.60
+            reason += " | 0DTE Late-Session Size Scaled Down"
+
+        # ML Health & Confidence Derating
         ml_prob = self._predict_real_ml_proba(feats)
+        if self.ml_model is None:
+            conf_penalty += 0.08
+
         rule_conf = 0.52 + min(0.28, abs(stretch) * 0.18) - conf_penalty
 
         if strategy == "TREND" and regime.startswith("IMPULSE"):
@@ -1230,7 +1240,7 @@ class DecisionEngine:
 
 
 # =========================================================
-# 6. PAPER TRADING & DATASET (PIN-POINT SLIPPAGE MINIMIZED)
+# 6. PAPER TRADING & DATASET (TOTAL KILL-SWITCH & PROPER ATR)
 # =========================================================
 
 class DatasetManager:
@@ -1280,6 +1290,7 @@ class PaperTradingDesk:
         self.realized_pnl_pts: float = 0.0
         self.unrealized_pnl_pts: float = 0.0
         self.current_trade_date: Optional[date] = None
+        self.risk_locked: bool = False
 
     def check_and_reset_new_day(self, current_dt: datetime):
         today = to_ist(current_dt).date()
@@ -1292,8 +1303,20 @@ class PaperTradingDesk:
             self.realized_pnl_pts = 0.0
             self.unrealized_pnl_pts = 0.0
             self.current_trade_date = today
+            self.risk_locked = False
+
+    def check_total_risk_limit(self) -> bool:
+        """PEER REVIEW FIX: Combined Realized + Unrealized MTM risk limit check"""
+        total_pnl = self.realized_pnl_pts + self.unrealized_pnl_pts
+        if total_pnl <= -CONFIG["max_daily_loss_pts"]:
+            self.risk_locked = True
+            self.pending_order = None
+            return True
+        return False
 
     def stage_signal(self, decision: TradeDecision, atr: float, next_bar_time: datetime):
+        if self.risk_locked or self.check_total_risk_limit():
+            return
         if decision.action in ("CE", "PE") and self.active_position is None and self.pending_order is None:
             direction = 1 if decision.action == "CE" else -1
             self.pending_order = {
@@ -1307,14 +1330,19 @@ class PaperTradingDesk:
                 "option_stop": decision.option_stop_pts,
             }
 
-    def on_bar_open_fill(self, candle: Candle3Min):
+    def on_bar_open_fill(self, candle: Candle3Min, atr: float):
         self.check_and_reset_new_day(candle.timestamp)
         if self.pending_order and to_ist(candle.timestamp) >= to_ist(self.pending_order["target_fill_time"]):
+            if self.check_total_risk_limit():
+                self.pending_order = None
+                return
+
             order = self.pending_order
             direction = order["direction"]
             
-            # PIN-POINT SLIPPAGE REDUCTION MODEL: Uses optimized micro-limit slippage offset
-            slippage = CONFIG["estimated_slippage_pts"] * direction * 0.5
+            # PEER REVIEW FIX: Proper Wilder's ATR passed for volatility-adjusted dynamic slippage
+            vol_factor = max(0.5, min(2.0, (atr / 15.0))) if is_valid_number(atr) and atr > 0 else 1.0
+            slippage = CONFIG["base_slippage_pts"] * vol_factor * direction
             fill_price = candle.fut_o + slippage
             
             if direction == 1:
@@ -1340,6 +1368,7 @@ class PaperTradingDesk:
     def on_bar_update_and_exit_eval(self, candle: Candle3Min, is_session_end: bool = False):
         if self.active_position is None:
             self.unrealized_pnl_pts = 0.0
+            self.check_total_risk_limit()
             return
 
         pos = self.active_position
@@ -1354,10 +1383,16 @@ class PaperTradingDesk:
             hit_target = candle.fut_l <= pos.target_price
             hit_stop = candle.fut_h >= pos.stop_price
 
+        # Check total risk limit continuously on every bar update
+        self.check_total_risk_limit()
+
         timeout = pos.bars_held >= (CONFIG["time_barrier_min"] // CONFIG["bar_minutes"])
 
-        if is_session_end or hit_target or hit_stop or timeout:
-            if is_session_end:
+        if is_session_end or hit_target or hit_stop or timeout or self.risk_locked:
+            if self.risk_locked and not (is_session_end or hit_target or hit_stop or timeout):
+                exit_p = candle.fut_c
+                reason = "KILL-SWITCH MAX LOSS BREACH"
+            elif is_session_end:
                 exit_p = candle.fut_c
                 reason = "SESSION END AUTO-EXIT"
             elif hit_target and hit_stop:
@@ -1537,7 +1572,6 @@ class KotakNeoAdapter:
                 sym = str(r.get("pTrdSymbol", r.get("ts", r.get("symbol", "")))).upper().strip()
                 inst = str(r.get("pInstType", "")).upper()
                 
-                # STRICT NIFTY 50 FILTER: Exclude FPI, FINNIFTY, BANKNIFTY, MIDCPNIFTY, SENSEX, etc.
                 is_nifty_fut = (
                     sym.startswith("NIFTY") and 
                     ("FUT" in sym or "FUTIDX" in inst) and
@@ -1597,7 +1631,6 @@ class KotakNeoAdapter:
             records = record_list(res)
             now_d = now_ist().date()
             
-            # STRICT NIFTY OPTION PATTERN: Pure Nifty 50 options only (blocking FPI/FIN/BANK/SENSEX)
             nifty_opt_pattern = re.compile(r"^NIFTY\d{2}[A-Z0-9]+(CE|PE)$", re.IGNORECASE)
             valid_expiries = []
             for r in records:
@@ -1897,10 +1930,18 @@ class KotakNeoAdapter:
                         if strike == atm:
                             atm_pe_oi = oi
 
-            ce_oi_change = total_ce_oi - self._prev_ce_oi if is_valid_number(self._prev_ce_oi) else np.nan
-            pe_oi_change = total_pe_oi - self._prev_pe_oi if is_valid_number(self._prev_pe_oi) else np.nan
-            self._prev_ce_oi = total_ce_oi
-            self._prev_pe_oi = total_pe_oi
+            # ROBUST OI CHANGE (Non-zero fallback)
+            if is_valid_number(total_ce_oi) and total_ce_oi > 0:
+                ce_oi_change = total_ce_oi - self._prev_ce_oi if is_valid_number(self._prev_ce_oi) else 0.0
+                self._prev_ce_oi = total_ce_oi
+            else:
+                ce_oi_change = 0.0
+
+            if is_valid_number(total_pe_oi) and total_pe_oi > 0:
+                pe_oi_change = total_pe_oi - self._prev_pe_oi if is_valid_number(self._prev_pe_oi) else 0.0
+                self._prev_pe_oi = total_pe_oi
+            else:
+                pe_oi_change = 0.0
 
             pcr_chain = {
                 "pcr_oi": total_pe_oi / max(total_ce_oi, 1.0) if total_ce_oi > 0 else np.nan,
@@ -1919,17 +1960,19 @@ class KotakNeoAdapter:
                 heavy=hw_snap, option_chain=pcr_chain, l2_depth=l2_snap
             )
             
-            self.paper_desk.on_bar_open_fill(candle)
+            # Compute features first to get atr_14_prev for precise slippage
+            feats = self.feature_engine.compute(candle, self.candles_3m)
+            atr_v = safe_float(feats.get("atr_14_prev"), 15.0)
+
+            self.paper_desk.on_bar_open_fill(candle, atr_v)
             self.paper_desk.on_bar_update_and_exit_eval(candle, is_session_end=is_session_end)
 
-            feats = self.feature_engine.compute(candle, self.candles_3m)
             self.candles_3m.append(candle)
 
             decision = self.decision_engine.decide(feats)
             self.last_decision = decision
             
             if not is_session_end:
-                atr_v = safe_float(feats.get("atr_14_prev"), 15.0)
                 next_t = bar_time + timedelta(minutes=CONFIG["bar_minutes"])
                 self.paper_desk.stage_signal(decision, atr_v, next_t)
 
@@ -2101,7 +2144,7 @@ def main():
         print("Streamlit not installed.")
         return
 
-    st.set_page_config(page_title="NIFTY 3M | Micro Engine v5.1", page_icon="⚡", layout="wide", initial_sidebar_state="expanded")
+    st.set_page_config(page_title="NIFTY 3M | Micro Engine v5.2.1", page_icon="⚡", layout="wide", initial_sidebar_state="expanded")
     inject_custom_css()
 
     adapter: KotakNeoAdapter = get_global_adapter()
@@ -2164,7 +2207,7 @@ def main():
         st.markdown("---")
         if st.button("Run Unit Tests", key="btn_tests"):
             try:
-                st.success("Engine Verification Passed (v5.1)" if run_unit_tests() else "Test Failed")
+                st.success("Engine Verification Passed (v5.2.1)" if run_unit_tests() else "Test Failed")
             except Exception as exc:
                 st.error(str(exc))
 
@@ -2239,7 +2282,9 @@ def main():
         col_p2.metric("Unrealized MTM", f"{desk.unrealized_pnl_pts:+.2f} pt")
         col_p3.metric("Closed Trades", f"{closed_count}", delta=f"Win Rate: {hit_rate:.0f}%")
         
-        if active_pos:
+        if desk.risk_locked:
+            col_p4.markdown(f"**Status:** <span style='color:red; font-weight:bold;'>KILL-SWITCH LOCKED (Max Daily Loss Reached)</span>", unsafe_allow_html=True)
+        elif active_pos:
             dir_str = "CE (LONG)" if active_pos.direction == 1 else "PE (SHORT)"
             col_p4.markdown(f"**Active Position:** `{dir_str}`<br>Entry: `₹{active_pos.entry_price}` | SL: `₹{active_pos.stop_price}`", unsafe_allow_html=True)
         elif desk.pending_order:
