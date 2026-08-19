@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-NIFTY 3-Min Micro Engine | v6.5 Institutional Prop-Grade Architecture
-HEAVYWEIGHTS QUOTE EXTRACTION & BREADTH FIX:
-- Robust nested field extraction for Open, Close, and VWAP across Kotak Neo wrappers.
-- Breadth strictly reflects whether heavyweight stocks are trading above their Day Open / VWAP.
-- All previous option-level paper trading desk, asymmetric scaling, and risk guards secured.
+NIFTY 3-Min Micro Engine | v6.7 Institutional Prop-Grade Architecture
+DATA-COLLECTION READY & OPTION-CENTRIC DESK:
+- Price action, Kalman filter, ATR, and slope strictly use Future (fut_vwap / fut_c).
+- PCR, OI changes, Greeks (Vanna/Charm), and GEX strictly use Option Chain (22 strikes).
+- Dynamic ATM Option Baseline Pricing & Robust Heavyweight Quote Extraction.
+- All previous runtime bugs, discovery crashes, and risk management guards secured.
 """
 
 from __future__ import annotations
@@ -70,8 +71,8 @@ def to_ist(dt: datetime) -> datetime:
 # =========================================================
 
 CONFIG = {
-    "app_version": "v6.5_institutional_prop",
-    "feature_version": "v5.3_robust_heavyweight_quotes",
+    "app_version": "v6.7_institutional_prop",
+    "feature_version": "v5.5_data_collection_ready",
     "label_version": "TB_v3.0_clean",
     "schema_version": "4.1",
     "weight_version": "NIFTY_STATIC_2025Q1",
@@ -1028,16 +1029,16 @@ class RegimeEngine:
 
 @dataclass
 class TradeDecision:
-    action: str
-    regime: str
-    target_points: float
-    stop_points: float
-    option_target_pts: float
-    option_stop_pts: float
-    effective_delta: float
-    size_factor: float
-    confidence: float
-    reason: str
+    action: str = "SKIP"
+    regime: str = "NEUTRAL"
+    target_points: float = 0.0
+    stop_points: float = 0.0
+    option_target_pts: float = 0.0
+    option_stop_pts: float = 0.0
+    effective_delta: float = 0.52
+    size_factor: float = 1.0
+    confidence: float = 0.5
+    reason: str = ""
     timestamp: Optional[datetime] = None
     decision_timestamp: Optional[datetime] = None
     ml_probability: float = 0.5
@@ -1122,8 +1123,11 @@ class DecisionEngine:
         cutoff_hour, cutoff_min = (15, 25) if expiry_flag == 1 else (15, 0)
         
         if now_ts.hour > cutoff_hour or (now_ts.hour == cutoff_hour and now_ts.minute >= cutoff_min):
-            return TradeDecision("SKIP", "TIME_GUARD_ACTIVE", 0.0, 0.0, 0.0, 0.0, CONFIG["base_delta"], 0.0, 0.0,
-                                f"Time guard active: Cutoff reached ({cutoff_hour}:{cutoff_min:02d})", feats.get("timestamp"), now_ts)
+            return TradeDecision(
+                action="SKIP", regime="TIME_GUARD_ACTIVE",
+                reason=f"Time guard active: Cutoff reached ({cutoff_hour}:{cutoff_min:02d})",
+                timestamp=feats.get("timestamp"), decision_timestamp=now_ts
+            )
 
         regime = self.regime_engine.detect(feats)
         atr = safe_float(feats.get("atr_14_prev"), 15.0)
@@ -1143,8 +1147,11 @@ class DecisionEngine:
         micro_drift = safe_float(feats.get("micro_price_drift"), 0.0)
 
         if regime == "DATA_BAD" or dq < CONFIG["min_data_quality_to_trade"]:
-            return TradeDecision("SKIP", regime, 0.0, 0.0, 0.0, 0.0, CONFIG["base_delta"], 0.0, 0.0,
-                                "Data quality low / warmup pending", feats.get("timestamp"), now_ts)
+            return TradeDecision(
+                action="SKIP", regime=regime,
+                reason="Data quality low / warmup pending",
+                timestamp=feats.get("timestamp"), decision_timestamp=now_ts
+            )
 
         strategy = "NONE"
         action = "SKIP"
@@ -1268,13 +1275,19 @@ class DecisionEngine:
             self.last_action_bar_idx = self.bar_counter
 
         return TradeDecision(
-            action, regime,
-            round(target, 1), round(stop, 1),
-            opt_target, opt_stop,
-            round(effective_delta, 3),
-            round(size, 2), round(conf, 3),
-            reason,
-            feats.get("timestamp"), now_ts, ml_prob
+            action=action,
+            regime=regime,
+            target_points=round(target, 1),
+            stop_points=round(stop, 1),
+            option_target_pts=opt_target,
+            option_stop_pts=opt_stop,
+            effective_delta=round(effective_delta, 3),
+            size_factor=round(size, 2),
+            confidence=round(conf, 3),
+            reason=reason,
+            timestamp=feats.get("timestamp"),
+            decision_timestamp=now_ts,
+            ml_probability=ml_prob
         )
 
 
@@ -1382,7 +1395,6 @@ class PaperTradingDesk:
             slippage = CONFIG["base_slippage_pts"] * vol_factor * direction
             fill_price = candle.fut_o + slippage
 
-            # Dynamic ATM Option Baseline Pricing based on underlying price & ATM IV
             dynamic_atm_baseline = round(max(80.0, (fill_price * CONFIG["default_atm_iv"] * math.sqrt(1.0 / 252.0)) * 2.2), 2)
 
             self.active_position = PaperPosition(
@@ -2205,7 +2217,7 @@ def main():
         print("Streamlit not installed.")
         return
 
-    st.set_page_config(page_title="NIFTY 3M | Micro Engine v6.5", page_icon="⚡", layout="wide", initial_sidebar_state="expanded")
+    st.set_page_config(page_title="NIFTY 3M | Micro Engine v6.7", page_icon="⚡", layout="wide", initial_sidebar_state="expanded")
     inject_custom_css()
 
     adapter: KotakNeoAdapter = get_global_adapter()
@@ -2268,7 +2280,7 @@ def main():
         st.markdown("---")
         if st.button("Run Unit Tests", key="btn_tests"):
             try:
-                st.success("Engine Verification Passed (v6.5)" if run_unit_tests() else "Test Failed")
+                st.success("Engine Verification Passed (v6.7)" if run_unit_tests() else "Test Failed")
             except Exception as exc:
                 st.error(str(exc))
 
@@ -2359,7 +2371,7 @@ def main():
             st.markdown("---")
             col_tbl_head, col_tbl_dl = st.columns([3, 1])
             with col_tbl_head:
-                st.caption("Recent Closed Option Paper Trades (Option-Centric Journal v6.5)")
+                st.caption("Recent Closed Option Paper Trades (Option-Centric Journal v6.7)")
             
             trades_raw = [asdict(t) for t in desk.closed_trades]
             df_full_journal = pd.DataFrame(trades_raw)
@@ -2369,7 +2381,7 @@ def main():
                 st.download_button(
                     label="📥 Download Journal (.csv)",
                     data=csv_data,
-                    file_name=f"nifty_option_journal_v65_{now_ist().strftime('%Y%m%d')}.csv",
+                    file_name=f"nifty_option_journal_v67_{now_ist().strftime('%Y%m%d')}.csv",
                     mime="text/csv"
                 )
             
