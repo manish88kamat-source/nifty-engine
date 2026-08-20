@@ -792,13 +792,24 @@ class OptionChainEngine:
         out["pe_contracts_seen"] = int(chain.get("pe_contracts_seen", 0))
         return out
         class HeavyweightEngine:
-    def __init__(self, weights_all: Dict[str, float], weights_top5: Dict[str, float]):
+   
+    
+    
+    
+    
+    def __init__(self, weights_all:Dict[str, float], weights_top5: Dict[str, float]):
         self.weights_all = weights_all
         self.weights_top5 = weights_top5
         self.day_open: Dict[str, float] = {}
 
+
+    
+
     def reset_day(self):
         self.day_open.clear()
+
+
+    
 
     def compute(self, candle: Candle3Min):
         contributions, returns = [], []
