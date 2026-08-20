@@ -4,7 +4,7 @@ NIFTY 3-Min Micro Engine | v6.7 Institutional Prop-Grade Architecture
 DATA-COLLECTION READY & OPTION-CENTRIC DESK:
 - Price action, Kalman filter, ATR, and slope strictly use Future (fut_vwap / fut_c).
 - PCR, OI changes, Greeks (Vanna/Charm), and GEX strictly use Option Chain (22 strikes).
-- Integrated Heikin Ashi, SuperTrend, and Hilega Milega high-priority multi-indicator signals.
+- Integrated Heikin Ashi, SuperTrend, Hilega Milega, and Live Heavyweight Impact Desk.
 """
 
 from __future__ import annotations
@@ -2580,16 +2580,36 @@ def main():
                 st.caption("Feature extraction initializing...")
 
     with grid_right:
-        st.markdown("**Top 5 Core Heavyweights Momentum (SLP-5)**")
+        st.markdown("**Top 5 Core Heavyweights Momentum & Live Impact**")
         if adapter and adapter.heavy_tokens:
             hw_list = []
             with adapter.lock:
-                for sym in HEAVYWEIGHTS_TOP5.keys():
+                for sym, base_w in HEAVYWEIGHTS_TOP5.items():
                     tok = str(adapter.heavy_tokens.get(sym))
                     t = adapter.latest.get(tok, {})
                     ltp = extract_tick_price(t)
-                    hw_list.append({"Symbol": sym, "LTP": f"₹{ltp:.2f}" if is_valid_number(ltp) else "-", "Weight": f"{HEAVYWEIGHTS_TOP5.get(sym, 0)*100:.1f}%"})
-            st.dataframe(pd.DataFrame(hw_list), height=210, hide_index=True)
+                    
+                    open_price = extract_quote_field(t, ("o", "open", "pOpen", "openPrice", "op"))
+                    if not is_valid_number(open_price) or open_price <= 0:
+                        open_price = ltp
+                    
+                    if is_valid_number(ltp) and is_valid_number(open_price) and open_price > 0:
+                        ret_pct = ((ltp - open_price) / open_price) * 100.0
+                        effective_impact = base_w * (ltp - open_price) / open_price * 100
+                    else:
+                        ret_pct = 0.0
+                        effective_impact = 0.0
+
+                    hw_list.append({
+                        "Symbol": sym,
+                        "LTP": f"₹{ltp:.2f}" if is_valid_number(ltp) else "-",
+                        "Change %": f"{ret_pct:+.2f}%" if is_valid_number(ret_pct) else "-",
+                        "Base Wt": f"{base_w*100:.1f}%",
+                        "Live Impact": f"{effective_impact:+.3f}"
+                    })
+            
+            df_hw = pd.DataFrame(hw_list)
+            st.dataframe(df_hw, height=210, hide_index=True)
         else:
             st.caption("Heavyweights mapping pending discovery... Click Discover Instruments in Sidebar.")
 
