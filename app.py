@@ -6,6 +6,8 @@ DATA-COLLECTION READY & OPTION-CENTRIC DESK:
 - PCR, OI changes, Greeks (Vanna/Charm), and GEX strictly use Option Chain (22 strikes).
 - Dynamic ATM Option Baseline Pricing & Robust Heavyweight Quote Extraction.
 - All previous runtime bugs, discovery crashes, and risk management guards secured.
++ Added: Heikin Ashi + SuperTrend + Hilega Milega (NK Sir)
++ Added: Regime-based High Priority Alignment System (3/5, 4/5, 5/5)
 """
 
 from __future__ import annotations
@@ -145,8 +147,6 @@ NSE_CASH_TOKENS = {
     "INFY": "1594", "ITC": "1660", "TCS": "11536",
     "LT": "11483", "AXISBANK": "5900", "KOTAKBANK": "1922", "SBIN": "3045",
 }
-
-
 # =========================================================
 # 2. MATHEMATICAL & SECURITY UTILITIES
 # =========================================================
@@ -380,9 +380,7 @@ def record_list(response):
                 if isinstance(value.get(k), list):
                     return value[k]
     return []
-
-
-# =========================================================
+    # =========================================================
 # 3. STATE-SPACE KALMAN FILTER & 2ND-ORDER GREEKS
 # =========================================================
 
@@ -447,6 +445,162 @@ class GreeksEngine:
 
 
 # =========================================================
+# NEW INDICATORS: Heikin Ashi + SuperTrend + Hilega Milega
+# =========================================================
+
+class HeikinAshiEngine:
+    def __init__(self):
+        self.prev_ha_open = None
+        self.prev_ha_close = None
+
+    def reset(self):
+        self.prev_ha_open = None
+        self.prev_ha_close = None
+
+    def update(self, o, h, l, c):
+        if not all(is_valid_number(x) for x in [o, h, l, c]):
+            return {"ha_open": np.nan, "ha_close": np.nan, "ha_color": 0, "ha_strong": 0}
+
+        ha_close = (o + h + l + c) / 4.0
+        if self.prev_ha_open is None:
+            ha_open = (o + c) / 2.0
+        else:
+            ha_open = (self.prev_ha_open + self.prev_ha_close) / 2.0
+
+        self.prev_ha_open = ha_open
+        self.prev_ha_close = ha_close
+
+        color = 1 if ha_close >= ha_open else -1
+        strong = 1 if (color == 1 and min(l, ha_open) >= ha_open - 1e-6) or \
+                       (color == -1 and max(h, ha_open) <= ha_open + 1e-6) else 0
+
+        return {
+            "ha_open": float(ha_open),
+            "ha_close": float(ha_close),
+            "ha_color": int(color),
+            "ha_strong": int(strong)
+        }
+
+
+class SuperTrendEngine:
+    def __init__(self, period=10, multiplier=3.0):
+        self.period = period
+        self.multiplier = multiplier
+        self.tr_history = deque(maxlen=period + 5)
+        self.prev_upper = None
+        self.prev_lower = None
+        self.prev_st = None
+        self.prev_dir = 1
+
+    def reset(self):
+        self.tr_history.clear()
+        self.prev_upper = self.prev_lower = self.prev_st = None
+        self.prev_dir = 1
+
+    def update(self, high, low, close, atr=None):
+        if not all(is_valid_number(x) for x in [high, low, close]):
+            return {"supertrend": np.nan, "st_direction": 0, "st_flip": 0}
+
+        tr = high - low
+        self.tr_history.append(tr)
+
+        if atr is None or not is_valid_number(atr):
+            if len(self.tr_history) < self.period:
+                return {"supertrend": np.nan, "st_direction": 0, "st_flip": 0}
+            atr = float(np.mean(list(self.tr_history)[-self.period:]))
+
+        basic_upper = (high + low) / 2.0 + self.multiplier * atr
+        basic_lower = (high + low) / 2.0 - self.multiplier * atr
+
+        if self.prev_upper is None:
+            final_upper = basic_upper
+            final_lower = basic_lower
+        else:
+            final_upper = min(basic_upper, self.prev_upper) if close <= self.prev_upper else basic_upper
+            final_lower = max(basic_lower, self.prev_lower) if close >= self.prev_lower else basic_lower
+
+        if self.prev_st is None:
+            direction = 1 if close > basic_upper else -1
+            st = final_lower if direction == 1 else final_upper
+        else:
+            if self.prev_dir == 1:
+                direction = -1 if close < final_lower else 1
+            else:
+                direction = 1 if close > final_upper else -1
+            st = final_lower if direction == 1 else final_upper
+
+        flip = 1 if direction != self.prev_dir else 0
+
+        self.prev_upper = final_upper
+        self.prev_lower = final_lower
+        self.prev_st = st
+        self.prev_dir = direction
+
+        return {
+            "supertrend": float(st),
+            "st_direction": int(direction),
+            "st_flip": int(flip)
+        }
+
+
+class HilegaMilegaEngine:
+    def __init__(self):
+        self.closes = deque(maxlen=120)
+        self.rsi_hist = deque(maxlen=60)
+
+    def reset(self):
+        self.closes.clear()
+        self.rsi_hist.clear()
+
+    def _calc_rsi(self, period=9):
+        if len(self.closes) < period + 1:
+            return np.nan
+        arr = np.array(list(self.closes)[-(period + 1):])
+        deltas = np.diff(arr)
+        gains = np.mean(np.where(deltas > 0, deltas, 0))
+        losses = np.mean(np.where(deltas < 0, -deltas, 0))
+        if losses == 0:
+            return 100.0
+        rs = gains / losses
+        return 100.0 - (100.0 / (1.0 + rs))
+
+    def update(self, close):
+        if not is_valid_number(close):
+            return {"hm_rsi": np.nan, "hm_ema": np.nan, "hm_wma": np.nan, "hm_signal": 0}
+
+        self.closes.append(float(close))
+        rsi = self._calc_rsi(9)
+        if is_valid_number(rsi):
+            self.rsi_hist.append(rsi)
+
+        if len(self.rsi_hist) < 21:
+            return {"hm_rsi": rsi, "hm_ema": np.nan, "hm_wma": np.nan, "hm_signal": 0}
+
+        rsi_list = list(self.rsi_hist)
+
+        # EMA(3) of RSI
+        alpha = 2.0 / 4.0
+        ema = rsi_list[0]
+        for val in rsi_list[1:]:
+            ema = alpha * val + (1 - alpha) * ema
+
+        # WMA(21) of RSI
+        weights = np.arange(1, 22)
+        wma = np.dot(rsi_list[-21:], weights) / weights.sum()
+
+        signal = 0
+        if rsi > 50 and ema < rsi and wma > 50:
+            signal = 1
+        elif rsi < 50 and ema > rsi and wma < 50:
+            signal = -1
+
+        return {
+            "hm_rsi": float(rsi) if is_valid_number(rsi) else np.nan,
+            "hm_ema": float(ema),
+            "hm_wma": float(wma),
+            "hm_signal": int(signal)
+        }
+        # =========================================================
 # 4. RESEARCH ENGINES (FUTURE VWAP ANCHORED)
 # =========================================================
 
@@ -637,9 +791,7 @@ class OptionChainEngine:
         out["ce_contracts_seen"] = int(chain.get("ce_contracts_seen", 0))
         out["pe_contracts_seen"] = int(chain.get("pe_contracts_seen", 0))
         return out
-
-
-class HeavyweightEngine:
+        class HeavyweightEngine:
     def __init__(self, weights_all: Dict[str, float], weights_top5: Dict[str, float]):
         self.weights_all = weights_all
         self.weights_top5 = weights_top5
@@ -713,6 +865,10 @@ class FeatureEngine:
         self.sess = SessionContextEngine()
         self.opt = OptionChainEngine(maxlen=maxlen)
         self.kalman = KalmanPriceEngine()
+        # New Indicators
+        self.ha_engine = HeikinAshiEngine()
+        self.st_engine = SuperTrendEngine(period=10, multiplier=3.0)
+        self.hm_engine = HilegaMilegaEngine()
 
     def reset_session(self):
         self.vwap_pv = self.vwap_vol = 0.0
@@ -726,6 +882,10 @@ class FeatureEngine:
         self.sess.reset()
         self.opt.reset()
         self.kalman.reset()
+        # New Indicators reset
+        self.ha_engine.reset()
+        self.st_engine.reset()
+        self.hm_engine.reset()
 
     def preload_warmup(self, historical_closes: List[float], historical_trs: List[float]):
         if historical_closes:
@@ -841,6 +1001,11 @@ class FeatureEngine:
             is_valid_number(candle.spot_c)
         )
 
+        # ----- New Indicators -----
+        ha_res = self.ha_engine.update(candle.fut_o, candle.fut_h, candle.fut_l, candle.fut_c)
+        st_res = self.st_engine.update(candle.fut_h, candle.fut_l, candle.fut_c, atr if is_valid_number(atr) else None)
+        hm_res = self.hm_engine.update(candle.fut_c)
+
         ts_ist = to_ist(candle.timestamp)
         features = {
             "timestamp": candle.timestamp,
@@ -879,6 +1044,9 @@ class FeatureEngine:
             **self.or_eng.features(candle, atr if is_valid_number(atr) else 0.0),
             **self.sess.features(candle, atr if is_valid_number(atr) else 0.0),
             **pcr_features,
+            **ha_res,
+            **st_res,
+            **hm_res,
             "missing_spot": missing_spot, "missing_future": missing_future,
             "missing_oi": missing_oi, "missing_volume": missing_volume,
             "missing_heavyweight": missing_heavyweight, "missing_option_chain": missing_option,
@@ -888,9 +1056,7 @@ class FeatureEngine:
         }
         self.history.append(features)
         return features
-
-
-class LabelEngine:
+        class LabelEngine:
     def __init__(self):
         self.upper = CONFIG["triple_upper_atr"]
         self.lower = CONFIG["triple_lower_atr"]
@@ -984,7 +1150,7 @@ class LabelEngine:
 
 
 # =========================================================
-# 5. REGIME & DECISION ENGINE
+# 5. REGIME & DECISION ENGINE (with Priority System)
 # =========================================================
 
 class RegimeEngine:
@@ -1042,9 +1208,7 @@ class TradeDecision:
     timestamp: Optional[datetime] = None
     decision_timestamp: Optional[datetime] = None
     ml_probability: float = 0.5
-
-
-class DecisionEngine:
+    class DecisionEngine:
     def __init__(self):
         self.regime_engine = RegimeEngine()
         self.last_action: Optional[str] = None
@@ -1115,6 +1279,50 @@ class DecisionEngine:
             pass
         return 0.5
 
+    def _get_high_priority_signals(self, regime: str, feats: Dict[str, Any]) -> List[int]:
+        """
+        Returns list of +1 / -1 / 0 from the 5 high-priority indicators for that regime.
+        """
+        stretch = safe_float(feats.get("kalman_stretch"), 0.0)
+        slope = safe_float(feats.get("stretch_slope_3"), 0.0)
+        st_dir = safe_int(feats.get("st_direction"), 0)
+        hm_sig = safe_int(feats.get("hm_signal"), 0)
+        ha_color = safe_int(feats.get("ha_color"), 0)
+        pcr = safe_float(feats.get("pcr_oi"), 1.0)
+        vanna = safe_float(feats.get("dealer_vanna_flow"), 0.0)
+
+        def sgn(val, th=0.0):
+            if val > th: return 1
+            if val < -th: return -1
+            return 0
+
+        if regime in ("IMPULSE_UP", "IMPULSE_DOWN"):
+            return [
+                sgn(stretch, 0.35),
+                sgn(slope, 0.04),
+                st_dir,
+                hm_sig,
+                ha_color
+            ]
+        elif regime in ("STAIRCASE_UP", "STAIRCASE_DOWN"):
+            return [
+                sgn(slope, 0.03),
+                hm_sig,
+                st_dir,
+                ha_color,
+                sgn(stretch, 0.25)
+            ]
+        elif regime in ("GRIND", "NEUTRAL"):
+            return [
+                ha_color,
+                hm_sig,
+                sgn(1.0 - pcr, 0.04),
+                sgn(vanna, 0.04),
+                sgn(-stretch, 0.20)
+            ]
+        else:
+            return [0, 0, 0, 0, 0]
+
     def decide(self, feats: Dict[str, Any]) -> TradeDecision:
         self.bar_counter += 1
         now_ts = now_ist()
@@ -1131,20 +1339,7 @@ class DecisionEngine:
 
         regime = self.regime_engine.detect(feats)
         atr = safe_float(feats.get("atr_14_prev"), 15.0)
-        stretch = safe_float(feats.get("kalman_stretch"), feats.get("normalized_stretch", 0.0))
-        slope = safe_float(feats.get("stretch_slope_3"), 0.0)
-        or_state = safe_int(feats.get("or_breakout_state"), 0)
         dq = safe_float(feats.get("data_quality_score"), 0.0)
-        twc = safe_float(feats.get("twc"), 0.0)
-        breadth = safe_float(feats.get("breadth_10"), 0.5)
-        pcr = safe_float(feats.get("pcr_oi"), 1.0)
-        pcr_vel = safe_float(feats.get("pcr_velocity"), 0.0)
-        vanna = safe_float(feats.get("dealer_vanna_flow"), 0.0)
-        gex_x = safe_float(feats.get("gex_x_0dte"), 0.0)
-        obi = safe_float(feats.get("order_book_imbalance"), 0.0)
-        
-        k_velocity = safe_float(feats.get("kalman_velocity"), 0.0)
-        micro_drift = safe_float(feats.get("micro_price_drift"), 0.0)
 
         if regime == "DATA_BAD" or dq < CONFIG["min_data_quality_to_trade"]:
             return TradeDecision(
@@ -1153,116 +1348,68 @@ class DecisionEngine:
                 timestamp=feats.get("timestamp"), decision_timestamp=now_ts
             )
 
-        strategy = "NONE"
+        # ========== REGIME-BASED PRIORITY SYSTEM ==========
+        signals = self._get_high_priority_signals(regime, feats)
+        buy_count = sum(1 for s in signals if s == 1)
+        sell_count = sum(1 for s in signals if s == -1)
+
         action = "SKIP"
-        reason = ""
-        conf_penalty = 0.0
+        size_mult = 1.0
+        conf_extra = 0.0
+        reason = f"{regime}"
 
-        if regime in ("IMPULSE_UP", "IMPULSE_DOWN", "STAIRCASE_UP", "STAIRCASE_DOWN"):
-            strategy = "TREND"
-            score = (
-                np.clip(stretch, -2, 2) * 1.25 +
-                np.clip(slope, -1, 1) * 0.85 +
-                np.clip(k_velocity * 2.8, -1.2, 1.2) +
-                np.clip(micro_drift * 1.8, -0.9, 0.9) +
-                or_state * 0.45 +
-                np.clip(twc * 55.0, -0.9, 0.9) +
-                (breadth - 0.5) * 1.4 +
-                np.clip(obi * 0.35, -0.35, 0.35) +
-                np.clip((pcr - 1.0) * 0.45, -0.45, 0.45) +
-                np.clip(pcr_vel * 1.8, -0.30, 0.30) +
-                np.clip(gex_x * 0.70, -0.70, 0.70) +
-                np.clip(vanna * 0.30, -0.30, 0.30)
-            )
-            raw_action = "CE" if score >= 0.14 else ("PE" if score <= -0.14 else "SKIP")
+        min_need = 3
+        stretch_abs = abs(safe_float(feats.get("kalman_stretch"), 0.0))
+        if regime.startswith("IMPULSE") and stretch_abs > 1.8:
+            min_need = 4
 
-            hold = CONFIG["signal_min_hold_bars"]
-            if self.last_action and self.last_action != "SKIP":
-                bars_since = self.bar_counter - self.last_action_bar_idx
-                if bars_since < hold and raw_action != self.last_action and raw_action != "SKIP":
-                    action = self.last_action
-                    conf_penalty = 0.12
-                    reason = f"Trend hold ({bars_since}/{hold}) | {regime}"
-                else:
-                    action = raw_action
-                    reason = f"Trend strategy | {regime} | score={score:.2f}"
+        if buy_count >= min_need and buy_count > sell_count:
+            action = "CE"
+            if buy_count == 3:
+                size_mult, conf_extra = 1.00, 0.00
+            elif buy_count == 4:
+                size_mult, conf_extra = 1.25, 0.08
             else:
-                action = raw_action
-                reason = f"Trend strategy | {regime} | score={score:.2f}"
-
-        elif regime in ("GRIND", "NEUTRAL"):
-            strategy = "MEAN_REVERSION"
-
-            upper_rej = (
-                stretch > 0.25 and
-                slope < 0.05 and
-                (breadth < 0.53 or twc < 0.0005 or pcr > 1.04 or vanna < -0.05 or obi < -0.15)
-            )
-            lower_rej = (
-                stretch < -0.25 and
-                slope > -0.05 and
-                (breadth > 0.47 or twc > -0.0005 or pcr < 0.96 or vanna > 0.05 or obi > 0.15)
-            )
-
-            if upper_rej:
-                action = "PE"
-                reason = f"Mean-reversion (upper rejection) | {regime} | stretch={stretch:.2f}"
-            elif lower_rej:
-                action = "CE"
-                reason = f"Mean-reversion (lower rejection) | {regime} | stretch={stretch:.2f}"
+                size_mult, conf_extra = 1.45, 0.14
+            reason += f" | HP Buy {buy_count}/5"
+        elif sell_count >= min_need and sell_count > buy_count:
+            action = "PE"
+            if sell_count == 3:
+                size_mult, conf_extra = 1.00, 0.00
+            elif sell_count == 4:
+                size_mult, conf_extra = 1.25, 0.08
             else:
-                action = "SKIP"
-                reason = f"Range middle / no clear boundary | {regime} | stretch={stretch:.2f}"
-
+                size_mult, conf_extra = 1.45, 0.14
+            reason += f" | HP Sell {sell_count}/5"
         else:
-            action = "SKIP"
-            reason = f"No edge regime: {regime}"
+            reason += f" | HP weak (B{buy_count}/S{sell_count})"
 
-        target, stop, size = self._realistic_target(atr, regime, strategy)
+        # Target / Stop
+        strategy = "TREND" if action in ("CE", "PE") else "NONE"
+        target, stop, base_size = self._realistic_target(atr, regime, strategy)
+        final_size = base_size * size_mult
 
-        if expiry_flag == 1 and now_ts.hour >= 14 and now_ts.minute >= 45:
-            size *= 0.60
-            reason += " | 0DTE Late-Session Size Scaled Down"
-
+        # Confidence
         ml_prob = self._predict_real_ml_proba(feats)
+        rule_conf = 0.52 + conf_extra
         if self.ml_model is None:
-            conf_penalty += 0.08
-
-        rule_conf = 0.52 + min(0.28, abs(stretch) * 0.18) - conf_penalty
-
-        if strategy == "TREND" and regime.startswith("IMPULSE"):
-            rule_conf += 0.09
-        if strategy == "MEAN_REVERSION" and action != "SKIP":
-            rule_conf += 0.05
-
+            rule_conf -= 0.08
         rule_w, ml_w = self.get_adaptive_weights(regime)
         combined_conf = (rule_w * rule_conf) + (ml_w * abs(ml_prob - 0.5) * 2.0)
         conf = float(np.clip(combined_conf, 0.28, 0.88))
 
-        hw_seen = safe_int(feats.get("hw_symbols_seen"), 0)
-        min_hw = CONFIG.get("hw_min_symbols_required", 5)
-        if hw_seen < min_hw:
-            size *= 0.55
-            conf = max(0.28, conf - 0.14)
-            reason += f" | HW weak ({hw_seen})"
-        elif hw_seen < 8:
-            size *= 0.85
-            conf = max(0.28, conf - 0.05)
-
+        # Effective Delta
         base_delta = CONFIG.get("base_delta", 0.52)
         zero_dte = safe_float(feats.get("zero_dte_intensity"), 0.0)
         dte_boost = 1.0 + (0.45 * zero_dte)
-
         if regime.startswith("IMPULSE"):
             regime_mult = 1.30
         elif regime.startswith("STAIRCASE"):
             regime_mult = 1.12
         else:
             regime_mult = 1.00
-
         gamma_proxy = abs(safe_float(feats.get("atm_gamma_imbalance"), 0.0))
         gamma_boost = 1.0 + (0.20 * min(gamma_proxy, 1.0))
-
         effective_delta = base_delta * dte_boost * regime_mult * gamma_boost
         effective_delta = float(np.clip(effective_delta, 0.48, 0.95))
 
@@ -1282,16 +1429,14 @@ class DecisionEngine:
             option_target_pts=opt_target,
             option_stop_pts=opt_stop,
             effective_delta=round(effective_delta, 3),
-            size_factor=round(size, 2),
+            size_factor=round(final_size, 2),
             confidence=round(conf, 3),
             reason=reason,
             timestamp=feats.get("timestamp"),
             decision_timestamp=now_ts,
             ml_probability=ml_prob
         )
-
-
-# =========================================================
+        # =========================================================
 # 6. OPTION-CENTRIC PAPER TRADING DESK & JOURNAL
 # =========================================================
 
@@ -1484,9 +1629,7 @@ class PaperTradingDesk:
 
             self.active_position = None
             self.unrealized_pnl_pts = 0.0
-
-
-# =========================================================
+            # =========================================================
 # 7. KOTAK NEO ADAPTER
 # =========================================================
 
@@ -1654,8 +1797,7 @@ class KotakNeoAdapter:
         except Exception as e:
             self.last_error = f"Future resolution error: {e}"
         return CONFIG.get("nifty_future_token", "53000")
-
-    def discover_nifty_instruments(self, auto_pcr: bool = True) -> bool:
+        def discover_nifty_instruments(self, auto_pcr: bool = True) -> bool:
         if not self.connected or not self.client:
             raise RuntimeError("Kotak Neo not authenticated.")
         self.discovery_log.clear()
@@ -1859,8 +2001,7 @@ class KotakNeoAdapter:
         self.conn_state = "STREAMING"
         self._last_tick_wall = time.time()
         return len(sub_tokens)
-
-    def maybe_flush_bars(self):
+         def maybe_flush_bars(self):
         now = now_ist()
         with self.lock:
             if self.current_bar_time is None:
@@ -2210,9 +2351,7 @@ if st is not None:
     @st.cache_resource
     def get_global_adapter():
         return KotakNeoAdapter()
-
-
-def main():
+   def main():
     if st is None:
         print("Streamlit not installed.")
         return
