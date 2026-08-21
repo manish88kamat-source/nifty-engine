@@ -1851,7 +1851,7 @@ class KotakNeoAdapter:
                 futures.sort(key=lambda x: x[0])
                 nearest_exp, nearest_tok, nearest_sym = futures[0]
                 self.future_symbol = nearest_sym
-                self.discovery_log.append(f"✓ Resolved Nifty Future: {nearest_sym} | Token: {nearest_tok} | Expiry: {nearest_exp.date()}")
+                self.discovery_log.append(f"âœ“ Resolved Nifty Future: {nearest_sym} | Token: {nearest_tok} | Expiry: {nearest_exp.date()}")
                 return nearest_tok
         except Exception as e:
             self.last_error = f"Future resolution error: {e}"
@@ -1864,15 +1864,15 @@ class KotakNeoAdapter:
         
         self.heavy_tokens = dict(NSE_CASH_TOKENS)
         self.token_to_symbol = {v: k for k, v in NSE_CASH_TOKENS.items()}
-        self.discovery_log.append(f"✓ Configured {len(self.heavy_tokens)} Core Heavyweights")
+        self.discovery_log.append(f"âœ“ Configured {len(self.heavy_tokens)} Core Heavyweights")
         
         self.spot_token = "Nifty 50"
         self.token_to_symbol[self.spot_token] = "NIFTY_SPOT"
-        self.discovery_log.append("✓ Configured Nifty Spot Index: Nifty 50")
+        self.discovery_log.append("âœ“ Configured Nifty Spot Index: Nifty 50")
 
         self.future_token = self.resolve_current_nifty_future_token()
         self.token_to_symbol[self.future_token] = "NIFTY_FUT"
-        self.discovery_log.append(f"✓ Configured Active Future Token: {self.future_token}")
+        self.discovery_log.append(f"âœ“ Configured Active Future Token: {self.future_token}")
 
         if auto_pcr:
             self.discover_pcr_chain()
@@ -1935,7 +1935,7 @@ class KotakNeoAdapter:
                             "expiry": exp, "symbol": str(r.get("pTrdSymbol", ""))
                         }
             self.pcr_tokens = list(set(discovered))
-            self.discovery_log.append(f"✓ Single-Expiry PCR ({target_exp_date}): {len(self.pcr_tokens)} Strikes Mapped")
+            self.discovery_log.append(f"âœ“ Single-Expiry PCR ({target_exp_date}): {len(self.pcr_tokens)} Strikes Mapped")
             return len(self.pcr_tokens)
         except Exception as e:
             self.last_error = f"PCR Discovery error: {e}"
@@ -2417,23 +2417,23 @@ def main():
         print("Streamlit not installed.")
         return
 
-    st.set_page_config(page_title="NIFTY 3M | Micro Engine v7.0", page_icon="⚡", layout="wide", initial_sidebar_state="expanded")
+    st.set_page_config(page_title="NIFTY 3M | Micro Engine v7.0", page_icon="âš¡", layout="wide", initial_sidebar_state="expanded")
     inject_custom_css()
 
     adapter: KotakNeoAdapter = get_global_adapter()
     is_logged_in = adapter.connected
 
     with st.sidebar:
-        st.subheader("⚡ Gateway Controls")
+        st.subheader("âš¡ Gateway Controls")
         
         if is_logged_in:
             conn_txt = getattr(adapter, "conn_state", "AUTHENTICATED")
             if conn_txt == "STREAMING":
-                st.markdown('<span class="status-pill status-active">● STREAMING (LIVE)</span>', unsafe_allow_html=True)
+                st.markdown('<span class="status-pill status-active">â— STREAMING (LIVE)</span>', unsafe_allow_html=True)
             else:
-                st.markdown('<span class="status-pill status-auth">● CONNECTED (AUTHENTICATED)</span>', unsafe_allow_html=True)
+                st.markdown('<span class="status-pill status-auth">â— CONNECTED (AUTHENTICATED)</span>', unsafe_allow_html=True)
         else:
-            st.markdown('<span class="status-pill status-offline">● DISCONNECTED</span>', unsafe_allow_html=True)
+            st.markdown('<span class="status-pill status-offline">â— DISCONNECTED</span>', unsafe_allow_html=True)
 
         user_live_totp = st.text_input("Live TOTP (Optional)", type="password", help="Use if secret not in config")
         
@@ -2453,7 +2453,7 @@ def main():
                 st.rerun()
 
         st.markdown("---")
-        st.subheader("🔍 Subscriptions")
+        st.subheader("ðŸ” Subscriptions")
         
         if st.button("Discover Instruments", key="btn_disc", disabled=not is_logged_in):
             with st.spinner("Locking NIFTY Instruments & Heavyweights..."):
@@ -2462,7 +2462,7 @@ def main():
                 st.rerun()
 
         if st.session_state.get("discovered") and adapter.discovery_log:
-            st.success("✓ Instruments Mapped!")
+            st.success("âœ“ Instruments Mapped!")
             for l in adapter.discovery_log:
                 st.caption(l)
 
@@ -2510,8 +2510,8 @@ def main():
             ticks_count = len(adapter.tick_buffer)
 
     t1, t2, t3, t4 = st.columns(4)
-    t1.metric("NIFTY SPOT", f"₹{spot_val}")
-    t2.metric("NIFTY FUT", f"₹{fut_val}")
+    t1.metric("NIFTY SPOT", f"â‚¹{spot_val}")
+    t2.metric("NIFTY FUT", f"â‚¹{fut_val}")
     t3.metric("FUT OPEN INTEREST", f"{int(fut_oi):,}" if isinstance(fut_oi, (int, float)) and np.isfinite(fut_oi) else str(fut_oi))
     t4.metric("TICKS INGESTED", f"{ticks_count:,}")
 
@@ -2540,7 +2540,7 @@ def main():
     st.markdown('</div>', unsafe_allow_html=True)
 
     st.markdown('<div class="terminal-card">', unsafe_allow_html=True)
-    st.markdown("**⚡ Live Option-Centric Paper Trading Desk & Journal**")
+    st.markdown("**âš¡ Live Option-Centric Paper Trading Desk & Journal**")
     
     col_p1, col_p2, col_p3, col_p4 = st.columns(4)
     if adapter:
@@ -2560,7 +2560,7 @@ def main():
             col_p4.markdown(f"**Status:** <span style='color:red; font-weight:bold;'>KILL-SWITCH LOCKED (Max Daily Loss Reached)</span>", unsafe_allow_html=True)
         elif active_pos:
             dir_str = "CE (LONG)" if active_pos.direction == 1 else "PE (SHORT)"
-            col_p4.markdown(f"**Active Position:** `{dir_str}`<br>Entry Opt: `₹{active_pos.entry_option_price}` | Target Opt: `+{active_pos.option_target}` pt", unsafe_allow_html=True)
+            col_p4.markdown(f"**Active Position:** `{dir_str}`<br>Entry Opt: `â‚¹{active_pos.entry_option_price}` | Target Opt: `+{active_pos.option_target}` pt", unsafe_allow_html=True)
         elif desk.pending_order:
             p_dir = "CE" if desk.pending_order["direction"] == 1 else "PE"
             col_p4.markdown(f"**Order Staged:** `{p_dir}` (Filling Next Open)", unsafe_allow_html=True)
@@ -2579,7 +2579,7 @@ def main():
             with col_tbl_dl:
                 csv_data = df_full_journal.to_csv(index=False).encode('utf-8')
                 st.download_button(
-                    label="📥 Download Journal (.csv)",
+                    label="ðŸ“¥ Download Journal (.csv)",
                     data=csv_data,
                     file_name=f"nifty_option_journal_v70_{now_ist().strftime('%Y%m%d')}.csv",
                     mime="text/csv"
@@ -2590,8 +2590,8 @@ def main():
                 recent_trades_data.append({
                     "Exit Time": t.exit_time.strftime("%H:%M:%S") if t.exit_time else "-",
                     "Type": "CE (LONG)" if t.direction == 1 else "PE (SHORT)",
-                    "Entry Opt (₹)": f"{t.entry_option_price:.2f}",
-                    "Exit Opt (₹)": f"{t.exit_option_price:.2f}" if t.exit_option_price else "-",
+                    "Entry Opt (â‚¹)": f"{t.entry_option_price:.2f}",
+                    "Exit Opt (â‚¹)": f"{t.exit_option_price:.2f}" if t.exit_option_price else "-",
                     "Option PnL (pt)": t.pnl_pts,
                     "Bars Held": t.bars_held,
                     "Exit Reason": t.exit_reason
@@ -2624,25 +2624,25 @@ def main():
                 val_breadth = latest_row.get("breadth_10", 0.5)
                 f4.markdown(f"**Breadth (10)**<br>{get_colored_text(val_breadth, 'breadth_10')}", unsafe_allow_html=True)
                 
-                with st.expander("🛡️ Institutional MLOps & 2nd-Order Greeks Scorecard", expanded=False):
+                with st.expander("ðŸ›¡ï¸ Institutional MLOps & 2nd-Order Greeks Scorecard", expanded=False):
                     dq_val = latest_row.get("data_quality_score", 1.0)
                     st.write(f"**Overall DQ Score:** `{dq_val * 100:.0f}%`")
                     
                     c_dq1, c_dq2 = st.columns(2)
                     with c_dq1:
-                        st.write(f"• Top 5 Lead Pressure (SLP_5): `{latest_row.get('slp_top5_pressure', 0.0):.3f}`")
-                        st.write(f"• Order Book Imbalance (OBI): `{latest_row.get('order_book_imbalance', 0.0):.3f}`")
-                        st.write(f"• Dealer Vanna Flow: `{latest_row.get('dealer_vanna_flow', 0.0):.3f}`")
-                        st.write(f"• Dealer Charm Flow: `{latest_row.get('dealer_charm_flow', 0.0):.3f}`")
-                        st.write(f"• Dealer GEX Proxy: `{latest_row.get('gex_proxy', 0.0):.3f}`")
+                        st.write(f"â€¢ Top 5 Lead Pressure (SLP_5): `{latest_row.get('slp_top5_pressure', 0.0):.3f}`")
+                        st.write(f"â€¢ Order Book Imbalance (OBI): `{latest_row.get('order_book_imbalance', 0.0):.3f}`")
+                        st.write(f"â€¢ Dealer Vanna Flow: `{latest_row.get('dealer_vanna_flow', 0.0):.3f}`")
+                        st.write(f"â€¢ Dealer Charm Flow: `{latest_row.get('dealer_charm_flow', 0.0):.3f}`")
+                        st.write(f"â€¢ Dealer GEX Proxy: `{latest_row.get('gex_proxy', 0.0):.3f}`")
                     with c_dq2:
                         model_loaded = adapter.decision_engine.ml_model is not None
                         feat_cnt = len(adapter.decision_engine.expected_feature_names)
-                        st.write(f"• ML Status: `{'ACTIVE (' + str(feat_cnt) + ' Features)' if model_loaded else 'FALLBACK (Heuristic)'}`")
-                        st.write(f"• 0DTE Intensity: `{latest_row.get('zero_dte_intensity', 0.0):.2f}`")
-                        st.write(f"• Minutes to Expiry: `{latest_row.get('minutes_to_expiry', 0.0):.0f} min`")
-                        st.write(f"• Gap Points: `{latest_row.get('gap_points', 0.0):.1f} pt`")
-                        st.write(f"• Causal Integrity Tag: `{'1 (VERIFIED)' if latest_row.get('is_causal') == 1 else '0 (INVALID)'}`")
+                        st.write(f"â€¢ ML Status: `{'ACTIVE (' + str(feat_cnt) + ' Features)' if model_loaded else 'FALLBACK (Heuristic)'}`")
+                        st.write(f"â€¢ 0DTE Intensity: `{latest_row.get('zero_dte_intensity', 0.0):.2f}`")
+                        st.write(f"â€¢ Minutes to Expiry: `{latest_row.get('minutes_to_expiry', 0.0):.0f} min`")
+                        st.write(f"â€¢ Gap Points: `{latest_row.get('gap_points', 0.0):.1f} pt`")
+                        st.write(f"â€¢ Causal Integrity Tag: `{'1 (VERIFIED)' if latest_row.get('is_causal') == 1 else '0 (INVALID)'}`")
                     st.json(latest_row)
             else:
                 st.caption("Feature extraction initializing...")
@@ -2670,7 +2670,7 @@ def main():
 
                     hw_list.append({
                         "Symbol": sym,
-                        "LTP": f"₹{ltp:.2f}" if is_valid_number(ltp) else "-",
+                        "LTP": f"â‚¹{ltp:.2f}" if is_valid_number(ltp) else "-",
                         "Change %": f"{ret_pct:+.2f}%" if is_valid_number(ret_pct) else "-",
                         "Base Wt": f"{base_w*100:.1f}%",
                         "Live Impact": f"{effective_impact:+.3f}"
@@ -2690,8 +2690,8 @@ if __name__ == "__main__":
     if st is not None and hasattr(st, "runtime") and st.runtime.exists():
         main()
     else:
-        print("⚡ Running Institutional Prop-Engine Verification...")
+        print("âš¡ Running Institutional Prop-Engine Verification...")
         if run_unit_tests():
-            print("✓ All Quant Engines Verified + IST Timezone + Library Bug Hardened.")
+            print("âœ“ All Quant Engines Verified + IST Timezone + Library Bug Hardened.")
         else:
             raise RuntimeError("Engine Verification Failed.")
