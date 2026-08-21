@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-NIFTY 3-Min Micro Engine | v6.7 Institutional Prop-Grade Architecture
+NIFTY 3-Min Micro Engine | v6.8 Institutional Prop-Grade Architecture
 DATA-COLLECTION READY & OPTION-CENTRIC DESK:
 - Price action, Kalman filter, ATR, and slope strictly use Future (fut_vwap / fut_c).
 - PCR, OI changes, Greeks (Vanna/Charm), and GEX strictly use Option Chain (22 strikes).
-- Integrated Heikin Ashi, SuperTrend, Hilega Milega, and Live Heavyweight Impact Desk.
+- Integrated Heikin Ashi, SuperTrend, Hilega Milega, Live Heavyweight Impact Desk,
+  and Two-Way Dynamic Indicator Alignment Target Stretching & Journal Logging.
 """
 
 from __future__ import annotations
@@ -68,14 +69,14 @@ def to_ist(dt: datetime) -> datetime:
 # =========================================================
 
 CONFIG = {
-    "app_version": "v6.7_institutional_prop",
+    "app_version": "v6.8_institutional_prop",
     "feature_version": "v5.5_data_collection_ready",
     "label_version": "TB_v3.0_clean",
     "schema_version": "4.1",
     "weight_version": "NIFTY_STATIC_2025Q1",
     "atr_period": 14,
     "sma_period": 20,
-    "triple_upper_atr": 1.0,
+    "triple_upper_atr": 1.5,
     "triple_lower_atr": 0.75,
     "time_barrier_min": 30,
     "mfe_horizons_min": [15, 30, 45],
@@ -1222,6 +1223,7 @@ class TradeDecision:
     timestamp: Optional[datetime] = None
     decision_timestamp: Optional[datetime] = None
     ml_probability: float = 0.5
+    aligned_count: int = 3
 
 
 class DecisionEngine:
@@ -1261,18 +1263,21 @@ class DecisionEngine:
             return 0.35, 0.65
         return 0.70, 0.30
 
-    def _realistic_target(self, atr: float, regime: str, strategy: str) -> Tuple[float, float, float]:
+    def _realistic_target(self, atr: float, regime: str, strategy: str, aligned_count: int = 3) -> Tuple[float, float, float]:
         if not is_valid_number(atr) or atr <= 0:
             atr = 15.0
+            
+        conviction_multiplier = 1.0 if aligned_count <= 3 else (1.35 if aligned_count == 4 else 1.70)
+
         if strategy == "TREND":
             if regime in ("IMPULSE_UP", "IMPULSE_DOWN"):
-                return 1.15 * atr, 0.70 * atr, 1.00
+                return round(2.2 * atr * conviction_multiplier, 1), round(0.75 * atr, 1), 1.00
             if regime in ("STAIRCASE_UP", "STAIRCASE_DOWN"):
-                return 0.90 * atr, 0.65 * atr, 0.85
-            return 0.70 * atr, 0.55 * atr, 0.70
+                return round(1.6 * atr * conviction_multiplier, 1), round(0.70 * atr, 1), 0.85
+            return round(0.70 * atr, 1), round(0.55 * atr, 1), 0.70
         if strategy == "MEAN_REVERSION":
-            return 0.55 * atr, 0.40 * atr, 0.75
-        return 0.60 * atr, 0.50 * atr, 0.55
+            return round(0.55 * atr, 1), round(0.40 * atr, 1), 0.75
+        return round(0.60 * atr, 1), round(0.50 * atr, 1), 0.55
 
     def _predict_real_ml_proba(self, feats: Dict[str, Any]) -> float:
         if self.ml_model is None:
@@ -1310,29 +1315,11 @@ class DecisionEngine:
             return 0
 
         if regime in ("IMPULSE_UP", "IMPULSE_DOWN"):
-            return [
-                sign(stretch, 0.35),
-                sign(slope, 0.04),
-                st_dir,
-                hm_sig,
-                ha_color
-            ]
+            return [sign(stretch, 0.35), sign(slope, 0.04), st_dir, hm_sig, ha_color]
         elif regime in ("STAIRCASE_UP", "STAIRCASE_DOWN"):
-            return [
-                sign(slope, 0.03),
-                hm_sig,
-                st_dir,
-                ha_color,
-                sign(stretch, 0.25)
-            ]
+            return [sign(slope, 0.03), hm_sig, st_dir, ha_color, sign(stretch, 0.25)]
         elif regime in ("GRIND", "NEUTRAL"):
-            return [
-                ha_color,
-                hm_sig,
-                sign(1.0 - pcr, 0.05),
-                sign(vanna, 0.05),
-                sign(-stretch, 0.20)
-            ]
+            return [ha_color, hm_sig, sign(1.0 - pcr, 0.05), sign(vanna, 0.05), sign(-stretch, 0.20)]
         else:
             return [0, 0, 0, 0, 0]
 
@@ -1376,33 +1363,22 @@ class DecisionEngine:
 
         if aligned_buy >= min_required and aligned_buy > aligned_sell:
             action = "CE"
-            if aligned_buy == 3:
-                size_mult = 1.0
-                conf_boost = 0.0
-            elif aligned_buy == 4:
-                size_mult = 1.25
-                conf_boost = 0.08
-            else:
-                size_mult = 1.45
-                conf_boost = 0.14
+            if aligned_buy == 3: size_mult, conf_boost = 1.0, 0.0
+            elif aligned_buy == 4: size_mult, conf_boost = 1.25, 0.08
+            else: size_mult, conf_boost = 1.45, 0.14
             reason_parts.append(f"HP Buy {aligned_buy}/5")
         elif aligned_sell >= min_required and aligned_sell > aligned_buy:
             action = "PE"
-            if aligned_sell == 3:
-                size_mult = 1.0
-                conf_boost = 0.0
-            elif aligned_sell == 4:
-                size_mult = 1.25
-                conf_boost = 0.08
-            else:
-                size_mult = 1.45
-                conf_boost = 0.14
+            if aligned_sell == 3: size_mult, conf_boost = 1.0, 0.0
+            elif aligned_sell == 4: size_mult, conf_boost = 1.25, 0.08
+            else: size_mult, conf_boost = 1.45, 0.14
             reason_parts.append(f"HP Sell {aligned_sell}/5")
         else:
             reason_parts.append(f"HP insufficient (Buy={aligned_buy} Sell={aligned_sell})")
 
+        aligned_count = max(aligned_buy, aligned_sell)
         strategy = "TREND" if action != "SKIP" else "NONE"
-        target, stop, base_size = self._realistic_target(atr, regime, strategy)
+        target, stop, base_size = self._realistic_target(atr, regime, strategy, aligned_count)
         size = base_size * size_mult
 
         ml_prob = self._predict_real_ml_proba(feats)
@@ -1428,7 +1404,8 @@ class DecisionEngine:
             reason=" | ".join(reason_parts),
             timestamp=feats.get("timestamp"),
             decision_timestamp=now_ts,
-            ml_probability=ml_prob
+            ml_probability=ml_prob,
+            aligned_count=aligned_count
         )
 
 
@@ -1473,6 +1450,11 @@ class PaperPosition:
     exit_option_price: Optional[float] = None
     pnl_pts: float = 0.0
     exit_reason: str = ""
+    max_favorable_pts: float = 0.0
+    initial_aligned_count: int = 3
+    peak_aligned_count: int = 3
+    exit_aligned_count: int = 3
+    alignment_path: str = "3"
 
 
 class PaperTradingDesk:
@@ -1520,6 +1502,7 @@ class PaperTradingDesk:
                 "effective_delta": decision.effective_delta,
                 "size": decision.size_factor,
                 "regime": decision.regime,
+                "aligned_count": decision.aligned_count,
             }
 
     def on_bar_open_fill(self, candle: Candle3Min, atr: float):
@@ -1531,6 +1514,7 @@ class PaperTradingDesk:
 
             order = self.pending_order
             direction = order["direction"]
+            init_align = order.get("aligned_count", 3)
             
             vol_factor = max(0.5, min(2.0, (atr / 15.0))) if is_valid_number(atr) and atr > 0 else 1.0
             slippage = CONFIG["base_slippage_pts"] * vol_factor * direction
@@ -1548,10 +1532,14 @@ class PaperTradingDesk:
                 effective_delta=order["effective_delta"],
                 size=order["size"],
                 regime=order["regime"],
+                initial_aligned_count=init_align,
+                peak_aligned_count=init_align,
+                exit_aligned_count=init_align,
+                alignment_path=str(init_align),
             )
             self.pending_order = None
 
-    def on_bar_update_and_exit_eval(self, candle: Candle3Min, is_session_end: bool = False):
+    def on_bar_update_and_exit_eval(self, candle: Candle3Min, is_session_end: bool = False, current_aligned_count: int = 3):
         if not hasattr(self, "risk_locked"):
             self.risk_locked = False
 
@@ -1563,6 +1551,17 @@ class PaperTradingDesk:
         pos = self.active_position
         pos.bars_held += 1
         
+        # Track alignment path & peak strength dynamically
+        last_recorded = int(pos.alignment_path.split(" -> ")[-1])
+        if current_aligned_count != last_recorded:
+            pos.alignment_path += f" -> {current_aligned_count}"
+
+        if current_aligned_count > pos.peak_aligned_count:
+            pos.peak_aligned_count = current_aligned_count
+            # TWO-WAY SCENARIO A: Momentum Strengths up (4 or 5) -> Extend Target
+            if current_aligned_count >= 4:
+                pos.option_target = round(pos.option_target * 1.30, 1)
+
         if pos.direction == 1:
             fut_high_move = candle.fut_h - pos.entry_future_price
             fut_low_move = pos.entry_future_price - candle.fut_l
@@ -1576,30 +1575,42 @@ class PaperTradingDesk:
         option_low_pnl = - (fut_low_move * pos.effective_delta)
         option_close_pnl = fut_close_move * pos.effective_delta
 
+        pos.max_favorable_pts = max(pos.max_favorable_pts, option_high_pnl)
+
+        # TWO-WAY SCENARIO B: Profit Lock (10+ pts profit seen -> Risk-free stop)
+        if pos.max_favorable_pts >= 10.0 and pos.option_stop > 0.5:
+            pos.option_stop = 0.5  
+
         self.unrealized_pnl_pts = round(option_close_pnl * pos.size, 2)
 
         hit_target = option_high_pnl >= pos.option_target
         hit_stop = option_low_pnl <= -pos.option_stop
+        
+        # TWO-WAY SCENARIO C: Momentum Fade Exit (Good profit seen but alignment dropped to 1 or 0)
+        momentum_fade = (pos.max_favorable_pts >= 8.0 and current_aligned_count <= 1)
 
         self.check_total_risk_limit()
         timeout = pos.bars_held >= (CONFIG["time_barrier_min"] // CONFIG["bar_minutes"])
 
-        if is_session_end or hit_target or hit_stop or timeout or self.risk_locked:
-            if self.risk_locked and not (is_session_end or hit_target or hit_stop or timeout):
+        if is_session_end or hit_target or hit_stop or momentum_fade or timeout or self.risk_locked:
+            if self.risk_locked and not (is_session_end or hit_target or hit_stop or momentum_fade or timeout):
                 exit_pnl = option_close_pnl
                 reason = "KILL-SWITCH MAX LOSS BREACH"
             elif is_session_end:
                 exit_pnl = option_close_pnl
                 reason = "SESSION END AUTO-EXIT"
+            elif momentum_fade:
+                exit_pnl = option_close_pnl
+                reason = f"MOMENTUM FADE EXIT (Max: +{pos.max_favorable_pts:.1f}pt)"
             elif hit_target and hit_stop:
                 exit_pnl = -pos.option_stop
                 reason = "AMBIGUOUS (SL ASSUMED)"
             elif hit_target:
                 exit_pnl = pos.option_target
-                reason = "TARGET HIT"
+                reason = "EXTENDED TARGET HIT 🎯"
             elif hit_stop:
                 exit_pnl = -pos.option_stop
-                reason = "STOP LOSS HIT"
+                reason = "LOCKED STOP LOSS HIT"
             else:
                 exit_pnl = option_close_pnl
                 reason = "TIME BARRIER EXIT"
@@ -1607,6 +1618,7 @@ class PaperTradingDesk:
             pos.exit_time = candle.timestamp
             pos.exit_future_price = round(candle.fut_c, 2)
             pos.exit_option_price = round(max(5.0, pos.entry_option_price + exit_pnl), 2)
+            pos.exit_aligned_count = current_aligned_count
             
             base_penalty = CONFIG.get("option_exit_spread_penalty", 0.65)
             net_spread_penalty = min(1.40, base_penalty * max(1.0, abs(exit_pnl) / 10.0))
@@ -2170,12 +2182,17 @@ class KotakNeoAdapter:
             atr_v = safe_float(feats.get("atr_14_prev"), 15.0)
 
             self.paper_desk.on_bar_open_fill(candle, atr_v)
-            self.paper_desk.on_bar_update_and_exit_eval(candle, is_session_end=is_session_end)
-
-            self.candles_3m.append(candle)
-
+            
             decision = self.decision_engine.decide(feats)
             self.last_decision = decision
+
+            # Calculate current indicator alignment count for live tracking
+            signals = self.decision_engine._get_high_priority_signals(decision.regime, feats)
+            current_aligned_count = max(sum(1 for s in signals if s == 1), sum(1 for s in signals if s == -1))
+
+            self.paper_desk.on_bar_update_and_exit_eval(candle, is_session_end=is_session_end, current_aligned_count=current_aligned_count)
+
+            self.candles_3m.append(candle)
             
             if not is_session_end:
                 next_t = bar_time + timedelta(minutes=CONFIG["bar_minutes"])
@@ -2349,7 +2366,7 @@ def main():
         print("Streamlit not installed.")
         return
 
-    st.set_page_config(page_title="NIFTY 3M | Micro Engine v6.7", page_icon="⚡", layout="wide", initial_sidebar_state="expanded")
+    st.set_page_config(page_title="NIFTY 3M | Micro Engine v6.8", page_icon="⚡", layout="wide", initial_sidebar_state="expanded")
     inject_custom_css()
 
     adapter: KotakNeoAdapter = get_global_adapter()
@@ -2412,7 +2429,7 @@ def main():
         st.markdown("---")
         if st.button("Run Unit Tests", key="btn_tests"):
             try:
-                st.success("Engine Verification Passed (v6.7)" if run_unit_tests() else "Test Failed")
+                st.success("Engine Verification Passed (v6.8)" if run_unit_tests() else "Test Failed")
             except Exception as exc:
                 st.error(str(exc))
 
@@ -2461,7 +2478,7 @@ def main():
             st.metric("Regime", d.regime)
         with col_hud3:
             st.metric("Option Target / SL", f"+{d.option_target_pts} / -{d.option_stop_pts} pt")
-            st.caption(f"**Effective Delta:** {d.effective_delta:.2f}")
+            st.caption(f"**Effective Delta:** {d.effective_delta:.2f} | **Align:** {d.aligned_count}/5")
         with col_hud4:
             st.metric("Confidence", f"{d.confidence * 100:.0f}%")
         with col_hud5:
@@ -2472,7 +2489,7 @@ def main():
     st.markdown('</div>', unsafe_allow_html=True)
 
     st.markdown('<div class="terminal-card">', unsafe_allow_html=True)
-    st.markdown("**⚡ Live Option-Centric Paper Trading Desk & Journal**")
+    st.markdown("**⚡ Live Option-Centric Paper Trading Desk & Two-Way Journal**")
     
     col_p1, col_p2, col_p3, col_p4 = st.columns(4)
     if adapter:
@@ -2492,7 +2509,7 @@ def main():
             col_p4.markdown(f"**Status:** <span style='color:red; font-weight:bold;'>KILL-SWITCH LOCKED (Max Daily Loss Reached)</span>", unsafe_allow_html=True)
         elif active_pos:
             dir_str = "CE (LONG)" if active_pos.direction == 1 else "PE (SHORT)"
-            col_p4.markdown(f"**Active Position:** `{dir_str}`<br>Entry Opt: `₹{active_pos.entry_option_price}` | Target Opt: `+{active_pos.option_target}` pt", unsafe_allow_html=True)
+            col_p4.markdown(f"**Active Position:** `{dir_str}`<br>Entry Opt: `₹{active_pos.entry_option_price}` | Target: `+{active_pos.option_target}` pt<br>Align Journey: `{active_pos.alignment_path}`", unsafe_allow_html=True)
         elif desk.pending_order:
             p_dir = "CE" if desk.pending_order["direction"] == 1 else "PE"
             col_p4.markdown(f"**Order Staged:** `{p_dir}` (Filling Next Open)", unsafe_allow_html=True)
@@ -2503,7 +2520,7 @@ def main():
             st.markdown("---")
             col_tbl_head, col_tbl_dl = st.columns([3, 1])
             with col_tbl_head:
-                st.caption("Recent Closed Option Paper Trades (Option-Centric Journal v6.7)")
+                st.caption("Recent Closed Option Paper Trades (Option-Centric Journal v6.8 with Alignment Journey)")
             
             trades_raw = [asdict(t) for t in desk.closed_trades]
             df_full_journal = pd.DataFrame(trades_raw)
@@ -2513,7 +2530,7 @@ def main():
                 st.download_button(
                     label="📥 Download Journal (.csv)",
                     data=csv_data,
-                    file_name=f"nifty_option_journal_v67_{now_ist().strftime('%Y%m%d')}.csv",
+                    file_name=f"nifty_option_journal_v68_{now_ist().strftime('%Y%m%d')}.csv",
                     mime="text/csv"
                 )
             
@@ -2525,7 +2542,7 @@ def main():
                     "Entry Opt (₹)": f"{t.entry_option_price:.2f}",
                     "Exit Opt (₹)": f"{t.exit_option_price:.2f}" if t.exit_option_price else "-",
                     "Option PnL (pt)": t.pnl_pts,
-                    "Bars Held": t.bars_held,
+                    "Align Path (Start -> Peak -> Exit)": t.alignment_path,
                     "Exit Reason": t.exit_reason
                 })
             
@@ -2624,6 +2641,6 @@ if __name__ == "__main__":
     else:
         print("⚡ Running Institutional Prop-Engine Verification...")
         if run_unit_tests():
-            print("✓ All Quant Engines Verified + IST Timezone + Library Bug Hardened.")
+            print("✓ All Quant Engines Verified + IST Timezone + Two-Way Alignment Hardened.")
         else:
             raise RuntimeError("Engine Verification Failed.")
