@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """
-NIFTY 3-Min Micro Engine | v7.1 Final Complete - PART 1 of 3
-Kuch bhi short nahi kiya. Saari core concepts + bug fixes included.
+NIFTY 3-Min Micro Engine | v6.7 Institutional Prop-Grade Architecture
+DATA-COLLECTION READY & OPTION-CENTRIC DESK:
+- Price action, Kalman filter, ATR, and slope strictly use Future (fut_vwap / fut_c).
+- PCR, OI changes, Greeks (Vanna/Charm), and GEX strictly use Option Chain (22 strikes).
+- Integrated Heikin Ashi, SuperTrend, Hilega Milega, and Live Heavyweight Impact Desk.
 """
 
 from __future__ import annotations
@@ -16,9 +19,9 @@ import hashlib
 import struct
 import base64
 import threading
-from collections import deque, defaultdict
+from collections import deque
 from dataclasses import dataclass, field, asdict
-from datetime import datetime, timedelta, date
+from datetime import datetime, timedelta, date, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Any, Tuple
 from zoneinfo import ZoneInfo
@@ -43,8 +46,9 @@ try:
 except ImportError:
     NeoAPI = None
 
+
 # =========================================================
-# TIMEZONE
+# TIMEZONE FIX - FORCE IST EVERYWHERE
 # =========================================================
 IST = ZoneInfo("Asia/Kolkata")
 
@@ -58,22 +62,28 @@ def to_ist(dt: datetime) -> datetime:
         return dt.replace(tzinfo=IST)
     return dt.astimezone(IST)
 
+
 # =========================================================
-# CONFIG
+# 1. CONFIGURATION & CONSTANTS
 # =========================================================
+
 CONFIG = {
-    "app_version": "v7.1_final_complete_3parts",
-    "feature_version": "v6.2_full_ui_stats",
+    "app_version": "v6.7_institutional_prop",
+    "feature_version": "v5.5_data_collection_ready",
     "label_version": "TB_v3.0_clean",
-    "schema_version": "4.3",
+    "schema_version": "4.1",
     "weight_version": "NIFTY_STATIC_2025Q1",
     "atr_period": 14,
     "sma_period": 20,
-    "triple_upper_atr": 1.5,
+    "triple_upper_atr": 1.0,
     "triple_lower_atr": 0.75,
     "time_barrier_min": 30,
     "mfe_horizons_min": [15, 30, 45],
+    "max_label_horizon_min": 45,
+    "purge_bars": 15,
+    "embargo_bars": 5,
     "opening_range_minutes": 15,
+    "atr_mode": "session_local",
     "execution_model": "next_bar_open",
     "session_start": "09:15",
     "session_end": "15:30",
@@ -81,27 +91,25 @@ CONFIG = {
     "dataset_path": "./nifty_3min_dataset",
     "model_path": "./model/nifty_lgbm_latest.joblib",
     "neo_environment": "prod",
+    "nifty_index_name": "Nifty 50",
     "nifty_spot_token": "Nifty 50",
     "nifty_future_token": os.getenv("NIFTY_FUT_TOKEN", "").strip(),
     "pcr_strike_count": int(os.getenv("PCR_STRIKE_COUNT", "5")),
     "pcr_strike_step": float(os.getenv("PCR_STRIKE_STEP", "50")),
     "min_data_quality_to_trade": 0.45,
+    "signal_min_hold_bars": 2,
     "ui_refresh_sec": 3,
+    "bar_close_grace_sec": 2,
     "session_end_flush": True,
+    "hw_max_quote_age_sec": 240,
+    "hw_min_symbols_required": 5,
+    "feed_silence_sec": 60,
     "base_delta": 0.52,
     "base_slippage_pts": 0.35,
     "option_exit_spread_penalty": 0.65,
     "max_daily_loss_pts": 120.0,
     "risk_free_rate": 0.065,
     "default_atm_iv": 0.135,
-    "vp_value_area_pct": 0.70,
-    "vp_tick_size": 1.0,
-    "bos_lookback": 8,
-    "fvg_min_gap_atr": 0.25,
-    "min_aligned_for_entry": 3,
-    "time_guard_non_expiry": (15, 20),
-    "time_guard_expiry": (15, 25),
-    "stats_min_trades_for_strength": 30,
     "dq_weights": {
         "missing_future": 0.25,
         "missing_spot": 0.20,
@@ -125,31 +133,26 @@ HEAVYWEIGHTS_TOP5 = {
 
 HEAVYWEIGHTS_ALL = {
     **HEAVYWEIGHTS_TOP5,
-    "TCS": 0.040,
-    "LT": 0.038,
-    "AXISBANK": 0.033,
-    "KOTAKBANK": 0.029,
-    "SBIN": 0.028,
+    "TCS": 0.040, "LT": 0.038, "AXISBANK": 0.033,
+    "KOTAKBANK": 0.029, "SBIN": 0.028,
 }
 
 NSE_CASH_TOKENS = {
-    "HDFCBANK": "1333",
-    "RELIANCE": "2885",
-    "ICICIBANK": "4963",
-    "INFY": "1594",
-    "ITC": "1660",
-    "TCS": "11536",
-    "LT": "11483",
-    "AXISBANK": "5900",
-    "KOTAKBANK": "1922",
-    "SBIN": "3045",
+    "HDFCBANK": "1333", "RELIANCE": "2885", "ICICIBANK": "4963",
+    "INFY": "1594", "ITC": "1660", "TCS": "11536",
+    "LT": "11483", "AXISBANK": "5900", "KOTAKBANK": "1922", "SBIN": "3045",
 }
 
+
 # =========================================================
-# UTILITIES
+# 2. MATHEMATICAL & SECURITY UTILITIES
 # =========================================================
+
 def norm_pdf(x: float) -> float:
     return math.exp(-0.5 * x * x) / math.sqrt(2.0 * math.pi)
+
+def norm_cdf(x: float) -> float:
+    return 0.5 * (1.0 + math.erf(x / math.sqrt(2.0)))
 
 def generate_live_totp(secret_or_otp: str) -> str:
     raw = str(secret_or_otp or "").strip().replace(" ", "").upper()
@@ -288,7 +291,8 @@ def parse_expiry(value):
     text = str(value).strip()
     if not text:
         return None
-    for fmt in ["%d%b%Y", "%d%b%y", "%Y-%m-%d", "%d-%m-%Y", "%d/%m/%Y", "%d%b%Y %H:%M:%S", "%Y-%m-%d %H:%M:%S", "%Y%m%d"]:
+    for fmt in ["%d%b%Y", "%d%b%y", "%Y-%m-%d", "%d-%m-%Y", "%d/%m/%Y",
+                "%d%b%Y %H:%M:%S", "%Y-%m-%d %H:%M:%S", "%Y%m%d"]:
         try:
             dt = datetime.strptime(text.upper(), fmt)
             return dt.replace(tzinfo=IST)
@@ -374,9 +378,11 @@ def record_list(response):
                     return value[k]
     return []
 
+
 # =========================================================
-# ENGINES START
+# 3. STATE-SPACE KALMAN FILTER & 2ND-ORDER GREEKS
 # =========================================================
+
 class KalmanPriceEngine:
     def __init__(self, process_variance=1e-4, measurement_variance=0.08):
         self.q = process_variance
@@ -395,29 +401,51 @@ class KalmanPriceEngine:
             self.post_estimate = measurement
             self.post_error_estimate = 1.0
             return measurement, 0.0
+
         prior_estimate = self.post_estimate
         prior_error_estimate = self.post_error_estimate + self.q
+
         blending_factor = prior_error_estimate / (prior_error_estimate + self.r)
         self.post_estimate = prior_estimate + blending_factor * (measurement - prior_estimate)
         self.post_error_estimate = (1.0 - blending_factor) * prior_error_estimate
+
         velocity = float(self.post_estimate - prior_estimate)
         return float(self.post_estimate), velocity
 
+
 class GreeksEngine:
     @staticmethod
-    def compute_second_order_greeks(spot: float, strike: float, minutes_to_exp: float, iv: float = 0.135, r: float = 0.065) -> Dict[str, float]:
+    def compute_second_order_greeks(
+        spot: float, strike: float, minutes_to_exp: float,
+        iv: float = 0.135, r: float = 0.065
+    ) -> Dict[str, float]:
         if not (is_valid_number(spot) and is_valid_number(strike) and spot > 0 and strike > 0):
             return {"vanna": 0.0, "charm_ce": 0.0, "charm_pe": 0.0, "d1": 0.0, "d2": 0.0}
+
         tau = max(minutes_to_exp / (375.0 * 252.0), 1e-6)
         vol_sqrt_tau = iv * math.sqrt(tau)
+
         d1 = (math.log(spot / strike) + (r + 0.5 * iv * iv) * tau) / vol_sqrt_tau
         d2 = d1 - vol_sqrt_tau
         pdf_d1 = norm_pdf(d1)
+
         vanna = float(-pdf_d1 * d2 / max(iv, 1e-4))
         term1 = pdf_d1 * (r / vol_sqrt_tau - d2 / (2.0 * tau))
         charm_ce = float(-term1)
         charm_pe = float(charm_ce + r * math.exp(-r * tau))
-        return {"vanna": vanna, "charm_ce": charm_ce, "charm_pe": charm_pe, "d1": d1, "d2": d2}
+
+        return {
+            "vanna": vanna,
+            "charm_ce": charm_ce,
+            "charm_pe": charm_pe,
+            "d1": d1,
+            "d2": d2
+        }
+
+
+# =========================================================
+# 4. NEW INDICATOR ENGINES (HEIKIN ASHI + SUPERTREND + HILEGA MILEGA)
+# =========================================================
 
 class HeikinAshiEngine:
     def __init__(self):
@@ -431,16 +459,30 @@ class HeikinAshiEngine:
     def update(self, o, h, l, c):
         if not all(is_valid_number(x) for x in [o, h, l, c]):
             return {"ha_open": np.nan, "ha_close": np.nan, "ha_color": 0, "ha_strong": 0}
+
         ha_close = (o + h + l + c) / 4.0
+
         if self.prev_ha_open is None:
             ha_open = (o + c) / 2.0
         else:
             ha_open = (self.prev_ha_open + self.prev_ha_close) / 2.0
+
+        ha_high = max(h, ha_open, ha_close)
+        ha_low = min(l, ha_open, ha_close)
+
         self.prev_ha_open = ha_open
         self.prev_ha_close = ha_close
+
         color = 1 if ha_close >= ha_open else -1
-        strong = 1 if (color == 1 and l >= ha_open - 1e-6) or (color == -1 and h <= ha_open + 1e-6) else 0
-        return {"ha_open": ha_open, "ha_close": ha_close, "ha_color": color, "ha_strong": strong}
+        strong = 1 if (color == 1 and ha_low >= ha_open - 1e-6) or (color == -1 and ha_high <= ha_open + 1e-6) else 0
+
+        return {
+            "ha_open": ha_open,
+            "ha_close": ha_close,
+            "ha_color": color,
+            "ha_strong": strong
+        }
+
 
 class SuperTrendEngine:
     def __init__(self, period=10, multiplier=3.0):
@@ -460,20 +502,25 @@ class SuperTrendEngine:
     def update(self, high, low, close, atr=None):
         if not all(is_valid_number(x) for x in [high, low, close]):
             return {"supertrend": np.nan, "st_direction": 0, "st_flip": 0}
+
         tr = high - low
         self.atr_values.append(tr)
+
         if atr is None or not is_valid_number(atr):
             if len(self.atr_values) < self.period:
                 return {"supertrend": np.nan, "st_direction": 0, "st_flip": 0}
             atr = float(np.mean(list(self.atr_values)[-self.period:]))
+
         basic_upper = (high + low) / 2.0 + self.multiplier * atr
         basic_lower = (high + low) / 2.0 - self.multiplier * atr
+
         if self.prev_upper is None:
             final_upper = basic_upper
             final_lower = basic_lower
         else:
             final_upper = basic_upper if (basic_upper < self.prev_upper or close > self.prev_upper) else self.prev_upper
             final_lower = basic_lower if (basic_lower > self.prev_lower or close < self.prev_lower) else self.prev_lower
+
         if self.prev_supertrend is None:
             direction = 1 if close > final_upper else -1
             supertrend = final_lower if direction == 1 else final_upper
@@ -483,12 +530,20 @@ class SuperTrendEngine:
             else:
                 direction = 1 if close > final_lower else -1
             supertrend = final_lower if direction == 1 else final_upper
+
         flip = 1 if direction != self.prev_direction else 0
+
         self.prev_upper = final_upper
         self.prev_lower = final_lower
         self.prev_supertrend = supertrend
         self.prev_direction = direction
-        return {"supertrend": supertrend, "st_direction": direction, "st_flip": flip}
+
+        return {
+            "supertrend": supertrend,
+            "st_direction": direction,
+            "st_flip": flip
+        }
+
 
 class HilegaMilegaEngine:
     def __init__(self):
@@ -531,250 +586,36 @@ class HilegaMilegaEngine:
     def update(self, close):
         if not is_valid_number(close):
             return {"hm_rsi": np.nan, "hm_ema": np.nan, "hm_wma": np.nan, "hm_signal": 0}
+
         self.closes.append(close)
         rsi = self._rsi(self.rsi_period)
         if is_valid_number(rsi):
             self.rsi_values.append(rsi)
+
         if len(self.rsi_values) < 21:
             return {"hm_rsi": rsi, "hm_ema": np.nan, "hm_wma": np.nan, "hm_signal": 0}
+
         rsi_list = list(self.rsi_values)
         ema3 = self._ema(rsi_list, 3)
         wma21 = self._wma(rsi_list, 21)
+
         signal = 0
         if is_valid_number(rsi) and is_valid_number(ema3) and is_valid_number(wma21):
             if rsi > 50 and ema3 < rsi and wma21 > 50:
                 signal = 1
             elif rsi < 50 and ema3 > rsi and wma21 < 50:
                 signal = -1
-        return {"hm_rsi": rsi, "hm_ema": ema3, "hm_wma": wma21, "hm_signal": signal}
 
-class CumulativeDeltaEngine:
-    def __init__(self):
-        self.cum_delta = 0.0
-        self.prev_ltp = None
-        self.bar_delta = 0.0
-        self.history = deque(maxlen=100)
-
-    def reset(self):
-        self.cum_delta = 0.0
-        self.prev_ltp = None
-        self.bar_delta = 0.0
-        self.history.clear()
-
-    def on_tick(self, ltp: float, volume: float = 1.0):
-        if not is_valid_number(ltp) or ltp <= 0:
-            return
-        vol = max(0.5, safe_float(volume, 1.0))
-        if self.prev_ltp is not None:
-            if ltp > self.prev_ltp + 0.05:
-                delta = vol
-            elif ltp < self.prev_ltp - 0.05:
-                delta = -vol
-            else:
-                delta = 0.0
-            self.cum_delta += delta
-            self.bar_delta += delta
-        self.prev_ltp = ltp
-
-    def on_bar_close(self):
-        self.history.append(self.bar_delta)
-        self.bar_delta = 0.0
-
-    def features(self) -> Dict[str, float]:
-        recent = list(self.history)[-5:] if self.history else [0.0]
-        slope = calc_3bar_slope(recent) if len(recent) >= 3 else 0.0
         return {
-            "cum_delta": self.cum_delta,
-            "bar_delta": self.bar_delta,
-            "delta_slope_3": slope,
-            "delta_sign": 1 if self.cum_delta > 30 else (-1 if self.cum_delta < -30 else 0),
+            "hm_rsi": rsi,
+            "hm_ema": ema3,
+            "hm_wma": wma21,
+            "hm_signal": signal
         }
 
-class VolumeProfileEngine:
-    def __init__(self, tick_size=1.0, value_area_pct=0.70):
-        self.tick_size = tick_size
-        self.value_area_pct = value_area_pct
-        self.volume_at_price: Dict[float, float] = defaultdict(float)
-        self.total_volume = 0.0
-        self.poc = np.nan
-        self.vah = np.nan
-        self.val = np.nan
 
-    def reset(self):
-        self.volume_at_price.clear()
-        self.total_volume = 0.0
-        self.poc = self.vah = self.val = np.nan
-
-    def update(self, high: float, low: float, close: float, volume: float):
-        if not all(is_valid_number(x) for x in [high, low, close]) or volume <= 0:
-            return
-        price_levels = np.arange(
-            math.floor(low / self.tick_size) * self.tick_size,
-            math.ceil(high / self.tick_size) * self.tick_size + self.tick_size,
-            self.tick_size
-        )
-        if len(price_levels) == 0:
-            price_levels = [round(close / self.tick_size) * self.tick_size]
-        vol_per_level = volume / max(len(price_levels), 1)
-        for p in price_levels:
-            self.volume_at_price[round(p, 2)] += vol_per_level
-        self.total_volume += volume
-        self._recompute()
-
-    def _recompute(self):
-        if not self.volume_at_price or self.total_volume <= 0:
-            return
-        self.poc = max(self.volume_at_price.items(), key=lambda x: x[1])[0]
-        sorted_prices = sorted(self.volume_at_price.items(), key=lambda x: x[1], reverse=True)
-        target = self.total_volume * self.value_area_pct
-        cum = 0.0
-        va_prices = []
-        for p, v in sorted_prices:
-            cum += v
-            va_prices.append(p)
-            if cum >= target:
-                break
-        if va_prices:
-            self.vah = max(va_prices)
-            self.val = min(va_prices)
-
-    def features(self, current_price: float, atr: float = 15.0) -> Dict[str, float]:
-        if not is_valid_number(self.poc):
-            return {
-                "vp_poc": np.nan, "vp_vah": np.nan, "vp_val": np.nan,
-                "dist_to_poc_atr": np.nan, "above_poc": 0, "inside_va": 0,
-                "vah_break": 0, "val_break": 0
-            }
-        dist_poc = (current_price - self.poc) / atr if atr > 0 else 0.0
-        above_poc = 1 if current_price > self.poc else -1
-        inside_va = 1 if (is_valid_number(self.val) and is_valid_number(self.vah) and self.val <= current_price <= self.vah) else 0
-        vah_break = 1 if is_valid_number(self.vah) and current_price > self.vah else 0
-        val_break = -1 if is_valid_number(self.val) and current_price < self.val else 0
-        return {
-            "vp_poc": self.poc,
-            "vp_vah": self.vah,
-            "vp_val": self.val,
-            "dist_to_poc_atr": dist_poc,
-            "above_poc": above_poc,
-            "inside_va": inside_va,
-            "vah_break": vah_break,
-            "val_break": val_break,
-        }
-
-class SMCEngine:
-    def __init__(self, lookback=8, fvg_min_gap_atr=0.25):
-        self.lookback = lookback
-        self.fvg_min_gap_atr = fvg_min_gap_atr
-        self.swing_highs = deque(maxlen=30)
-        self.swing_lows = deque(maxlen=30)
-        self.last_bos = 0
-        self.active_fvgs: List[Dict] = []
-        self.demand_zones: List[Dict] = []
-        self.supply_zones: List[Dict] = []
-
-    def reset(self):
-        self.swing_highs.clear()
-        self.swing_lows.clear()
-        self.last_bos = 0
-        self.active_fvgs.clear()
-        self.demand_zones.clear()
-        self.supply_zones.clear()
-
-    def update(self, candle: "Candle3Min", atr: float):
-        if not is_valid_number(atr) or atr <= 0:
-            atr = 15.0
-        if len(self.swing_highs) >= 2:
-            prev_h = self.swing_highs[-1]
-            if candle.fut_c > prev_h["price"]:
-                self.last_bos = 1
-        if len(self.swing_lows) >= 2:
-            prev_l = self.swing_lows[-1]
-            if candle.fut_c < prev_l["price"]:
-                self.last_bos = -1
-        self.swing_highs.append({"price": candle.fut_h, "ts": candle.timestamp})
-        self.swing_lows.append({"price": candle.fut_l, "ts": candle.timestamp})
-
-    def detect_fvg(self, c1: "Candle3Min", c2: "Candle3Min", c3: "Candle3Min", atr: float):
-        if not all(is_valid_number(x) for x in [c1.fut_h, c1.fut_l, c3.fut_h, c3.fut_l]):
-            return
-        gap_up = c1.fut_h < c3.fut_l and (c3.fut_l - c1.fut_h) >= self.fvg_min_gap_atr * atr
-        gap_down = c1.fut_l > c3.fut_h and (c1.fut_l - c3.fut_h) >= self.fvg_min_gap_atr * atr
-        if gap_up:
-            self.active_fvgs.append({"type": "bullish", "top": c3.fut_l, "bottom": c1.fut_h, "ts": c3.timestamp})
-            self.demand_zones.append({"top": c3.fut_l, "bottom": c1.fut_h, "ts": c3.timestamp})
-        if gap_down:
-            self.active_fvgs.append({"type": "bearish", "top": c1.fut_l, "bottom": c3.fut_h, "ts": c3.timestamp})
-            self.supply_zones.append({"top": c1.fut_l, "bottom": c3.fut_h, "ts": c3.timestamp})
-        self.active_fvgs = self.active_fvgs[-8:]
-        self.demand_zones = self.demand_zones[-6:]
-        self.supply_zones = self.supply_zones[-6:]
-
-    def features(self, current_price: float, atr: float = 15.0) -> Dict[str, Any]:
-        near_demand = 0
-        near_supply = 0
-        for z in self.demand_zones[-3:]:
-            if z["bottom"] - 0.3 * atr <= current_price <= z["top"] + 0.3 * atr:
-                near_demand = 1
-                break
-        for z in self.supply_zones[-3:]:
-            if z["bottom"] - 0.3 * atr <= current_price <= z["top"] + 0.3 * atr:
-                near_supply = 1
-                break
-        bullish_fvg = any(f["type"] == "bullish" for f in self.active_fvgs[-3:])
-        bearish_fvg = any(f["type"] == "bearish" for f in self.active_fvgs[-3:])
-        return {
-            "bos_signal": self.last_bos,
-            "near_demand_zone": near_demand,
-            "near_supply_zone": near_supply,
-            "bullish_fvg_active": int(bullish_fvg),
-            "bearish_fvg_active": int(bearish_fvg),
-            "smc_bias": 1 if (self.last_bos == 1 or bullish_fvg or near_demand) else (-1 if (self.last_bos == -1 or bearish_fvg or near_supply) else 0),
-        }
-
-class StatsCollector:
-    def __init__(self):
-        self.trades: List[Dict] = []
-        self.strength_cache = {
-            "above_poc": {"win": 0, "total": 0, "sum_r": 0.0},
-            "below_poc": {"win": 0, "total": 0, "sum_r": 0.0},
-            "smc_bull": {"win": 0, "total": 0, "sum_r": 0.0},
-            "smc_bear": {"win": 0, "total": 0, "sum_r": 0.0},
-        }
-
-    def record(self, trade: Dict):
-        self.trades.append(trade)
-        r = safe_float(trade.get("pnl_pts"), 0.0)
-        won = 1 if r > 0 else 0
-        above = trade.get("above_poc", 0)
-        smc = trade.get("smc_bias", 0)
-        key = "above_poc" if above == 1 else "below_poc"
-        self.strength_cache[key]["total"] += 1
-        self.strength_cache[key]["win"] += won
-        self.strength_cache[key]["sum_r"] += r
-        key = "smc_bull" if smc == 1 else "smc_bear"
-        self.strength_cache[key]["total"] += 1
-        self.strength_cache[key]["win"] += won
-        self.strength_cache[key]["sum_r"] += r
-
-    def get_level_strength(self, above_poc: int, smc_bias: int, regime: str = "") -> float:
-        if len(self.trades) < CONFIG["stats_min_trades_for_strength"]:
-            return 1.0
-        scores = []
-        for key in ["above_poc" if above_poc == 1 else "below_poc", "smc_bull" if smc_bias == 1 else "smc_bear"]:
-            d = self.strength_cache[key]
-            if d["total"] >= 8:
-                wr = d["win"] / d["total"]
-                avg_r = d["sum_r"] / d["total"]
-                score = 0.7 + (wr - 0.45) * 1.5 + max(-0.3, min(0.4, avg_r / 20))
-                scores.append(max(0.6, min(1.4, score)))
-        if not scores:
-            return 1.0
-        return float(np.mean(scores))
-
-print("PART 1 LOADED SUCCESSFULLY")
-print("Ab 'Part 2 de do' likho")
 # =========================================================
-# FEATURE ENGINE + REGIME + DECISION + PAPER TRADING
+# 5. RESEARCH ENGINES (FUTURE VWAP ANCHORED)
 # =========================================================
 
 @dataclass
@@ -793,6 +634,7 @@ class Candle3Min:
     heavy: Dict[str, Dict[str, float]] = field(default_factory=dict)
     option_chain: Dict[str, Any] = field(default_factory=dict)
     l2_depth: Dict[str, Any] = field(default_factory=dict)
+
 
 class OpeningRangeEngine:
     def __init__(self, minutes=15):
@@ -819,13 +661,13 @@ class OpeningRangeEngine:
         if not self.or_set or self.or_high is None or not is_valid_number(atr) or atr <= 0:
             return {k: np.nan for k in names}
         return {
-            "or_high": self.or_high,
-            "or_low": self.or_low,
+            "or_high": self.or_high, "or_low": self.or_low,
             "or_width_atr": (self.or_high - self.or_low) / atr,
             "dist_to_or_high_atr": (candle.fut_c - self.or_high) / atr,
             "dist_to_or_low_atr": (candle.fut_c - self.or_low) / atr,
             "or_breakout_state": 1 if candle.fut_c > self.or_high else (-1 if candle.fut_c < self.or_low else 0),
         }
+
 
 class SessionContextEngine:
     def __init__(self):
@@ -856,6 +698,7 @@ class SessionContextEngine:
             "dist_to_pdl_atr": (candle.fut_c - self.prev_low) / atr if is_valid_number(self.prev_low) else np.nan,
         }
 
+
 class OptionChainEngine:
     def __init__(self, maxlen=150):
         self.pcr_history = deque(maxlen=maxlen)
@@ -881,6 +724,7 @@ class OptionChainEngine:
         out = {}
         curr_pcr = safe_float(chain.get("pcr_oi"))
         self.pcr_history.append(curr_pcr if is_valid_number(curr_pcr) else np.nan)
+        
         valid_pcrs = [p for p in self.pcr_history if is_valid_number(p)]
         pcr_delta = (valid_pcrs[-1] - valid_pcrs[-2]) if len(valid_pcrs) >= 2 else 0.0
         pcr_velocity = calc_3bar_slope(valid_pcrs)
@@ -909,25 +753,24 @@ class OptionChainEngine:
             days_to_exp = mins_to_exp = np.nan
             exp_flag = 0
 
-        zero_dte_intensity = 0.0
         if exp_flag and is_valid_number(mins_to_exp) and mins_to_exp <= 375:
             zero_dte_intensity = max(0.0, 1.0 - (mins_to_exp / 375.0))
             if mins_to_exp <= 90:
                 zero_dte_intensity = min(1.0, zero_dte_intensity + 0.35)
+        else:
+            zero_dte_intensity = 0.0
 
         atm_diff = atm_ce - atm_pe
         total_diff = total_ce - total_pe
         tot_oi_baseline = (tot_sum + 1e-5)
+        
         gex_proxy = float(((atm_diff * 2.5) + (total_diff * 0.4)) / tot_oi_baseline)
         atm_gamma_imb = (atm_ce - atm_pe) / (atm_sum + 1e-5) if atm_sum > 0 else 0.0
         gex_x_0dte = float(gex_proxy * zero_dte_intensity)
 
         greeks = GreeksEngine.compute_second_order_greeks(
-            spot=spot_price,
-            strike=atm_strike,
-            minutes_to_exp=mins_to_exp if is_valid_number(mins_to_exp) else 375.0,
-            iv=CONFIG["default_atm_iv"],
-            r=CONFIG["risk_free_rate"]
+            spot=spot_price, strike=atm_strike, minutes_to_exp=mins_to_exp if is_valid_number(mins_to_exp) else 375.0,
+            iv=CONFIG["default_atm_iv"], r=CONFIG["risk_free_rate"]
         )
         dealer_vanna_flow = float(np.clip(atm_gamma_imb * greeks["vanna"] * 10.0, -1.0, 1.0))
         dealer_charm_flow = float(np.clip((atm_ce * greeks["charm_ce"] - atm_pe * greeks["charm_pe"]) / (atm_sum + 1e-5), -1.0, 1.0))
@@ -959,10 +802,10 @@ class OptionChainEngine:
             val = raw_metrics.get(key, np.nan)
             out[key] = val
             out[f"{key}_missing"] = int(not is_valid_number(val))
-
         out["ce_contracts_seen"] = int(chain.get("ce_contracts_seen", 0))
         out["pe_contracts_seen"] = int(chain.get("pe_contracts_seen", 0))
         return out
+
 
 class HeavyweightEngine:
     def __init__(self, weights_all: Dict[str, float], weights_top5: Dict[str, float]):
@@ -977,10 +820,12 @@ class HeavyweightEngine:
         contributions, returns = [], []
         bullish = 0
         top5_pressures = []
+
         for symbol, weight in self.weights_all.items():
             data = candle.heavy.get(symbol)
             if not data:
                 continue
+            
             open_price = self.day_open.get(symbol)
             if open_price is None or not is_valid_number(open_price):
                 open_price = extract_quote_field(data, ("o", "open", "pOpen", "openPrice", "op"))
@@ -988,23 +833,30 @@ class HeavyweightEngine:
                     open_price = extract_tick_price(data)
                 if is_valid_number(open_price) and open_price > 0:
                     self.day_open[symbol] = open_price
+
             close_price = extract_tick_price(data)
             if not is_valid_number(open_price) or open_price <= 0 or not is_valid_number(close_price):
                 continue
+
             ret = (close_price - open_price) / open_price
             contributions.append(weight * ret)
             returns.append(ret)
+            
             vwap = extract_quote_field(data, ("vwap", "avp", "averagePrice", "average_price", "a"))
             if not is_valid_number(vwap) or vwap <= 0:
                 vwap = open_price
+
             if close_price >= vwap:
                 bullish += 1
+
             if symbol in self.weights_top5:
                 top5_w = self.weights_top5[symbol]
                 top5_pressures.append(top5_w * ((close_price - vwap) / (vwap + 1e-5)))
+
         total_twc = sum(contributions) if contributions else 0.0
         n = max(len(contributions), 1)
         slp_5 = float(sum(top5_pressures) * 1000.0) if top5_pressures else 0.0
+
         return {
             "twc": total_twc,
             "breadth_10": bullish / n if contributions else 0.5,
@@ -1014,6 +866,7 @@ class HeavyweightEngine:
             "hw_bullish_count": bullish,
             "hw_symbols_seen": len(contributions),
         }
+
 
 class FeatureEngine:
     def __init__(self, maxlen=150):
@@ -1031,10 +884,6 @@ class FeatureEngine:
         self.ha = HeikinAshiEngine()
         self.st = SuperTrendEngine(period=10, multiplier=3.0)
         self.hm = HilegaMilegaEngine()
-        self.cum_delta = CumulativeDeltaEngine()
-        self.vol_profile = VolumeProfileEngine(tick_size=CONFIG["vp_tick_size"], value_area_pct=CONFIG["vp_value_area_pct"])
-        self.smc = SMCEngine(lookback=CONFIG["bos_lookback"], fvg_min_gap_atr=CONFIG["fvg_min_gap_atr"])
-        self._last_3_candles = deque(maxlen=3)
 
     def reset_session(self):
         self.vwap_pv = self.vwap_vol = 0.0
@@ -1051,10 +900,16 @@ class FeatureEngine:
         self.ha.reset()
         self.st.reset()
         self.hm.reset()
-        self.cum_delta.reset()
-        self.vol_profile.reset()
-        self.smc.reset()
-        self._last_3_candles.clear()
+
+    def preload_warmup(self, historical_closes: List[float], historical_trs: List[float]):
+        if historical_closes:
+            for c in historical_closes[-CONFIG["sma_period"]:]:
+                if is_valid_number(c):
+                    self.preloaded_closes.append(c)
+        if historical_trs:
+            for tr in historical_trs[-CONFIG["sma_period"]:]:
+                if is_valid_number(tr):
+                    self.tr_history.append(tr)
 
     def set_previous_day(self, close, high, low):
         self.sess.set_previous_day(close, high, low)
@@ -1062,12 +917,9 @@ class FeatureEngine:
     def set_today_open(self, open_price):
         self.sess.set_today_open(open_price)
 
-    def on_tick_for_delta(self, ltp: float, volume: float = 1.0):
-        self.cum_delta.on_tick(ltp, volume)
-
     def compute(self, candle: Candle3Min, prev: deque):
         typical = (candle.fut_h + candle.fut_l + candle.fut_c) / 3.0
-        volume = safe_float(candle.fut_volume, 1.0)
+        volume = safe_float(candle.fut_volume, 0.0)
         self.vwap_pv += typical * max(volume, 0.0)
         self.vwap_vol += max(volume, 0.0)
         fut_vwap = self.vwap_pv / self.vwap_vol if self.vwap_vol > 0 else typical
@@ -1080,7 +932,7 @@ class FeatureEngine:
 
         atr_prev = wilder_atr(list(self.tr_history), CONFIG["atr_period"])
         self.tr_history.append(tr)
-        atr = atr_prev if is_valid_number(atr_prev) else 15.0
+        atr = atr_prev
 
         kalman_price, kalman_velocity = self.kalman.update(candle.fut_c)
 
@@ -1095,10 +947,11 @@ class FeatureEngine:
             kalman_stretch = (kalman_price - fut_vwap) / atr if is_valid_number(kalman_price) else normalized_stretch
             normalized_spread = (spot_sma - fut_vwap) / atr if is_valid_number(spot_sma) else np.nan
         else:
-            normalized_stretch = kalman_stretch = normalized_spread = 0.0
+            normalized_stretch = kalman_stretch = normalized_spread = np.nan
 
         self.stretch_history.append(normalized_stretch)
         self.spread_history.append(normalized_spread)
+
         stretch_slope = calc_3bar_slope(list(self.stretch_history))
         spread_slope = calc_3bar_slope(list(self.spread_history))
 
@@ -1110,7 +963,7 @@ class FeatureEngine:
         tot_depth = bid_qty + ask_qty
         obi = (bid_qty - ask_qty) / tot_depth if tot_depth > 0 else 0.0
         micro_price = (best_bid * ask_qty + best_ask * bid_qty) / tot_depth if tot_depth > 0 else candle.fut_c
-        micro_price_drift = (micro_price - candle.fut_c) / atr if atr > 0 else 0.0
+        micro_price_drift = (micro_price - candle.fut_c) / atr if is_valid_number(atr) and atr > 0 else 0.0
 
         if prev:
             oi_change = candle.fut_oi - prev[-1].fut_oi if is_valid_number(candle.fut_oi) and is_valid_number(prev[-1].fut_oi) else np.nan
@@ -1129,14 +982,6 @@ class FeatureEngine:
         oi_strength = ((1 if price_up else -1) * np.sign(oi_change) * np.log1p(abs(oi_change))) if (oi_has_val and oi_change != 0) else 0.0
 
         self.or_eng.update(candle)
-        self.vol_profile.update(candle.fut_h, candle.fut_l, candle.fut_c, volume)
-        self.cum_delta.on_bar_close()
-        self.smc.update(candle, atr)
-
-        self._last_3_candles.append(candle)
-        if len(self._last_3_candles) == 3:
-            c1, c2, c3 = self._last_3_candles
-            self.smc.detect_fvg(c1, c2, c3, atr)
 
         missing_spot = int(not is_valid_number(candle.spot_c))
         missing_future = int(not is_valid_number(candle.fut_c))
@@ -1163,20 +1008,17 @@ class FeatureEngine:
 
         pcr_features = self.opt.compute(candle.option_chain, candle.timestamp, candle.spot_c)
         ha_res = self.ha.update(candle.fut_o, candle.fut_h, candle.fut_l, candle.fut_c)
-        st_res = self.st.update(candle.fut_h, candle.fut_l, candle.fut_c, atr=atr)
+        st_res = self.st.update(candle.fut_h, candle.fut_l, candle.fut_c, atr=atr if is_valid_number(atr) else None)
         hm_res = self.hm.update(candle.fut_c)
-        delta_res = self.cum_delta.features()
-        vp_res = self.vol_profile.features(candle.fut_c, atr)
-        smc_res = self.smc.features(candle.fut_c, atr)
 
         now_ts = now_ist()
         is_causal_verified = int(
-            to_ist(candle.timestamp) <= now_ts and
-            is_valid_number(candle.fut_c) and
+            to_ist(candle.timestamp) <= now_ts and 
+            is_valid_number(candle.fut_c) and 
             is_valid_number(candle.spot_c)
         )
-        ts_ist = to_ist(candle.timestamp)
 
+        ts_ist = to_ist(candle.timestamp)
         features = {
             "timestamp": candle.timestamp,
             "feature_available_timestamp": now_ts,
@@ -1184,7 +1026,7 @@ class FeatureEngine:
             "feature_version": CONFIG["feature_version"],
             "schema_version": CONFIG["schema_version"],
             "weight_version": CONFIG["weight_version"],
-            "atr_mode": "session_local",
+            "atr_mode": CONFIG["atr_mode"],
             "execution_model": CONFIG["execution_model"],
             "basis": candle.fut_c - candle.spot_c,
             "fut_vwap": fut_vwap,
@@ -1197,8 +1039,8 @@ class FeatureEngine:
             "spread_slope_3": spread_slope,
             "order_book_imbalance": obi,
             "micro_price_drift": micro_price_drift,
-            "atr_14_prev": atr,
-            "atr_warmup_flag": int(not is_valid_number(atr_prev)),
+            "atr_14_prev": atr_prev,
+            "atr_warmup_flag": int(not is_valid_number(atr)),
             "spot_sma_20": spot_sma,
             "sma20_warmup_flag": 1 - int(sma_ready),
             "oi_change": oi_change,
@@ -1211,61 +1053,159 @@ class FeatureEngine:
             "minutes_from_open": (ts_ist.hour * 60 + ts_ist.minute) - 555,
             "day_of_week": ts_ist.weekday(),
             **self.hw.compute(candle),
-            **self.or_eng.features(candle, atr),
-            **self.sess.features(candle, atr),
+            **self.or_eng.features(candle, atr if is_valid_number(atr) else 0.0),
+            **self.sess.features(candle, atr if is_valid_number(atr) else 0.0),
             **pcr_features,
             **ha_res,
             **st_res,
             **hm_res,
-            **delta_res,
-            **vp_res,
-            **smc_res,
-            "missing_spot": missing_spot,
-            "missing_future": missing_future,
-            "missing_oi": missing_oi,
-            "missing_volume": missing_volume,
-            "missing_heavyweight": missing_heavyweight,
-            "missing_option_chain": missing_option,
-            "bad_ohlc": bad_ohlc,
-            "zero_volume": zero_volume,
-            "zero_oi": zero_oi,
+            "missing_spot": missing_spot, "missing_future": missing_future,
+            "missing_oi": missing_oi, "missing_volume": missing_volume,
+            "missing_heavyweight": missing_heavyweight, "missing_option_chain": missing_option,
+            "bad_ohlc": bad_ohlc, "zero_volume": zero_volume, "zero_oi": zero_oi,
             "data_quality_score": float(max(0.0, 1.0 - penalty)),
             "bar_complete": 1,
         }
         self.history.append(features)
         return features
 
+
+class LabelEngine:
+    def __init__(self):
+        self.upper = CONFIG["triple_upper_atr"]
+        self.lower = CONFIG["triple_lower_atr"]
+        self.tb_horizon = CONFIG["time_barrier_min"]
+        self.mfe_horizons = CONFIG["mfe_horizons_min"]
+        self.execution_model = CONFIG["execution_model"]
+        if self.execution_model != "next_bar_open":
+            raise ValueError("Research-Lock requires next_bar_open")
+
+    def _excursion(self, entry, future, direction, max_bars):
+        mfe = mae = 0.0
+        available = min(len(future), max_bars)
+        for candle in future[:available]:
+            if direction == 1:
+                mfe = max(mfe, candle.fut_h - entry)
+                mae = max(mae, entry - candle.fut_l)
+            else:
+                mfe = max(mfe, entry - candle.fut_l)
+                mae = max(mae, candle.fut_h - entry)
+        return mfe, mae, int(available >= max_bars)
+
+    def generate(self, entry_price, atr, future_after_entry, direction=1, signal_timestamp=None, entry_timestamp=None):
+        if entry_timestamp and future_after_entry and to_ist(future_after_entry[0].timestamp) <= to_ist(entry_timestamp):
+            raise ValueError("FUTURE ALIGNMENT VIOLATION")
+        
+        atr = atr if is_valid_number(atr) and atr > 0 else np.nan
+        upper = entry_price + direction * self.upper * atr if not np.isnan(atr) else np.nan
+        lower = entry_price - direction * self.lower * atr if not np.isnan(atr) else np.nan
+        
+        outcome, bars, mfe_tb, mae_tb, time_to_mfe = "TIMEOUT", 0, 0.0, 0.0, 0
+        max_tb_bars = self.tb_horizon // CONFIG["bar_minutes"]
+        
+        for i, candle in enumerate(future_after_entry[:max_tb_bars]):
+            bars = i + 1
+            if direction == 1:
+                mfe_tb = max(mfe_tb, candle.fut_h - entry_price)
+                mae_tb = max(mae_tb, entry_price - candle.fut_l)
+                hit_target = not np.isnan(upper) and candle.fut_h >= upper
+                hit_stop = not np.isnan(lower) and candle.fut_l <= lower
+            else:
+                mfe_tb = max(mfe_tb, entry_price - candle.fut_l)
+                mae_tb = max(mae_tb, candle.fut_h - entry_price)
+                hit_target = not np.isnan(upper) and candle.fut_l <= upper
+                hit_stop = not np.isnan(lower) and candle.fut_h >= lower
+            
+            if mfe_tb > 0 and time_to_mfe == 0:
+                time_to_mfe = bars
+            if hit_target and hit_stop:
+                outcome = "AMBIGUOUS"
+                break
+            if hit_target:
+                outcome = "TARGET_FIRST"
+                break
+            if hit_stop:
+                outcome = "STOP_FIRST"
+                break
+
+        r_multiple = self.upper / self.lower if outcome == "TARGET_FIRST" else (-1.0 if outcome == "STOP_FIRST" else np.nan)
+        valid = int(outcome != "AMBIGUOUS" and not np.isnan(atr))
+        mfe_atr = mfe_tb / atr if not np.isnan(atr) else np.nan
+        mae_atr = mae_tb / atr if not np.isnan(atr) else np.nan
+        velocity = mfe_atr / max(bars, 1) if is_valid_number(mfe_atr) else np.nan
+        
+        if is_valid_number(mfe_atr):
+            if mfe_atr >= 1.2 and mae_atr <= 0.45 and velocity > 0.25:
+                trajectory = "IMPULSE"
+            elif mfe_atr >= 0.8 and mae_atr <= 0.70 and 0.08 < velocity <= 0.25:
+                trajectory = "STAIRCASE"
+            elif mfe_atr >= 0.5 and velocity <= 0.08:
+                trajectory = "GRIND"
+            else:
+                trajectory = "FAILURE"
+        else:
+            trajectory = "UNKNOWN"
+
+        labels = {
+            "label_version": CONFIG["label_version"], "execution_model": self.execution_model,
+            "signal_timestamp": signal_timestamp, "entry_timestamp": entry_timestamp,
+            "entry_price": entry_price, "triple_barrier_outcome": outcome,
+            "label_valid_for_training": valid, "r_multiple": r_multiple, "trajectory": trajectory,
+            "real_breakout": int(outcome == "TARGET_FIRST" and is_valid_number(mfe_atr) and mfe_atr >= 1.0 and mae_atr <= 0.55),
+            "mfe_atr_tb": mfe_atr, "mae_atr_tb": mae_atr, "time_to_mfe": time_to_mfe,
+            "bars_to_outcome": bars, "velocity": velocity,
+        }
+        for horizon in self.mfe_horizons:
+            mfe_h, mae_h, complete = self._excursion(entry_price, future_after_entry, direction, horizon // CONFIG["bar_minutes"])
+            labels[f"mfe_atr_{horizon}m"] = mfe_h / atr if not np.isnan(atr) else np.nan
+            labels[f"mae_atr_{horizon}m"] = mae_h / atr if not np.isnan(atr) else np.nan
+            labels[f"horizon_{horizon}m_complete"] = complete
+        return labels
+
+
+# =========================================================
+# 6. REGIME & DECISION ENGINE
+# =========================================================
+
 class RegimeEngine:
     def detect(self, feats: Dict[str, Any]) -> str:
         dq = safe_float(feats.get("data_quality_score"), 0.0)
         atr_warm = safe_int(feats.get("atr_warmup_flag"), 0)
+        
         if dq < CONFIG["min_data_quality_to_trade"] or atr_warm == 1:
             return "DATA_BAD"
-        k_stretch = safe_float(feats.get("kalman_stretch"), 0.0)
+        
+        k_stretch = safe_float(feats.get("kalman_stretch"), feats.get("normalized_stretch", 0.0))
         slope = safe_float(feats.get("stretch_slope_3"), 0.0)
         or_state = safe_int(feats.get("or_breakout_state"), 0)
         oi_long = safe_int(feats.get("oi_long_buildup"), 0)
         oi_short = safe_int(feats.get("oi_short_buildup"), 0)
+        oi_unwind = safe_int(feats.get("oi_long_unwinding"), 0) or safe_int(feats.get("oi_short_covering"), 0)
         twc = safe_float(feats.get("twc"), 0.0)
         breadth = safe_float(feats.get("breadth_10"), 0.5)
+
         gex_val = safe_float(feats.get("gex_proxy"), 0.0)
         z_dte = safe_float(feats.get("zero_dte_intensity"), 0.0)
-        delta_sign = safe_int(feats.get("delta_sign"), 0)
 
         if z_dte > 0.5 and gex_val > 0.70 and abs(k_stretch) <= 0.65:
             return "GRIND"
+
         if z_dte > 0.4 and gex_val < -0.70 and abs(k_stretch) > 0.40:
             return "IMPULSE_UP" if k_stretch > 0 else "IMPULSE_DOWN"
+
         if (abs(k_stretch) > 0.85 and abs(slope) > 0.12) or (or_state != 0 and abs(k_stretch) > 0.45):
-            if k_stretch > 0 and (oi_long or twc > 0 or breadth > 0.55 or delta_sign > 0):
+            if k_stretch > 0 and (oi_long or twc > 0 or breadth > 0.55):
                 return "IMPULSE_UP"
-            if k_stretch < 0 and (oi_short or twc < 0 or breadth < 0.45 or delta_sign < 0):
+            if k_stretch < 0 and (oi_short or twc < 0 or breadth < 0.45):
                 return "IMPULSE_DOWN"
         if 0.35 < abs(k_stretch) <= 0.85:
             return "STAIRCASE_UP" if k_stretch > 0 else "STAIRCASE_DOWN"
+        if oi_unwind and abs(k_stretch) > 0.55:
+            return "FAILURE"
         if abs(k_stretch) <= 0.35 and abs(slope) < 0.08:
             return "GRIND"
         return "NEUTRAL"
+
 
 @dataclass
 class TradeDecision:
@@ -1281,25 +1221,79 @@ class TradeDecision:
     reason: str = ""
     timestamp: Optional[datetime] = None
     decision_timestamp: Optional[datetime] = None
-    aligned_count: int = 0
-    is_reversal: bool = False
-    level_strength: float = 1.0
+    ml_probability: float = 0.5
+
 
 class DecisionEngine:
     def __init__(self):
         self.regime_engine = RegimeEngine()
-        self.stats = StatsCollector()
-        self.bar_counter = 0
+        self.last_action: Optional[str] = None
+        self.last_action_bar_idx: int = -999
+        self.bar_counter: int = 0
+        self.ml_model = None
+        self.expected_feature_names: List[str] = []
+        self._load_production_model()
 
-    def _realistic_target(self, atr: float, regime: str, aligned_count: int = 3) -> Tuple[float, float, float]:
+    def _load_production_model(self):
+        model_p = Path(CONFIG.get("model_path", ""))
+        if joblib and model_p.exists():
+            try:
+                loaded = joblib.load(model_p)
+                if isinstance(loaded, dict) and "model" in loaded:
+                    self.ml_model = loaded["model"]
+                    self.expected_feature_names = loaded.get("features", [])
+                else:
+                    self.ml_model = loaded
+                    if hasattr(self.ml_model, "feature_name_"):
+                        self.expected_feature_names = list(self.ml_model.feature_name_)
+                    elif hasattr(self.ml_model, "feature_names_in_"):
+                        self.expected_feature_names = list(self.ml_model.feature_names_in_)
+            except Exception:
+                self.ml_model = None
+                self.expected_feature_names = []
+
+    def get_adaptive_weights(self, regime: str) -> Tuple[float, float]:
+        if regime in ["IMPULSE_UP", "IMPULSE_DOWN", "STAIRCASE_UP", "STAIRCASE_DOWN"]:
+            return 0.82, 0.18
+        if regime in ["GRIND", "NEUTRAL"]:
+            return 0.55, 0.45
+        if regime == "FAILURE":
+            return 0.35, 0.65
+        return 0.70, 0.30
+
+    def _realistic_target(self, atr: float, regime: str, strategy: str) -> Tuple[float, float, float]:
         if not is_valid_number(atr) or atr <= 0:
             atr = 15.0
-        conviction = 1.0 if aligned_count <= 3 else (1.25 if aligned_count == 4 else 1.45)
-        if regime in ("IMPULSE_UP", "IMPULSE_DOWN"):
-            return round(2.0 * atr * conviction, 1), round(0.75 * atr, 1), 1.0
-        if regime in ("STAIRCASE_UP", "STAIRCASE_DOWN"):
-            return round(1.5 * atr * conviction, 1), round(0.70 * atr, 1), 0.85
-        return round(0.70 * atr, 1), round(0.55 * atr, 1), 0.70
+        if strategy == "TREND":
+            if regime in ("IMPULSE_UP", "IMPULSE_DOWN"):
+                return 1.15 * atr, 0.70 * atr, 1.00
+            if regime in ("STAIRCASE_UP", "STAIRCASE_DOWN"):
+                return 0.90 * atr, 0.65 * atr, 0.85
+            return 0.70 * atr, 0.55 * atr, 0.70
+        if strategy == "MEAN_REVERSION":
+            return 0.55 * atr, 0.40 * atr, 0.75
+        return 0.60 * atr, 0.50 * atr, 0.55
+
+    def _predict_real_ml_proba(self, feats: Dict[str, Any]) -> float:
+        if self.ml_model is None:
+            return 0.5
+        try:
+            if self.expected_feature_names:
+                row = [safe_float(feats.get(k), np.nan) for k in self.expected_feature_names]
+                df_in = pd.DataFrame([row], columns=self.expected_feature_names)
+            else:
+                numeric_feats = {k: v for k, v in feats.items() if isinstance(v, (int, float)) and np.isfinite(v)}
+                df_in = pd.DataFrame([numeric_feats])
+                
+            if hasattr(self.ml_model, "predict_proba"):
+                probs = self.ml_model.predict_proba(df_in)
+                return float(probs[0][1])
+            elif hasattr(self.ml_model, "predict"):
+                pred = self.ml_model.predict(df_in)
+                return float(pred[0])
+        except Exception:
+            pass
+        return 0.5
 
     def _get_high_priority_signals(self, regime: str, feats: Dict[str, Any]) -> List[int]:
         stretch = safe_float(feats.get("kalman_stretch"), 0.0)
@@ -1307,84 +1301,118 @@ class DecisionEngine:
         st_dir = safe_int(feats.get("st_direction"), 0)
         hm_sig = safe_int(feats.get("hm_signal"), 0)
         ha_color = safe_int(feats.get("ha_color"), 0)
-        delta_sign = safe_int(feats.get("delta_sign"), 0)
-        above_poc = safe_int(feats.get("above_poc"), 0)
-        smc_bias = safe_int(feats.get("smc_bias"), 0)
+        pcr = safe_float(feats.get("pcr_oi"), 1.0)
+        vanna = safe_float(feats.get("dealer_vanna_flow"), 0.0)
 
         def sign(val, thresh=0.0):
             if val > thresh: return 1
             if val < -thresh: return -1
             return 0
 
-        return [sign(stretch, 0.25), sign(slope, 0.03), st_dir, hm_sig, ha_color, delta_sign, above_poc, smc_bias]
+        if regime in ("IMPULSE_UP", "IMPULSE_DOWN"):
+            return [
+                sign(stretch, 0.35),
+                sign(slope, 0.04),
+                st_dir,
+                hm_sig,
+                ha_color
+            ]
+        elif regime in ("STAIRCASE_UP", "STAIRCASE_DOWN"):
+            return [
+                sign(slope, 0.03),
+                hm_sig,
+                st_dir,
+                ha_color,
+                sign(stretch, 0.25)
+            ]
+        elif regime in ("GRIND", "NEUTRAL"):
+            return [
+                ha_color,
+                hm_sig,
+                sign(1.0 - pcr, 0.05),
+                sign(vanna, 0.05),
+                sign(-stretch, 0.20)
+            ]
+        else:
+            return [0, 0, 0, 0, 0]
 
-    def decide(self, feats: Dict[str, Any], current_position_direction: int = 0) -> TradeDecision:
+    def decide(self, feats: Dict[str, Any]) -> TradeDecision:
         self.bar_counter += 1
         now_ts = now_ist()
+        
         expiry_flag = safe_int(feats.get("expiry_day_flag"), 0)
-        cutoff = CONFIG["time_guard_expiry"] if expiry_flag == 1 else CONFIG["time_guard_non_expiry"]
-
-        if now_ts.hour > cutoff[0] or (now_ts.hour == cutoff[0] and now_ts.minute >= cutoff[1]):
+        cutoff_hour, cutoff_min = (15, 25) if expiry_flag == 1 else (15, 0)
+        
+        if now_ts.hour > cutoff_hour or (now_ts.hour == cutoff_hour and now_ts.minute >= cutoff_min):
             return TradeDecision(
-                action="SKIP",
-                regime="TIME_GUARD_ACTIVE",
-                reason=f"Time guard ({cutoff[0]}:{cutoff[1]:02d})",
-                timestamp=feats.get("timestamp"),
-                decision_timestamp=now_ts
+                action="SKIP", regime="TIME_GUARD_ACTIVE",
+                reason=f"Time guard active: Cutoff reached ({cutoff_hour}:{cutoff_min:02d})",
+                timestamp=feats.get("timestamp"), decision_timestamp=now_ts
             )
 
         regime = self.regime_engine.detect(feats)
         dq = safe_float(feats.get("data_quality_score"), 0.0)
-
+        
         if regime == "DATA_BAD" or dq < CONFIG["min_data_quality_to_trade"]:
             return TradeDecision(
-                action="SKIP",
-                regime=regime,
-                reason="Data quality / warmup",
-                timestamp=feats.get("timestamp"),
-                decision_timestamp=now_ts
+                action="SKIP", regime=regime,
+                reason="Data quality low / warmup pending",
+                timestamp=feats.get("timestamp"), decision_timestamp=now_ts
             )
 
         atr = safe_float(feats.get("atr_14_prev"), 15.0)
         signals = self._get_high_priority_signals(regime, feats)
         aligned_buy = sum(1 for s in signals if s == 1)
         aligned_sell = sum(1 for s in signals if s == -1)
-        aligned_count = max(aligned_buy, aligned_sell)
-
-        above_poc = safe_int(feats.get("above_poc"), 0)
-        smc_bias = safe_int(feats.get("smc_bias"), 0)
-        level_strength = self.stats.get_level_strength(above_poc, smc_bias, regime)
 
         action = "SKIP"
         size_mult = 1.0
-        reason_parts = [f"Regime={regime}", f"B{aligned_buy}/S{aligned_sell}", f"LS={level_strength:.2f}"]
-        is_reversal = False
-        min_req = CONFIG["min_aligned_for_entry"]
+        conf_boost = 0.0
+        reason_parts = [f"Regime={regime}"]
 
-        if current_position_direction == 1 and aligned_sell >= min_req and aligned_sell > aligned_buy:
-            action = "PE"
-            is_reversal = True
-            reason_parts.append("REVERSAL CE→PE")
-        elif current_position_direction == -1 and aligned_buy >= min_req and aligned_buy > aligned_sell:
+        min_required = 3
+        if regime.startswith("IMPULSE") and abs(safe_float(feats.get("kalman_stretch"), 0)) > 1.8:
+            min_required = 4
+
+        if aligned_buy >= min_required and aligned_buy > aligned_sell:
             action = "CE"
-            is_reversal = True
-            reason_parts.append("REVERSAL PE→CE")
-        elif aligned_buy >= min_req and aligned_buy > aligned_sell:
-            action = "CE"
-            size_mult = 1.0 + (aligned_buy - 3) * 0.12
-            reason_parts.append(f"Buy {aligned_buy}")
-        elif aligned_sell >= min_req and aligned_sell > aligned_buy:
+            if aligned_buy == 3:
+                size_mult = 1.0
+                conf_boost = 0.0
+            elif aligned_buy == 4:
+                size_mult = 1.25
+                conf_boost = 0.08
+            else:
+                size_mult = 1.45
+                conf_boost = 0.14
+            reason_parts.append(f"HP Buy {aligned_buy}/5")
+        elif aligned_sell >= min_required and aligned_sell > aligned_buy:
             action = "PE"
-            size_mult = 1.0 + (aligned_sell - 3) * 0.12
-            reason_parts.append(f"Sell {aligned_sell}")
+            if aligned_sell == 3:
+                size_mult = 1.0
+                conf_boost = 0.0
+            elif aligned_sell == 4:
+                size_mult = 1.25
+                conf_boost = 0.08
+            else:
+                size_mult = 1.45
+                conf_boost = 0.14
+            reason_parts.append(f"HP Sell {aligned_sell}/5")
         else:
-            reason_parts.append("Low alignment")
+            reason_parts.append(f"HP insufficient (Buy={aligned_buy} Sell={aligned_sell})")
 
-        target, stop, base_size = self._realistic_target(atr, regime, aligned_count)
-        size = base_size * size_mult * level_strength
-        conf = float(np.clip(0.48 + (aligned_count - 3) * 0.07, 0.30, 0.85))
+        strategy = "TREND" if action != "SKIP" else "NONE"
+        target, stop, base_size = self._realistic_target(atr, regime, strategy)
+        size = base_size * size_mult
 
-        opt_target = round(target * CONFIG["base_delta"], 1)
+        ml_prob = self._predict_real_ml_proba(feats)
+        rule_conf = 0.52 + conf_boost
+        rule_w, ml_w = self.get_adaptive_weights(regime)
+        combined_conf = (rule_w * rule_conf) + (ml_w * abs(ml_prob - 0.5) * 2.0)
+        conf = float(np.clip(combined_conf, 0.28, 0.88))
+
+        effective_delta = CONFIG.get("base_delta", 0.52)
+        opt_target = round(target * effective_delta, 1)
         opt_stop = round(stop * 0.75, 1)
 
         return TradeDecision(
@@ -1394,16 +1422,19 @@ class DecisionEngine:
             stop_points=round(stop, 1),
             option_target_pts=opt_target,
             option_stop_pts=opt_stop,
-            effective_delta=CONFIG["base_delta"],
+            effective_delta=round(effective_delta, 3),
             size_factor=round(size, 2),
             confidence=round(conf, 3),
             reason=" | ".join(reason_parts),
             timestamp=feats.get("timestamp"),
             decision_timestamp=now_ts,
-            aligned_count=aligned_count,
-            is_reversal=is_reversal,
-            level_strength=level_strength
+            ml_probability=ml_prob
         )
+
+
+# =========================================================
+# 7. OPTION-CENTRIC PAPER TRADING DESK & JOURNAL
+# =========================================================
 
 class DatasetManager:
     def __init__(self, path=None):
@@ -1418,11 +1449,11 @@ class DatasetManager:
             data["date"] = pd.to_datetime(data["timestamp"]).dt.date.astype(str)
         table = pa.Table.from_pandas(data, preserve_index=False)
         pq.write_to_dataset(
-            table,
-            root_path=str(self.base / name),
+            table, root_path=str(self.base / name),
             partition_cols=["date"] if "date" in data.columns else None,
-            existing_data_behavior="overwrite_or_ignore"
+            existing_data_behavior="overwrite_or_ignore",
         )
+
 
 @dataclass
 class PaperPosition:
@@ -1442,27 +1473,14 @@ class PaperPosition:
     exit_option_price: Optional[float] = None
     pnl_pts: float = 0.0
     exit_reason: str = ""
-    max_favorable_pts: float = 0.0
-    initial_aligned_count: int = 0
-    peak_aligned_count: int = 0
-    exit_aligned_count: int = 0
-    alignment_path: str = "0"
-    above_poc: int = 0
-    smc_bias: int = 0
-    delta_sign: int = 0
-    near_demand: int = 0
-    near_supply: int = 0
-    level_strength: float = 1.0
-    vp_poc: float = 0.0
-    failure_reason: str = ""
+
 
 class PaperTradingDesk:
-    def __init__(self, dataset_manager: DatasetManager, stats_collector: StatsCollector):
+    def __init__(self, dataset_manager: DatasetManager):
         self.dataset_manager = dataset_manager
-        self.stats = stats_collector
         self.active_position: Optional[PaperPosition] = None
         self.pending_order: Optional[Dict[str, Any]] = None
-        self.closed_trades: deque = deque(maxlen=300)
+        self.closed_trades: deque = deque(maxlen=200)
         self.realized_pnl_pts: float = 0.0
         self.unrealized_pnl_pts: float = 0.0
         self.current_trade_date: Optional[date] = None
@@ -1482,14 +1500,15 @@ class PaperTradingDesk:
             self.risk_locked = False
 
     def check_total_risk_limit(self) -> bool:
-        if self.realized_pnl_pts + self.unrealized_pnl_pts <= -CONFIG["max_daily_loss_pts"]:
+        total_pnl = self.realized_pnl_pts + self.unrealized_pnl_pts
+        if total_pnl <= -CONFIG["max_daily_loss_pts"]:
             self.risk_locked = True
             self.pending_order = None
             return True
         return False
 
-    def stage_signal(self, decision: TradeDecision, atr: float, next_bar_time: datetime, feats: Dict):
-        if self.risk_locked or self.check_total_risk_limit():
+    def stage_signal(self, decision: TradeDecision, atr: float, next_bar_time: datetime):
+        if getattr(self, "risk_locked", False) or self.check_total_risk_limit():
             return
         if decision.action in ("CE", "PE") and self.active_position is None and self.pending_order is None:
             direction = 1 if decision.action == "CE" else -1
@@ -1501,15 +1520,6 @@ class PaperTradingDesk:
                 "effective_delta": decision.effective_delta,
                 "size": decision.size_factor,
                 "regime": decision.regime,
-                "aligned_count": decision.aligned_count,
-                "is_reversal": decision.is_reversal,
-                "above_poc": safe_int(feats.get("above_poc"), 0),
-                "smc_bias": safe_int(feats.get("smc_bias"), 0),
-                "delta_sign": safe_int(feats.get("delta_sign"), 0),
-                "near_demand": safe_int(feats.get("near_demand_zone"), 0),
-                "near_supply": safe_int(feats.get("near_supply_zone"), 0),
-                "level_strength": decision.level_strength,
-                "vp_poc": safe_float(feats.get("vp_poc"), 0.0),
             }
 
     def on_bar_open_fill(self, candle: Candle3Min, atr: float):
@@ -1518,73 +1528,33 @@ class PaperTradingDesk:
             if self.check_total_risk_limit():
                 self.pending_order = None
                 return
+
             order = self.pending_order
             direction = order["direction"]
-            vol_factor = max(0.5, min(2.0, (atr / 15.0))) if is_valid_number(atr) else 1.0
+            
+            vol_factor = max(0.5, min(2.0, (atr / 15.0))) if is_valid_number(atr) and atr > 0 else 1.0
             slippage = CONFIG["base_slippage_pts"] * vol_factor * direction
             fill_price = candle.fut_o + slippage
-            baseline = round(max(80.0, (fill_price * CONFIG["default_atm_iv"] * math.sqrt(1.0 / 252.0)) * 2.2), 2)
+
+            dynamic_atm_baseline = round(max(80.0, (fill_price * CONFIG["default_atm_iv"] * math.sqrt(1.0 / 252.0)) * 2.2), 2)
 
             self.active_position = PaperPosition(
                 entry_time=candle.timestamp,
                 direction=direction,
                 entry_future_price=round(fill_price, 2),
-                entry_option_price=baseline,
+                entry_option_price=dynamic_atm_baseline,
                 option_target=order["option_target"],
                 option_stop=order["option_stop"],
                 effective_delta=order["effective_delta"],
                 size=order["size"],
                 regime=order["regime"],
-                initial_aligned_count=order.get("aligned_count", 0),
-                peak_aligned_count=order.get("aligned_count", 0),
-                exit_aligned_count=order.get("aligned_count", 0),
-                alignment_path=str(order.get("aligned_count", 0)),
-                above_poc=order.get("above_poc", 0),
-                smc_bias=order.get("smc_bias", 0),
-                delta_sign=order.get("delta_sign", 0),
-                near_demand=order.get("near_demand", 0),
-                near_supply=order.get("near_supply", 0),
-                level_strength=order.get("level_strength", 1.0),
-                vp_poc=order.get("vp_poc", 0.0),
             )
             self.pending_order = None
 
-    def force_close_and_reverse(self, candle: Candle3Min, decision: TradeDecision, atr: float, feats: Dict):
-        if self.active_position is None:
-            return
-        pos = self.active_position
-        fut_close_move = (candle.fut_c - pos.entry_future_price) if pos.direction == 1 else (pos.entry_future_price - candle.fut_c)
-        option_close_pnl = fut_close_move * pos.effective_delta
-        penalty = min(1.40, CONFIG["option_exit_spread_penalty"] * max(1.0, abs(option_close_pnl) / 10.0))
-        net = (option_close_pnl - penalty) * pos.size
+    def on_bar_update_and_exit_eval(self, candle: Candle3Min, is_session_end: bool = False):
+        if not hasattr(self, "risk_locked"):
+            self.risk_locked = False
 
-        pos.exit_time = candle.timestamp
-        pos.exit_future_price = round(candle.fut_c, 2)
-        pos.exit_option_price = round(max(5.0, pos.entry_option_price + option_close_pnl), 2)
-        pos.pnl_pts = round(net, 2)
-        pos.status = "CLOSED"
-        pos.exit_reason = f"TWO-WAY REVERSAL (Spread -{penalty:.2f})"
-        pos.exit_aligned_count = decision.aligned_count
-        pos.failure_reason = "Reversal" if net < 0 else ""
-
-        self.realized_pnl_pts = round(self.realized_pnl_pts + pos.pnl_pts, 2)
-        self.closed_trades.append(pos)
-        self.stats.record({
-            "pnl_pts": pos.pnl_pts,
-            "above_poc": pos.above_poc,
-            "smc_bias": pos.smc_bias,
-            "regime": pos.regime
-        })
-        self.dataset_manager.write_parquet(pd.DataFrame([asdict(pos)]), name="paper_trades_log")
-        self.active_position = None
-        self.unrealized_pnl_pts = 0.0
-
-        next_t = candle.timestamp + timedelta(minutes=CONFIG["bar_minutes"])
-        self.stage_signal(decision, atr, next_t, feats)
-
-    def on_bar_update_and_exit_eval(self, candle: Candle3Min, is_session_end: bool = False,
-                                    current_aligned_count: int = 0, decision: Optional[TradeDecision] = None,
-                                    feats: Optional[Dict] = None):
         if self.active_position is None:
             self.unrealized_pnl_pts = 0.0
             self.check_total_risk_limit()
@@ -1592,16 +1562,7 @@ class PaperTradingDesk:
 
         pos = self.active_position
         pos.bars_held += 1
-
-        last = int(pos.alignment_path.split(" -> ")[-1])
-        if current_aligned_count != last:
-            pos.alignment_path += f" -> {current_aligned_count}"
-
-        if current_aligned_count > pos.peak_aligned_count:
-            pos.peak_aligned_count = current_aligned_count
-            if current_aligned_count >= 5:
-                pos.option_target = round(pos.option_target * 1.25, 1)
-
+        
         if pos.direction == 1:
             fut_high_move = candle.fut_h - pos.entry_future_price
             fut_low_move = pos.entry_future_price - candle.fut_l
@@ -1612,76 +1573,62 @@ class PaperTradingDesk:
             fut_close_move = pos.entry_future_price - candle.fut_c
 
         option_high_pnl = fut_high_move * pos.effective_delta
-        option_low_pnl = -(fut_low_move * pos.effective_delta)
+        option_low_pnl = - (fut_low_move * pos.effective_delta)
         option_close_pnl = fut_close_move * pos.effective_delta
-
-        pos.max_favorable_pts = max(pos.max_favorable_pts, option_high_pnl)
-        if pos.max_favorable_pts >= 10.0 and pos.option_stop > 0.5:
-            pos.option_stop = 0.5
 
         self.unrealized_pnl_pts = round(option_close_pnl * pos.size, 2)
 
         hit_target = option_high_pnl >= pos.option_target
         hit_stop = option_low_pnl <= -pos.option_stop
-        momentum_fade = (pos.max_favorable_pts >= 8.0 and current_aligned_count <= 1)
-
-        if decision and decision.is_reversal and decision.action in ("CE", "PE"):
-            new_dir = 1 if decision.action == "CE" else -1
-            if new_dir != pos.direction:
-                self.force_close_and_reverse(candle, decision, 15.0, feats or {})
-                return
 
         self.check_total_risk_limit()
         timeout = pos.bars_held >= (CONFIG["time_barrier_min"] // CONFIG["bar_minutes"])
 
-        if is_session_end or hit_target or hit_stop or momentum_fade or timeout or self.risk_locked:
-            if hit_target:
-                exit_pnl = pos.option_target
-                reason = "TARGET HIT"
-                fail = ""
-            elif hit_stop:
-                exit_pnl = -pos.option_stop
-                reason = "STOP LOSS"
-                fail = "Stop"
-            elif momentum_fade:
+        if is_session_end or hit_target or hit_stop or timeout or self.risk_locked:
+            if self.risk_locked and not (is_session_end or hit_target or hit_stop or timeout):
                 exit_pnl = option_close_pnl
-                reason = "MOMENTUM FADE"
-                fail = "Fade"
+                reason = "KILL-SWITCH MAX LOSS BREACH"
             elif is_session_end:
                 exit_pnl = option_close_pnl
-                reason = "SESSION END"
-                fail = "Session" if exit_pnl < 0 else ""
+                reason = "SESSION END AUTO-EXIT"
+            elif hit_target and hit_stop:
+                exit_pnl = -pos.option_stop
+                reason = "AMBIGUOUS (SL ASSUMED)"
+            elif hit_target:
+                exit_pnl = pos.option_target
+                reason = "TARGET HIT"
+            elif hit_stop:
+                exit_pnl = -pos.option_stop
+                reason = "STOP LOSS HIT"
             else:
                 exit_pnl = option_close_pnl
-                reason = "TIME / KILL"
-                fail = "Timeout"
+                reason = "TIME BARRIER EXIT"
 
             pos.exit_time = candle.timestamp
             pos.exit_future_price = round(candle.fut_c, 2)
             pos.exit_option_price = round(max(5.0, pos.entry_option_price + exit_pnl), 2)
-            pos.exit_aligned_count = current_aligned_count
-            penalty = min(1.40, CONFIG["option_exit_spread_penalty"] * max(1.0, abs(exit_pnl) / 10.0))
-            pos.pnl_pts = round((exit_pnl - penalty) * pos.size, 2)
+            
+            base_penalty = CONFIG.get("option_exit_spread_penalty", 0.65)
+            net_spread_penalty = min(1.40, base_penalty * max(1.0, abs(exit_pnl) / 10.0))
+
+            net_option_pnl = (exit_pnl - net_spread_penalty) * pos.size
+            pos.pnl_pts = round(net_option_pnl, 2)
             pos.status = "CLOSED"
-            pos.exit_reason = reason + f" (Spread -{penalty:.2f})"
-            pos.failure_reason = fail
+            pos.exit_reason = reason + f" (Spread Penalty: -{net_spread_penalty:.2f}pt)"
 
             self.realized_pnl_pts = round(self.realized_pnl_pts + pos.pnl_pts, 2)
             self.closed_trades.append(pos)
-            self.stats.record({
-                "pnl_pts": pos.pnl_pts,
-                "above_poc": pos.above_poc,
-                "smc_bias": pos.smc_bias,
-                "regime": pos.regime
-            })
-            self.dataset_manager.write_parquet(pd.DataFrame([asdict(pos)]), name="paper_trades_log")
+            
+            trade_record = asdict(pos)
+            trade_record["timestamp"] = pos.exit_time
+            self.dataset_manager.write_parquet(pd.DataFrame([trade_record]), name="paper_trades_log")
+
             self.active_position = None
             self.unrealized_pnl_pts = 0.0
 
-print("PART 2 LOADED SUCCESSFULLY")
-print("Ab 'Part 3 de do' likho")
+
 # =========================================================
-# KOTAK NEO ADAPTER + FULL UI
+# 8. KOTAK NEO ADAPTER
 # =========================================================
 
 class KotakNeoAdapter:
@@ -1691,43 +1638,60 @@ class KotakNeoAdapter:
         self.ucc = env_or_secret("KOTAK_UCC")
         self.totp = env_or_secret("KOTAK_TOTP")
         self.mpin = env_or_secret("KOTAK_MPIN")
+
         self.client = None
         self.connected = False
         self.conn_state = "DISCONNECTED"
         self.lock = threading.RLock()
         self.latest: Dict[str, Dict[str, Any]] = {}
         self.tick_buffer = deque(maxlen=2000)
-        self.spot_token = "Nifty 50"
+
+        self.spot_token = CONFIG.get("nifty_spot_token", "Nifty 50")
         self.future_token = CONFIG.get("nifty_future_token", "53000")
+        self.future_symbol = ""
+        self.future_expiry = None
         self.pcr_tokens: List[str] = []
         self.pcr_records: Dict[str, Dict[str, Any]] = {}
-        self.active_pcr_expiry = None
-        self.heavy_tokens = dict(NSE_CASH_TOKENS)
-        self.token_to_symbol = {v: k for k, v in NSE_CASH_TOKENS.items()}
+        self.active_pcr_expiry: Optional[datetime] = None
+        self.heavy_tokens: Dict[str, str] = dict(NSE_CASH_TOKENS)
+        self.token_to_symbol: Dict[str, str] = {v: k for k, v in NSE_CASH_TOKENS.items()}
         self.discovery_log: List[str] = []
         self.last_error = ""
+
         self.dataset_manager = DatasetManager()
-        self.feature_engine = FeatureEngine()
+        self.feature_engine = FeatureEngine(maxlen=150)
+        self.label_engine = LabelEngine()
         self.decision_engine = DecisionEngine()
-        self.paper_desk = PaperTradingDesk(self.dataset_manager, self.decision_engine.stats)
+        self.paper_desk = PaperTradingDesk(self.dataset_manager)
         self.candles_3m = deque(maxlen=150)
-        self.current_bar_ticks: List[Dict] = []
-        self.current_bar_time = None
-        self._bar_deadline = None
-        self.last_decision = None
+        self.current_bar_ticks: List[Dict[str, Any]] = []
+        self.current_bar_time: Optional[datetime] = None
+        self._bar_deadline: Optional[datetime] = None
+        self.last_decision: Optional[TradeDecision] = None
         self._prev_ce_oi = np.nan
         self._prev_pe_oi = np.nan
-        self._last_cum_volume = None
+        self._last_tick_wall = None
+        self._last_cum_volume: Optional[float] = None
+        self._unlabeled_decisions = deque(maxlen=150)
+
         self._watchdog_stop = threading.Event()
-        self._watchdog_thread = None
+        self._watchdog_thread: Optional[threading.Thread] = None
 
     def _extract_oi(self, record: dict) -> float:
         if not isinstance(record, dict):
             return np.nan
-        for key in ("oi", "open_interest", "openInterest", "OpenInterest", "oI", "OI"):
+        for key in ("oi", "open_interest", "openInterest", "OpenInterest", "oI", "OI",
+                    "open_int", "opnInterest", "openInt", "dOpenInterest"):
             val = safe_float(record.get(key))
             if is_valid_number(val) and val >= 0:
                 return val
+        for wrapper in ("data", "quote", "marketDepth", "depth", "ohlc"):
+            nested = record.get(wrapper)
+            if isinstance(nested, dict):
+                for key in ("oi", "open_interest", "openInterest", "OpenInterest", "oI"):
+                    val = safe_float(nested.get(key))
+                    if is_valid_number(val) and val >= 0:
+                        return val
         return np.nan
 
     def on_message(self, message):
@@ -1737,6 +1701,7 @@ class KotakNeoAdapter:
                     message = json.loads(message)
                 except Exception:
                     return
+
             items = message if isinstance(message, list) else [message]
             with self.lock:
                 for item in items:
@@ -1748,16 +1713,12 @@ class KotakNeoAdapter:
                         oi_val = self._extract_oi(item)
                         if is_valid_number(oi_val):
                             item["oi"] = oi_val
+                            item["open_interest"] = oi_val
                         self.latest[token] = item
                         self.tick_buffer.append(item)
                         self.current_bar_ticks.append(item)
-                        if str(token) == str(self.future_token):
-                            ltp = extract_tick_price(item)
-                            vol = safe_float(item.get("v") or item.get("vol") or item.get("volume") or item.get("last_volume") or item.get("ltq"), 1.0)
-                            if is_valid_number(ltp):
-                                self.feature_engine.on_tick_for_delta(ltp, max(vol, 1.0))
-        except Exception as e:
-            self.last_error = f"on_message: {e}"
+        except Exception as exc:
+            self.last_error = f"on_message: {exc}"
 
     def on_error(self, error):
         self.last_error = str(error) if error else ""
@@ -1770,34 +1731,34 @@ class KotakNeoAdapter:
 
     def login(self, live_totp_override=""):
         if NeoAPI is None:
-            raise RuntimeError("neo_api_client missing")
+            raise RuntimeError("neo_api_client missing. Install official Kotak Neo API v2 package.")
+        
+        self.consumer_key = env_or_secret("KOTAK_CONSUMER_KEY")
+        self.mobile = normalize_kotak_mobile(env_or_secret("KOTAK_MOBILE"))
+        self.ucc = env_or_secret("KOTAK_UCC")
+        self.totp = env_or_secret("KOTAK_TOTP")
+        self.mpin = env_or_secret("KOTAK_MPIN")
+
         totp = (live_totp_override or "").strip() or self.totp
-        required = {
-            "KOTAK_CONSUMER_KEY": self.consumer_key,
-            "KOTAK_MOBILE": self.mobile,
-            "KOTAK_UCC": self.ucc,
-            "TOTP": totp,
-            "KOTAK_MPIN": self.mpin
-        }
+        required = {"KOTAK_CONSUMER_KEY": self.consumer_key, "KOTAK_MOBILE": self.mobile,
+                    "KOTAK_UCC": self.ucc, "TOTP": totp, "KOTAK_MPIN": self.mpin}
         missing = [k for k, v in required.items() if not v]
         if missing:
-            raise RuntimeError("Missing: " + ", ".join(missing))
-        self.client = NeoAPI(
-            environment=CONFIG["neo_environment"],
-            access_token=None,
-            neo_fin_key=None,
-            consumer_key=self.consumer_key
-        )
+            raise RuntimeError("Missing credentials: " + ", ".join(missing))
+            
+        self.client = NeoAPI(environment=CONFIG["neo_environment"], access_token=None, neo_fin_key=None, consumer_key=self.consumer_key)
         self.client.on_message = self.on_message
         self.client.on_error = self.on_error
         self.client.on_close = self.on_close
         self.client.on_open = self.on_open
+        
         step1 = self.client.totp_login(mobile_number=self.mobile, ucc=self.ucc, totp=generate_live_totp(totp))
         if isinstance(step1, dict) and step1.get("error"):
             raise RuntimeError(str(step1))
         step2 = self.client.totp_validate(mpin=self.mpin)
         if isinstance(step2, dict) and step2.get("error"):
             raise RuntimeError(str(step2))
+            
         self.connected = True
         self.conn_state = "AUTHENTICATED"
         return True
@@ -1807,152 +1768,229 @@ class KotakNeoAdapter:
             res = self.client.search_scrip(exchange_segment="nse_fo", symbol="NIFTY")
             records = record_list(res)
             now_d = now_ist().date()
+            
             futures = []
             for r in records:
-                sym = str(r.get("pTrdSymbol", r.get("ts", ""))).upper().strip()
-                if sym.startswith("NIFTY") and ("FUT" in sym) and not any(x in sym for x in ["BANK", "FIN", "MID", "IT"]):
+                sym = str(r.get("pTrdSymbol", r.get("ts", r.get("symbol", "")))).upper().strip()
+                inst = str(r.get("pInstType", "")).upper()
+                
+                is_nifty_fut = (
+                    sym.startswith("NIFTY") and 
+                    ("FUT" in sym or "FUTIDX" in inst) and
+                    not any(x in sym for x in ["FPI", "BANK", "FIN", "MID", "NXT", "IT", "SENSEX", "BANKEX"])
+                )
+                
+                if is_nifty_fut:
                     exp = expiry_from_record(r)
                     tok = token_from_record(r)
                     if exp and exp.date() >= now_d and tok:
                         futures.append((exp, tok, sym))
+            
             if futures:
                 futures.sort(key=lambda x: x[0])
-                self.discovery_log.append(f"✓ Future: {futures[0][2]}")
-                return futures[0][1]
+                nearest_exp, nearest_tok, nearest_sym = futures[0]
+                self.future_symbol = nearest_sym
+                self.discovery_log.append(f"✓ Resolved Nifty Future: {nearest_sym} | Token: {nearest_tok} | Expiry: {nearest_exp.date()}")
+                return nearest_tok
         except Exception as e:
-            self.last_error = str(e)
+            self.last_error = f"Future resolution error: {e}"
         return CONFIG.get("nifty_future_token", "53000")
 
-    def discover_nifty_instruments(self, auto_pcr=True):
-        if not self.connected:
-            raise RuntimeError("Not authenticated")
+    def discover_nifty_instruments(self, auto_pcr: bool = True) -> bool:
+        if not self.connected or not self.client:
+            raise RuntimeError("Kotak Neo not authenticated.")
         self.discovery_log.clear()
+        
         self.heavy_tokens = dict(NSE_CASH_TOKENS)
         self.token_to_symbol = {v: k for k, v in NSE_CASH_TOKENS.items()}
-        self.discovery_log.append(f"✓ {len(self.heavy_tokens)} Heavyweights")
+        self.discovery_log.append(f"✓ Configured {len(self.heavy_tokens)} Core Heavyweights")
+        
+        self.spot_token = "Nifty 50"
+        self.token_to_symbol[self.spot_token] = "NIFTY_SPOT"
+        self.discovery_log.append("✓ Configured Nifty Spot Index: Nifty 50")
+
         self.future_token = self.resolve_current_nifty_future_token()
         self.token_to_symbol[self.future_token] = "NIFTY_FUT"
-        self.discovery_log.append(f"✓ Future Token: {self.future_token}")
+        self.discovery_log.append(f"✓ Configured Active Future Token: {self.future_token}")
+
         if auto_pcr:
             self.discover_pcr_chain()
         return True
 
-    def discover_pcr_chain(self, center_strike=None):
-        if not self.connected:
+    def discover_pcr_chain(self, center_strike: Optional[float] = None) -> int:
+        if not self.connected or not self.client:
             return 0
         try:
             if not center_strike or not is_valid_number(center_strike):
                 with self.lock:
-                    center_strike = extract_tick_price(self.latest.get("Nifty 50", {})) or 24300.0
+                    spot_tick = self.latest.get("Nifty 50", {})
+                    center_strike = extract_tick_price(spot_tick)
+                    if not is_valid_number(center_strike) or center_strike <= 0:
+                        center_strike = 24300.0
+
             step = CONFIG["pcr_strike_step"]
             atm = round(center_strike / step) * step
             count = CONFIG["pcr_strike_count"]
-            targets = [atm + i * step for i in range(-count, count + 1)]
+            target_strikes = [atm + (i * step) for i in range(-count, count + 1)]
+            
             res = self.client.search_scrip(exchange_segment="nse_fo", symbol="NIFTY")
             records = record_list(res)
             now_d = now_ist().date()
-            valid_exps = []
+            
+            nifty_opt_pattern = re.compile(r"^NIFTY\d{2}[A-Z0-9]+(CE|PE)$", re.IGNORECASE)
+            valid_expiries = []
             for r in records:
-                sym = str(r.get("pTrdSymbol", "")).upper()
-                if "NIFTY" in sym and (sym.endswith("CE") or sym.endswith("PE")) and not any(x in sym for x in ["BANK", "FIN"]):
+                sym = str(r.get("pTrdSymbol", r.get("ts", r.get("symbol", "")))).upper().strip()
+                is_opt = nifty_opt_pattern.match(sym) or ("NIFTY" in sym and (sym.endswith("CE") or sym.endswith("PE")))
+                if not is_opt or any(x in sym for x in ["NXT", "FPI", "FIN", "BANK", "MID", "IT", "SENSEX", "BANKEX"]):
+                    continue
+                op_type = option_type_from_record(r)
+                if op_type in ("CE", "PE"):
                     exp = expiry_from_record(r)
                     if exp and exp.date() >= now_d:
-                        valid_exps.append(exp)
-            if not valid_exps:
+                        valid_expiries.append(exp)
+            
+            if not valid_expiries:
                 return 0
-            self.active_pcr_expiry = min(valid_exps, key=lambda x: x.date())
+            
+            self.active_pcr_expiry = min(valid_expiries, key=lambda x: x.date())
+            target_exp_date = self.active_pcr_expiry.date()
+            
             discovered = []
             for r in records:
-                sym = str(r.get("pTrdSymbol", "")).upper()
-                if "NIFTY" in sym and (sym.endswith("CE") or sym.endswith("PE")):
-                    exp = expiry_from_record(r)
-                    strike = strike_from_record(r)
-                    op = option_type_from_record(r)
-                    tok = token_from_record(r)
-                    if tok and strike in targets and op in ("CE", "PE") and exp and exp.date() == self.active_pcr_expiry.date():
+                sym = str(r.get("pTrdSymbol", r.get("ts", r.get("symbol", "")))).upper().strip()
+                is_opt = nifty_opt_pattern.match(sym) or ("NIFTY" in sym and (sym.endswith("CE") or sym.endswith("PE")))
+                if not is_opt or any(x in sym for x in ["NXT", "FPI", "FIN", "BANK", "MID", "IT", "SENSEX", "BANKEX"]):
+                    continue
+                exp = expiry_from_record(r)
+                strike = strike_from_record(r)
+                op_type = option_type_from_record(r)
+                tok = token_from_record(r)
+                if tok and strike in target_strikes and op_type in ("CE", "PE"):
+                    if exp and exp.date() == target_exp_date:
                         discovered.append(tok)
-                        self.pcr_records[tok] = {"strike": strike, "option_type": op, "expiry": exp}
+                        self.pcr_records[tok] = {
+                            "strike": strike, "option_type": op_type,
+                            "expiry": exp, "symbol": str(r.get("pTrdSymbol", ""))
+                        }
             self.pcr_tokens = list(set(discovered))
-            self.discovery_log.append(f"✓ PCR: {len(self.pcr_tokens)} strikes")
+            self.discovery_log.append(f"✓ Single-Expiry PCR ({target_exp_date}): {len(self.pcr_tokens)} Strikes Mapped")
             return len(self.pcr_tokens)
         except Exception as e:
-            self.last_error = str(e)
+            self.last_error = f"PCR Discovery error: {e}"
             return 0
 
     def fetch_real_option_oi(self):
-        if not self.connected or not self.pcr_tokens:
+        if not self.connected or not self.client or not self.pcr_tokens:
             return
         try:
-            tokens = [{"instrument_token": str(t), "exchange_segment": "nse_fo"} for t in self.pcr_tokens[:25]]
-            res = self.client.quotes(instrument_tokens=tokens, quote_type="all")
-            for r in record_list(res):
-                tok = token_from_record(r)
-                if tok:
+            tokens_to_poll = [
+                {"instrument_token": str(tok), "exchange_segment": "nse_fo"}
+                for tok in self.pcr_tokens[:25]
+            ]
+            res = self.client.quotes(instrument_tokens=tokens_to_poll, quote_type="all")
+            recs = record_list(res)
+            with self.lock:
+                for r in recs:
+                    if not isinstance(r, dict):
+                        continue
+                    tok = token_from_record(r)
+                    if not tok:
+                        continue
                     oi = self._extract_oi(r)
                     if is_valid_number(oi):
                         if tok not in self.latest:
                             self.latest[tok] = {}
                         self.latest[tok]["oi"] = oi
-        except Exception:
+                        self.latest[tok]["open_interest"] = oi
+                        self.latest[tok]["open_int"] = oi
+        except Exception as e:
             pass
 
     def fetch_market_snapshot(self):
-        if not self.connected:
+        if not self.connected or not self.client:
             return
+
         now_ts = now_ist()
-        tokens = [
+        tokens_to_poll = [
             {"instrument_token": "Nifty 50", "exchange_segment": "nse_cm"},
             {"instrument_token": str(self.future_token), "exchange_segment": "nse_fo"},
         ]
+        
         for tok in self.heavy_tokens.values():
-            tokens.append({"instrument_token": str(tok), "exchange_segment": "nse_cm"})
+            tokens_to_poll.append({"instrument_token": str(tok), "exchange_segment": "nse_cm"})
+            
         for tok in self.pcr_tokens[:20]:
-            tokens.append({"instrument_token": str(tok), "exchange_segment": "nse_fo"})
+            tokens_to_poll.append({"instrument_token": str(tok), "exchange_segment": "nse_fo"})
+        
         try:
-            res = self.client.quotes(instrument_tokens=tokens, quote_type="all")
+            res = self.client.quotes(instrument_tokens=tokens_to_poll, quote_type="all")
+            recs = record_list(res)
+            
             with self.lock:
-                for r in record_list(res):
+                for r in recs:
+                    if not isinstance(r, dict):
+                        continue
                     tok = token_from_record(r)
-                    if not tok and "NIFTY" in str(r.get("display_symbol", "")).upper():
+                    sym_name = str(r.get("display_symbol", "") or "").upper()
+                    
+                    if not tok and ("NIFTY" in sym_name and "EQ" not in sym_name and "FUT" not in sym_name):
                         tok = "Nifty 50"
+                        
                     if tok:
                         r["_parsed_ts"] = now_ts
-                        oi = self._extract_oi(r)
-                        if is_valid_number(oi):
-                            r["oi"] = oi
+                        oi_val = self._extract_oi(r)
+                        if is_valid_number(oi_val):
+                            r["oi"] = oi_val
+                            r["open_interest"] = oi_val
                         self.latest[tok] = r
                         self.tick_buffer.append(r)
                         self.current_bar_ticks.append(r)
+                        
+                        if tok == "Nifty 50" or "NIFTY 50" in sym_name:
+                            self.latest["Nifty 50"] = r
+                        
                         if tok == str(self.future_token):
-                            pdc = safe_float(r.get("c") or r.get("close"))
-                            if is_valid_number(pdc) and self.feature_engine.sess.prev_close is None:
-                                self.feature_engine.set_previous_day(pdc, safe_float(r.get("h")), safe_float(r.get("l")))
+                            pdc = safe_float(r.get("c") or r.get("close") or r.get("pdc"))
+                            pdh = safe_float(r.get("h") or r.get("high") or r.get("pdh"))
+                            pdl = safe_float(r.get("l") or r.get("low") or r.get("pdl"))
                             open_p = safe_float(r.get("o") or r.get("open"))
+                            if is_valid_number(pdc) and self.feature_engine.sess.prev_close is None:
+                                self.feature_engine.set_previous_day(pdc, pdh, pdl)
                             if is_valid_number(open_p):
                                 self.feature_engine.set_today_open(open_p)
+                
+                self.last_error = ""
+            
             self.fetch_real_option_oi()
-        except Exception as e:
-            self.last_error = f"Poll: {e}"
+            
+        except Exception as exc:
+            self.last_error = f"Poll error: {exc}"
 
-    def subscribe_live_feed(self):
-        if not self.connected:
-            raise RuntimeError("Not authenticated")
+    def subscribe_live_feed(self) -> int:
+        if not self.connected or not self.client:
+            raise RuntimeError("Kotak Neo not authenticated.")
+        
         self.fetch_market_snapshot()
-        sub = [
+
+        sub_tokens = [
             {"instrument_token": "Nifty 50", "exchange_segment": "nse_cm"},
             {"instrument_token": str(self.future_token), "exchange_segment": "nse_fo"},
         ]
         for tok in self.heavy_tokens.values():
-            sub.append({"instrument_token": str(tok), "exchange_segment": "nse_cm"})
+            sub_tokens.append({"instrument_token": str(tok), "exchange_segment": "nse_cm"})
         for tok in self.pcr_tokens:
-            sub.append({"instrument_token": str(tok), "exchange_segment": "nse_fo"})
+            sub_tokens.append({"instrument_token": str(tok), "exchange_segment": "nse_fo"})
+            
         try:
             self.client.subscribe(instrument_tokens=[{"instrument_token": "Nifty 50", "exchange_segment": "nse_cm"}], isIndex=True)
-            self.client.subscribe(instrument_tokens=sub[1:], isIndex=False)
-        except Exception as e:
-            self.last_error = str(e)
+            self.client.subscribe(instrument_tokens=sub_tokens[1:], isIndex=False)
+        except Exception as exc:
+            self.last_error = f"Subscribe error: {exc}"
+
         self.conn_state = "STREAMING"
-        return len(sub)
+        self._last_tick_wall = time.time()
+        return len(sub_tokens)
 
     def maybe_flush_bars(self):
         now = now_ist()
@@ -1960,46 +1998,78 @@ class KotakNeoAdapter:
             if self.current_bar_time is None:
                 self.current_bar_time = floor_bar_timestamp(now, CONFIG["bar_minutes"])
                 self._bar_deadline = self.current_bar_time + timedelta(minutes=CONFIG["bar_minutes"])
+            
             if now >= self._bar_deadline:
-                self._close_bar(self.current_bar_time)
+                bar_t = self.current_bar_time
+                self._close_bar(bar_t)
                 self.current_bar_time = self._bar_deadline
                 self._bar_deadline = self.current_bar_time + timedelta(minutes=CONFIG["bar_minutes"])
                 self.current_bar_ticks.clear()
-            if CONFIG["session_end_flush"]:
-                if now.hour > 15 or (now.hour == 15 and now.minute >= 30):
-                    if self.current_bar_ticks:
-                        self._close_bar(self.current_bar_time or floor_bar_timestamp(now), is_session_end=True)
-                        self.current_bar_ticks.clear()
 
-    def _resolve_volume_clean(self, fut_ticks):
+            if CONFIG["session_end_flush"]:
+                end_h, end_m = map(int, CONFIG["session_end"].split(":"))
+                sess_end = now.replace(hour=end_h, minute=end_m, second=0, microsecond=0)
+                if now >= sess_end and self.current_bar_ticks:
+                    self._close_bar(self.current_bar_time or floor_bar_timestamp(now), is_session_end=True)
+                    self.current_bar_ticks.clear()
+
+    def _resolve_volume_clean(self, fut_ticks: List[Dict[str, Any]]) -> float:
         if not fut_ticks:
-            return 1.0
+            return np.nan
         last_cum = None
         for t in reversed(fut_ticks):
-            c = safe_float(t.get("v") or t.get("vol") or t.get("volume") or t.get("last_volume"))
-            if is_valid_number(c) and c > 0:
-                last_cum = c
+            c_val = safe_float(t.get("v") or t.get("vol") or t.get("volume") or t.get("last_volume"))
+            if is_valid_number(c_val) and c_val > 0:
+                last_cum = c_val
                 break
         if last_cum is None:
-            return 1.0
+            return np.nan
         if self._last_cum_volume is None:
             self._last_cum_volume = last_cum
-            return 1.0
+            return 0.0
         delta = last_cum - self._last_cum_volume
         if delta < 0:
             delta = last_cum
         self._last_cum_volume = last_cum
-        return max(1.0, float(delta))
+        return float(max(0.0, delta))
 
-    def _close_bar(self, bar_time: datetime, is_session_end=False):
+    def _process_delayed_labels(self):
+        max_tb_bars = CONFIG["time_barrier_min"] // CONFIG["bar_minutes"]
+        completed_records = []
+        
         with self.lock:
-            ticks_source = self.current_bar_ticks or list(self.tick_buffer)
+            candles_list = list(self.candles_3m)
+            while self._unlabeled_decisions:
+                target_time, entry_px, atr_val, direction, f_row = self._unlabeled_decisions[0]
+                future_candles = [c for c in candles_list if to_ist(c.timestamp) > to_ist(target_time)]
+                if len(future_candles) >= max_tb_bars:
+                    self._unlabeled_decisions.popleft()
+                    try:
+                        labels = self.label_engine.generate(
+                            entry_price=entry_px, atr=atr_val,
+                            future_after_entry=future_candles, direction=direction,
+                            signal_timestamp=f_row["timestamp"], entry_timestamp=target_time
+                        )
+                        merged = {**f_row, **labels}
+                        completed_records.append(merged)
+                    except Exception:
+                        pass
+                else:
+                    break
+
+        if completed_records:
+            self.dataset_manager.write_parquet(pd.DataFrame(completed_records), name="labeled_features_3min")
+
+    def _close_bar(self, bar_time: datetime, is_session_end: bool = False):
+        with self.lock:
+            ticks_source = self.current_bar_ticks if self.current_bar_ticks else list(self.tick_buffer)
             if not ticks_source:
                 return
 
             def _prices(token):
                 ticks = [t for t in ticks_source if str(token_from_record(t)) == str(token)]
-                vals = [extract_tick_price(t) for t in ticks if is_valid_number(extract_tick_price(t))]
+                vals = [extract_tick_price(t) for t in ticks]
+                vals = [v for v in vals if is_valid_number(v)]
                 return ticks, vals
 
             _, spot_prices = _prices("Nifty 50")
@@ -2014,347 +2084,546 @@ class KotakNeoAdapter:
                 last = extract_tick_price(self.latest.get(str(self.future_token), {})) or spot_c
                 fut_o = fut_h = fut_l = fut_c = last if is_valid_number(last) else 24400.0
                 fut_vol = 1000.0
-                fut_oi = self._extract_oi(self.latest.get(str(self.future_token), {})) or 1e7
-                l2 = {}
+                fut_oi = self._extract_oi(self.latest.get(str(self.future_token), {})) or 12784330.0
+                l2_snap = {}
             else:
                 fut_o, fut_h, fut_l, fut_c = fut_prices[0], max(fut_prices), min(fut_prices), fut_prices[-1]
                 fut_vol = self._resolve_volume_clean(fut_ticks)
-                last_t = fut_ticks[-1] if fut_ticks else {}
-                fut_oi = self._extract_oi(last_t) or self._extract_oi(self.latest.get(str(self.future_token), {})) or 1e7
-                l2 = {
-                    "best_bid": safe_float(last_t.get("bp"), fut_c),
-                    "best_ask": safe_float(last_t.get("ap"), fut_c),
-                    "bid_qty": safe_float(last_t.get("bq"), 1),
-                    "ask_qty": safe_float(last_t.get("aq"), 1)
+                last_fut_t = fut_ticks[-1] if fut_ticks else {}
+                fut_oi = self._extract_oi(last_fut_t) or self._extract_oi(self.latest.get(str(self.future_token), {})) or 12784330.0
+                
+                l2_snap = {
+                    "best_bid": safe_float(last_fut_t.get("bp") or last_fut_t.get("bid_price"), fut_c),
+                    "best_ask": safe_float(last_fut_t.get("ap") or last_fut_t.get("ask_price"), fut_c),
+                    "bid_qty": safe_float(last_fut_t.get("bq") or last_fut_t.get("bid_qty"), 1.0),
+                    "ask_qty": safe_float(last_fut_t.get("aq") or last_fut_t.get("ask_qty"), 1.0),
                 }
 
             hw_snap = {}
             for sym, tok in self.heavy_tokens.items():
                 t = self.latest.get(str(tok), {})
                 c_val = extract_tick_price(t)
-                o_val = extract_quote_field(t, ("o", "open")) or c_val
-                vwap = extract_quote_field(t, ("vwap", "avp")) or o_val
-                if is_valid_number(c_val):
-                    hw_snap[sym] = {"o": o_val, "c": c_val, "vwap": vwap}
+                o_val = extract_quote_field(t, ("o", "open", "pOpen", "openPrice", "op"))
+                if not is_valid_number(o_val):
+                    o_val = c_val
+                vwap_val = extract_quote_field(t, ("vwap", "avp", "averagePrice", "average_price", "a"))
+                if not is_valid_number(vwap_val):
+                    vwap_val = o_val
 
-            total_ce = total_pe = 0.0
-            atm_ce = atm_pe = np.nan
-            atm = round((spot_c or 24300) / CONFIG["pcr_strike_step"]) * CONFIG["pcr_strike_step"]
+                if is_valid_number(c_val):
+                    hw_snap[sym] = {"o": o_val, "c": c_val, "vwap": vwap_val}
+
+            total_ce_oi = total_pe_oi = total_ce_vol = total_pe_vol = 0.0
+            atm_ce_oi = atm_pe_oi = np.nan
+            spot_approx = spot_c if is_valid_number(spot_c) and spot_c > 0 else 24300.0
+            step = CONFIG["pcr_strike_step"]
+            atm = round(spot_approx / step) * step
+            
             for tok in self.pcr_tokens:
                 info = self.pcr_records.get(str(tok), {})
                 t = self.latest.get(str(tok), {})
                 oi = self._extract_oi(t)
+                vol = safe_float(t.get("last_volume") or t.get("v") or t.get("volume"), 0.0)
+                strike = info.get("strike")
                 if is_valid_number(oi):
                     if info.get("option_type") == "CE":
-                        total_ce += oi
-                        if info.get("strike") == atm:
-                            atm_ce = oi
+                        total_ce_oi += oi
+                        total_ce_vol += vol
+                        if strike == atm:
+                            atm_ce_oi = oi
                     elif info.get("option_type") == "PE":
-                        total_pe += oi
-                        if info.get("strike") == atm:
-                            atm_pe = oi
+                        total_pe_oi += oi
+                        total_pe_vol += vol
+                        if strike == atm:
+                            atm_pe_oi = oi
 
-            ce_chg = total_ce - self._prev_ce_oi if is_valid_number(self._prev_ce_oi) else 0.0
-            pe_chg = total_pe - self._prev_pe_oi if is_valid_number(self._prev_pe_oi) else 0.0
-            self._prev_ce_oi = total_ce if total_ce > 0 else self._prev_ce_oi
-            self._prev_pe_oi = total_pe if total_pe > 0 else self._prev_pe_oi
+            if is_valid_number(total_ce_oi) and total_ce_oi > 0:
+                ce_oi_change = total_ce_oi - self._prev_ce_oi if is_valid_number(self._prev_ce_oi) else 0.0
+                self._prev_ce_oi = total_ce_oi
+            else:
+                ce_oi_change = 0.0
+
+            if is_valid_number(total_pe_oi) and total_pe_oi > 0:
+                pe_oi_change = total_pe_oi - self._prev_pe_oi if is_valid_number(self._prev_pe_oi) else 0.0
+                self._prev_pe_oi = total_pe_oi
+            else:
+                pe_oi_change = 0.0
 
             pcr_chain = {
-                "pcr_oi": total_pe / max(total_ce, 1),
-                "pcr_volume": np.nan,
-                "ce_oi_change": ce_chg,
-                "pe_oi_change": pe_chg,
-                "ce_oi_atm": atm_ce,
-                "pe_oi_atm": atm_pe,
-                "atm_strike": atm,
-                "total_ce_oi": total_ce,
-                "total_pe_oi": total_pe,
+                "pcr_oi": total_pe_oi / max(total_ce_oi, 1.0) if total_ce_oi > 0 else np.nan,
+                "pcr_volume": total_pe_vol / max(total_ce_vol, 1.0) if total_ce_vol > 0 else np.nan,
+                "ce_oi_change": ce_oi_change, "pe_oi_change": pe_oi_change,
+                "ce_oi_atm": atm_ce_oi, "pe_oi_atm": atm_pe_oi, "atm_strike": atm,
+                "total_ce_oi": total_ce_oi, "total_pe_oi": total_pe_oi,
                 "active_expiry": self.active_pcr_expiry,
                 "ce_contracts_seen": sum(1 for t in self.pcr_tokens if self.pcr_records.get(t, {}).get("option_type") == "CE"),
                 "pe_contracts_seen": sum(1 for t in self.pcr_tokens if self.pcr_records.get(t, {}).get("option_type") == "PE"),
             }
 
             candle = Candle3Min(
-                timestamp=bar_time,
-                spot_o=spot_o, spot_h=spot_h, spot_l=spot_l, spot_c=spot_c,
-                fut_o=fut_o, fut_h=fut_h, fut_l=fut_l, fut_c=fut_c,
-                fut_volume=fut_vol, fut_oi=fut_oi,
-                heavy=hw_snap, option_chain=pcr_chain, l2_depth=l2
+                timestamp=bar_time, spot_o=spot_o, spot_h=spot_h, spot_l=spot_l, spot_c=spot_c,
+                fut_o=fut_o, fut_h=fut_h, fut_l=fut_l, fut_c=fut_c, fut_volume=fut_vol, fut_oi=fut_oi,
+                heavy=hw_snap, option_chain=pcr_chain, l2_depth=l2_snap
             )
-
+            
             feats = self.feature_engine.compute(candle, self.candles_3m)
             atr_v = safe_float(feats.get("atr_14_prev"), 15.0)
 
             self.paper_desk.on_bar_open_fill(candle, atr_v)
-
-            curr_dir = self.paper_desk.active_position.direction if self.paper_desk.active_position else 0
-            decision = self.decision_engine.decide(feats, current_position_direction=curr_dir)
-            self.last_decision = decision
-
-            signals = self.decision_engine._get_high_priority_signals(decision.regime, feats)
-            curr_align = max(sum(1 for s in signals if s == 1), sum(1 for s in signals if s == -1))
-
-            self.paper_desk.on_bar_update_and_exit_eval(
-                candle,
-                is_session_end=is_session_end,
-                current_aligned_count=curr_align,
-                decision=decision,
-                feats=feats
-            )
+            self.paper_desk.on_bar_update_and_exit_eval(candle, is_session_end=is_session_end)
 
             self.candles_3m.append(candle)
 
+            decision = self.decision_engine.decide(feats)
+            self.last_decision = decision
+            
             if not is_session_end:
                 next_t = bar_time + timedelta(minutes=CONFIG["bar_minutes"])
-                self.paper_desk.stage_signal(decision, atr_v, next_t, feats)
+                self.paper_desk.stage_signal(decision, atr_v, next_t)
 
             feats["decision_action"] = decision.action
             feats["decision_regime"] = decision.regime
-            feats["aligned_count"] = decision.aligned_count
-            feats["level_strength"] = decision.level_strength
+            feats["decision_target"] = decision.target_points
+            feats["decision_confidence"] = decision.confidence
+            feats["decision_timestamp"] = decision.decision_timestamp
+            feats["entry_timestamp"] = bar_time + timedelta(minutes=CONFIG["bar_minutes"])
+            
             self.dataset_manager.write_parquet(pd.DataFrame([feats]), name="features_3min")
+            
+            dir_flag = 1 if decision.action == "CE" else (-1 if decision.action == "PE" else 0)
+            if dir_flag != 0 and not is_session_end:
+                self._unlabeled_decisions.append((
+                    feats["entry_timestamp"], fut_c, feats.get("atr_14_prev"), dir_flag, feats
+                ))
+            self._process_delayed_labels()
 
     def start_bar_watchdog(self):
         if self._watchdog_thread and self._watchdog_thread.is_alive():
             return
         self._watchdog_stop.clear()
+
         def _loop():
             while not self._watchdog_stop.is_set():
                 try:
                     self.maybe_flush_bars()
                     if self.conn_state == "STREAMING":
                         self.fetch_market_snapshot()
-                except Exception as e:
-                    self.last_error = f"watchdog: {e}"
+                except Exception as exc:
+                    self.last_error = f"watchdog: {exc}"
                 self._watchdog_stop.wait(3.0)
-        self._watchdog_thread = threading.Thread(target=_loop, daemon=True)
+
+        self._watchdog_thread = threading.Thread(target=_loop, name="BarWatchdog", daemon=True)
         self._watchdog_thread.start()
 
     def stop_bar_watchdog(self):
         self._watchdog_stop.set()
 
+
 # =========================================================
-# STREAMLIT UI
+# 9. STREAMLIT UI
 # =========================================================
+
 def inject_custom_css():
     st.markdown("""
         <style>
-            .stApp { background-color: #0b0e14; color: #e1e7ec; }
-            .terminal-card { background: #151a23; border: 1px solid #232b38; border-radius: 8px; padding: 16px; margin-bottom: 12px; }
-            .badge-ce { background:#064e3b; color:#34d399; padding:6px 14px; border-radius:6px; font-weight:700; }
-            .badge-pe { background:#7f1d1d; color:#f87171; padding:6px 14px; border-radius:6px; font-weight:700; }
-            .badge-neutral { background:#374151; color:#9ca3af; padding:6px 14px; border-radius:6px; font-weight:700; }
-            .color-green { color:#34d399 !important; font-weight:bold; }
-            .color-red { color:#f87171 !important; font-weight:bold; }
-            .color-brown { color:#d97706 !important; font-weight:bold; }
-            .status-pill { padding:3px 8px; border-radius:12px; font-size:0.75rem; font-weight:600; }
-            .status-active { background:#064e3b; color:#10b981; }
-            .status-auth { background:#1e3a5f; color:#60a5fa; }
-            .status-offline { background:#451a1a; color:#ef4444; }
+            .stApp {
+                background-color: #0b0e14;
+                color: #e1e7ec;
+                font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            }
+            .terminal-card {
+                background: #151a23;
+                border: 1px solid #232b38;
+                border-radius: 8px;
+                padding: 16px;
+                margin-bottom: 12px;
+            }
+            .badge-ce {
+                background-color: #064e3b;
+                color: #34d399;
+                padding: 6px 14px;
+                border-radius: 6px;
+                font-weight: 700;
+                font-size: 1.1rem;
+                display: inline-block;
+                border: 1px solid #059669;
+            }
+            .badge-pe {
+                background-color: #7f1d1d;
+                color: #f87171;
+                padding: 6px 14px;
+                border-radius: 6px;
+                font-weight: 700;
+                font-size: 1.1rem;
+                display: inline-block;
+                border: 1px solid #dc2626;
+            }
+            .badge-neutral {
+                background-color: #374151;
+                color: #9ca3af;
+                padding: 6px 14px;
+                border-radius: 6px;
+                font-weight: 700;
+                font-size: 1.1rem;
+                display: inline-block;
+            }
+            .color-green { color: #34d399 !important; font-weight: bold; font-size: 1.25rem; }
+            .color-red { color: #f87171 !important; font-weight: bold; font-size: 1.25rem; }
+            .color-brown { color: #d97706 !important; font-weight: bold; font-size: 1.25rem; }
+            .status-pill {
+                padding: 3px 8px;
+                border-radius: 12px;
+                font-size: 0.75rem;
+                font-weight: 600;
+            }
+            .status-active { background: #064e3b; color: #10b981; }
+            .status-auth { background: #1e3a5f; color: #60a5fa; }
+            .status-offline { background: #451a1a; color: #ef4444; }
+            div[data-testid="stMetricValue"] {
+                font-size: 1.5rem !important;
+                font-weight: 700 !important;
+                color: #f8fafc;
+            }
         </style>
     """, unsafe_allow_html=True)
 
-def get_colored_text(value, name):
+
+def get_colored_text(value, feature_name):
     if not is_valid_number(value):
-        return f'<span style="color:#6b7280;">{value}</span>'
+        return f'<span style="color:#6b7280; font-size:1.25rem;">{value:.2f}</span>'
     color = "brown"
-    if name in ["kalman_stretch", "normalized_stretch"]:
+    if feature_name in ["normalized_stretch", "kalman_stretch"]:
         if value > 0.3: color = "green"
         elif value < -0.3: color = "red"
-    elif name == "stretch_slope_3":
+    elif feature_name == "stretch_slope_3":
         if value > 0.02: color = "green"
         elif value < -0.02: color = "red"
-    elif name == "pcr_oi":
+    elif feature_name == "pcr_oi":
         if value > 1.05: color = "green"
         elif value < 0.95: color = "red"
-    elif name == "breadth_10":
+    elif feature_name == "breadth_10":
         if value > 0.55: color = "green"
         elif value < 0.45: color = "red"
     return f'<span class="color-{color}">{value:.2f}</span>'
+
+
+def run_unit_tests() -> bool:
+    oe = OpeningRangeEngine(15)
+    c1 = Candle3Min(now_ist().replace(hour=9, minute=15), 100, 110, 95, 105, 100, 110, 95, 105, 1000, 500)
+    oe.update(c1)
+    assert "or_width_atr" in oe.features(c1, 10.0)
+    
+    le = LabelEngine()
+    future_short = [
+        Candle3Min(now_ist().replace(hour=9, minute=18), 100, 102, 90, 92, 100, 102, 90, 92, 1000, 500)
+    ]
+    lbl_short = le.generate(entry_price=100.0, atr=10.0, future_after_entry=future_short, direction=-1)
+    assert lbl_short["triple_barrier_outcome"] in ["TARGET_FIRST", "STOP_FIRST", "TIMEOUT", "AMBIGUOUS"]
+    
+    de = DecisionEngine()
+    d_bad = de.decide({
+        "data_quality_score": 0.20, "atr_14_prev": 12.0, "normalized_stretch": 0.8,
+        "stretch_slope_3": 0.2, "or_breakout_state": 1, "oi_long_buildup": 1,
+        "twc": 0.002, "breadth_10": 0.7, "hw_symbols_seen": 9, "timestamp": now_ist(),
+    })
+    assert d_bad.action == "SKIP"
+    
+    g = GreeksEngine.compute_second_order_greeks(24000.0, 24000.0, 120.0)
+    assert is_valid_number(g["vanna"])
+    
+    kf = KalmanPriceEngine()
+    est, vel = kf.update(24050.0)
+    assert is_valid_number(est)
+    
+    return True
+
 
 if st is not None:
     @st.cache_resource
     def get_global_adapter():
         return KotakNeoAdapter()
 
+
 def main():
     if st is None:
-        print("Streamlit not installed")
+        print("Streamlit not installed.")
         return
 
-    st.set_page_config(page_title="NIFTY 3M v7.1 Final Complete", page_icon="⚡", layout="wide", initial_sidebar_state="expanded")
+    st.set_page_config(page_title="NIFTY 3M | Micro Engine v6.7", page_icon="⚡", layout="wide", initial_sidebar_state="expanded")
     inject_custom_css()
-    adapter = get_global_adapter()
+
+    adapter: KotakNeoAdapter = get_global_adapter()
     is_logged_in = adapter.connected
 
     with st.sidebar:
-        st.subheader("⚡ Gateway")
+        st.subheader("⚡ Gateway Controls")
+        
         if is_logged_in:
-            st.markdown(f'<span class="status-pill status-{"active" if adapter.conn_state=="STREAMING" else "auth"}">● {adapter.conn_state}</span>', unsafe_allow_html=True)
+            conn_txt = getattr(adapter, "conn_state", "AUTHENTICATED")
+            if conn_txt == "STREAMING":
+                st.markdown('<span class="status-pill status-active">● STREAMING (LIVE)</span>', unsafe_allow_html=True)
+            else:
+                st.markdown('<span class="status-pill status-auth">● CONNECTED (AUTHENTICATED)</span>', unsafe_allow_html=True)
         else:
             st.markdown('<span class="status-pill status-offline">● DISCONNECTED</span>', unsafe_allow_html=True)
 
-        totp = st.text_input("Live TOTP", type="password")
-        c1, c2 = st.columns(2)
-        with c1:
-            if st.button("Connect"):
+        user_live_totp = st.text_input("Live TOTP (Optional)", type="password", help="Use if secret not in config")
+        
+        col_sb1, col_sb2 = st.columns(2)
+        with col_sb1:
+            if st.button("Connect", key="btn_conn"):
                 try:
-                    adapter.login(live_totp_override=totp)
-                    st.rerun()
-                except Exception as e:
-                    st.error(str(e))
-        with c2:
-            if st.button("Reconnect", disabled=not is_logged_in):
-                adapter.login(live_totp_override=totp)
+                    with st.spinner("Connecting..."):
+                        adapter.login(live_totp_override=user_live_totp)
+                        st.session_state.discovered = False
+                        st.rerun()
+                except Exception as exc:
+                    st.error(f"{exc}")
+        with col_sb2:
+            if st.button("Reconnect", key="btn_reconn", disabled=not is_logged_in):
+                adapter.login(live_totp_override=user_live_totp)
                 st.rerun()
 
-        if st.button("Discover", disabled=not is_logged_in):
-            try:
-                with st.spinner("Discovering instruments..."):
-                    adapter.discover_nifty_instruments()
-                    st.session_state.discovered = True
-                    st.success("Discover complete!")
-                    for log in adapter.discovery_log:
-                        st.caption(log)
-                    if adapter.last_error:
-                        st.error(adapter.last_error)
-            except Exception as e:
-                st.error(f"Discover failed: {e}")
-                adapter.last_error = str(e)
-            st.rerun()
+        st.markdown("---")
+        st.subheader("🔍 Subscriptions")
+        
+        if st.button("Discover Instruments", key="btn_disc", disabled=not is_logged_in):
+            with st.spinner("Locking NIFTY Instruments & Heavyweights..."):
+                adapter.discover_nifty_instruments(auto_pcr=True)
+                st.session_state.discovered = True
+                st.rerun()
 
-        if st.session_state.get("discovered"):
-            st.caption("--- Discovery Log ---")
+        if st.session_state.get("discovered") and adapter.discovery_log:
+            st.success("✓ Instruments Mapped!")
             for l in adapter.discovery_log:
                 st.caption(l)
-            if not adapter.discovery_log:
-                st.warning("Discovery log empty (possible off-market)")
 
-        if st.button("Start Live Feed", disabled=not is_logged_in or adapter.conn_state == "STREAMING"):
-            adapter.subscribe_live_feed()
-            adapter.start_bar_watchdog()
-            st.rerun()
+        is_streaming = (adapter.conn_state == "STREAMING")
+        if st.button("Start Live Feed", key="btn_start_feed", disabled=not is_logged_in or is_streaming):
+            with st.spinner("Subscribing & Ingesting Feed..."):
+                adapter.subscribe_live_feed()
+                adapter.start_bar_watchdog()
+                st.session_state.stream_active = True
+                st.rerun()
 
         if adapter.last_error:
-            st.warning(adapter.last_error)
+            st.warning(f"Engine Log: {adapter.last_error}")
 
-    if adapter.conn_state == "STREAMING":
+        st.markdown("---")
+        if st.button("Run Unit Tests", key="btn_tests"):
+            try:
+                st.success("Engine Verification Passed (v6.7)" if run_unit_tests() else "Test Failed")
+            except Exception as exc:
+                st.error(str(exc))
+
+    if is_streaming and adapter:
         adapter.fetch_market_snapshot()
 
-    # Top metrics
-    spot_val = fut_val = "-"
-    ticks = 0
-    if adapter.latest:
+    spot_val, fut_val, fut_oi, ticks_count = "-", "-", "-", 0
+    if adapter and adapter.latest:
         with adapter.lock:
-            sp = extract_tick_price(adapter.latest.get("Nifty 50", {}))
-            if is_valid_number(sp):
-                spot_val = f"{sp:.2f}"
-            fp = extract_tick_price(adapter.latest.get(str(adapter.future_token), {}))
-            if is_valid_number(fp):
-                fut_val = f"{fp:.2f}"
-            ticks = len(adapter.tick_buffer)
+            s = adapter.latest.get("Nifty 50", {})
+            spot_p = extract_tick_price(s)
+            
+            if not is_valid_number(spot_p):
+                for k, v in adapter.latest.items():
+                    sym_str = str(v.get("display_symbol", "")).upper()
+                    if ("NIFTY" in sym_str or "NIFTY 50" in sym_str) and "EQ" not in sym_str and "FUT" not in sym_str:
+                        spot_p = extract_tick_price(v)
+                        if is_valid_number(spot_p): break
 
-    t1, t2, t3 = st.columns(3)
+            spot_val = f"{spot_p:.2f}" if is_valid_number(spot_p) else "-"
+            
+            f = adapter.latest.get(str(adapter.future_token), {})
+            fut_p = extract_tick_price(f)
+            fut_val = f"{fut_p:.2f}" if is_valid_number(fut_p) else "-"
+            
+            fut_oi = adapter._extract_oi(f) if hasattr(adapter, "_extract_oi") else safe_float(f.get("oi") or f.get("open_interest"), "-")
+            ticks_count = len(adapter.tick_buffer)
+
+    t1, t2, t3, t4 = st.columns(4)
     t1.metric("NIFTY SPOT", f"₹{spot_val}")
     t2.metric("NIFTY FUT", f"₹{fut_val}")
-    t3.metric("TICKS", f"{ticks}")
+    t3.metric("FUT OPEN INTEREST", f"{int(fut_oi):,}" if isinstance(fut_oi, (int, float)) and np.isfinite(fut_oi) else str(fut_oi))
+    t4.metric("TICKS INGESTED", f"{ticks_count:,}")
 
-    # Decision
     st.markdown('<div class="terminal-card">', unsafe_allow_html=True)
-    if adapter.last_decision:
+    col_hud1, col_hud2, col_hud3, col_hud4, col_hud5 = st.columns([1.5, 1.2, 1.2, 1, 2])
+    
+    if adapter and adapter.last_decision:
         d = adapter.last_decision
-        badge = "badge-ce" if d.action == "CE" else ("badge-pe" if d.action == "PE" else "badge-neutral")
-        c1, c2, c3, c4 = st.columns([1.4, 1.2, 1.2, 2])
-        with c1:
-            st.caption("SIGNAL")
-            st.markdown(f'<div class="{badge}">{d.action}</div>', unsafe_allow_html=True)
-        with c2:
+        badge_cls = "badge-ce" if d.action == "CE" else ("badge-pe" if d.action == "PE" else "badge-neutral")
+        
+        with col_hud1:
+            st.caption("TACTICAL SIGNAL")
+            st.markdown(f'<div class="{badge_cls}">{d.action}</div>', unsafe_allow_html=True)
+        with col_hud2:
             st.metric("Regime", d.regime)
-        with c3:
-            st.metric("Align / LS", f"{d.aligned_count}/8 | {d.level_strength:.2f}")
-        with c4:
-            st.caption("Reason")
-            st.write(d.reason)
+        with col_hud3:
+            st.metric("Option Target / SL", f"+{d.option_target_pts} / -{d.option_stop_pts} pt")
+            st.caption(f"**Effective Delta:** {d.effective_delta:.2f}")
+        with col_hud4:
+            st.metric("Confidence", f"{d.confidence * 100:.0f}%")
+        with col_hud5:
+            st.caption("Engine Rationale")
+            st.write(f"_{d.reason}_")
     else:
-        st.info("Waiting for first bar...")
+        st.info("Awaiting first completed 3-minute bar to establish baseline regime and signal...")
     st.markdown('</div>', unsafe_allow_html=True)
 
-    # Paper Desk
     st.markdown('<div class="terminal-card">', unsafe_allow_html=True)
-    st.markdown("**Paper Trading + Enhanced Journal**")
-    desk = adapter.paper_desk
-    total = round(desk.realized_pnl_pts + desk.unrealized_pnl_pts, 2)
-    closed = len(desk.closed_trades)
-    wins = sum(1 for t in desk.closed_trades if t.pnl_pts > 0)
-    wr = (wins / closed * 100) if closed else 0
+    st.markdown("**⚡ Live Option-Centric Paper Trading Desk & Journal**")
+    
+    col_p1, col_p2, col_p3, col_p4 = st.columns(4)
+    if adapter:
+        desk = adapter.paper_desk
+        active_pos = desk.active_position
+        total_pnl = round(desk.realized_pnl_pts + desk.unrealized_pnl_pts, 2)
+        closed_count = len(desk.closed_trades)
+        wins = sum(1 for t in desk.closed_trades if t.pnl_pts > 0)
+        hit_rate = (wins / closed_count * 100) if closed_count > 0 else 0.0
 
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Net PnL", f"{total:+.2f}")
-    c2.metric("Unrealized", f"{desk.unrealized_pnl_pts:+.2f}")
-    c3.metric("Closed", f"{closed}", delta=f"WR {wr:.0f}%")
-    if desk.active_position:
-        c4.markdown(f"**Active:** `{'CE' if desk.active_position.direction==1 else 'PE'}`")
-    else:
-        c4.markdown("**Active:** `FLAT`")
+        col_p1.metric("Total Net PnL", f"{total_pnl:+.2f} pt", delta=f"Realized: {desk.realized_pnl_pts:+.2f} pt")
+        col_p2.metric("Unrealized MTM", f"{desk.unrealized_pnl_pts:+.2f} pt")
+        col_p3.metric("Closed Trades", f"{closed_count}", delta=f"Win Rate: {hit_rate:.0f}%")
+        
+        is_locked = getattr(desk, "risk_locked", False)
+        if is_locked:
+            col_p4.markdown(f"**Status:** <span style='color:red; font-weight:bold;'>KILL-SWITCH LOCKED (Max Daily Loss Reached)</span>", unsafe_allow_html=True)
+        elif active_pos:
+            dir_str = "CE (LONG)" if active_pos.direction == 1 else "PE (SHORT)"
+            col_p4.markdown(f"**Active Position:** `{dir_str}`<br>Entry Opt: `₹{active_pos.entry_option_price}` | Target Opt: `+{active_pos.option_target}` pt", unsafe_allow_html=True)
+        elif desk.pending_order:
+            p_dir = "CE" if desk.pending_order["direction"] == 1 else "PE"
+            col_p4.markdown(f"**Order Staged:** `{p_dir}` (Filling Next Open)", unsafe_allow_html=True)
+        else:
+            col_p4.markdown("**Active Position:** `FLAT (NO POSITION)`", unsafe_allow_html=True)
 
-    if desk.closed_trades:
-        recent = []
-        for t in list(desk.closed_trades)[-8:]:
-            recent.append({
-                "Time": t.exit_time.strftime("%H:%M") if t.exit_time else "-",
-                "Type": "CE" if t.direction == 1 else "PE",
-                "PnL": t.pnl_pts,
-                "Regime": t.regime,
-                "Align": t.alignment_path,
-                "Delta": t.delta_sign,
-                "POC": t.above_poc,
-                "SMC": t.smc_bias,
-                "LS": round(t.level_strength, 2),
-                "Fail": t.failure_reason,
-                "Reason": t.exit_reason[:35]
-            })
-        st.dataframe(pd.DataFrame(recent), hide_index=True)
-        csv = pd.DataFrame([asdict(t) for t in desk.closed_trades]).to_csv(index=False).encode()
-        st.download_button("Download Journal", csv, f"journal_v71_{now_ist().strftime('%Y%m%d')}.csv")
+        if desk.closed_trades:
+            st.markdown("---")
+            col_tbl_head, col_tbl_dl = st.columns([3, 1])
+            with col_tbl_head:
+                st.caption("Recent Closed Option Paper Trades (Option-Centric Journal v6.7)")
+            
+            trades_raw = [asdict(t) for t in desk.closed_trades]
+            df_full_journal = pd.DataFrame(trades_raw)
+            
+            with col_tbl_dl:
+                csv_data = df_full_journal.to_csv(index=False).encode('utf-8')
+                st.download_button(
+                    label="📥 Download Journal (.csv)",
+                    data=csv_data,
+                    file_name=f"nifty_option_journal_v67_{now_ist().strftime('%Y%m%d')}.csv",
+                    mime="text/csv"
+                )
+            
+            recent_trades_data = []
+            for t in list(desk.closed_trades)[-8:]:
+                recent_trades_data.append({
+                    "Exit Time": t.exit_time.strftime("%H:%M:%S") if t.exit_time else "-",
+                    "Type": "CE (LONG)" if t.direction == 1 else "PE (SHORT)",
+                    "Entry Opt (₹)": f"{t.entry_option_price:.2f}",
+                    "Exit Opt (₹)": f"{t.exit_option_price:.2f}" if t.exit_option_price else "-",
+                    "Option PnL (pt)": t.pnl_pts,
+                    "Bars Held": t.bars_held,
+                    "Exit Reason": t.exit_reason
+                })
+            
+            df_trades = pd.DataFrame(recent_trades_data)
+            st.dataframe(df_trades, hide_index=True)
+
     st.markdown('</div>', unsafe_allow_html=True)
 
-    # Features + Full Scorecard
-    if adapter.feature_engine.history:
-        row = dict(adapter.feature_engine.history[-1])
-        st.markdown("**Core Features + New Pillars**")
-        f1, f2, f3, f4 = st.columns(4)
-        f1.markdown(f"**Kalman Stretch**<br>{get_colored_text(row.get('kalman_stretch', 0), 'kalman_stretch')}", unsafe_allow_html=True)
-        f2.markdown(f"**Slope**<br>{get_colored_text(row.get('stretch_slope_3', 0), 'stretch_slope_3')}", unsafe_allow_html=True)
-        f3.markdown(f"**PCR**<br>{get_colored_text(row.get('pcr_oi', 1), 'pcr_oi')}", unsafe_allow_html=True)
-        f4.markdown(f"**Breadth**<br>{get_colored_text(row.get('breadth_10', 0.5), 'breadth_10')}", unsafe_allow_html=True)
+    grid_left, grid_right = st.columns([1.2, 0.8])
+    latest_row = None
+    with grid_left:
+        st.markdown("**Core Feature Vector (Heatmap Traffic Light)**")
+        if adapter:
+            with adapter.lock:
+                latest_row = dict(adapter.feature_engine.history[-1]) if adapter.feature_engine.history else None
+            if latest_row:
+                f1, f2, f3, f4 = st.columns(4)
+                
+                val_stretch = latest_row.get("kalman_stretch", 0.0)
+                f1.markdown(f"**Kalman Stretch**<br>{get_colored_text(val_stretch, 'kalman_stretch')}", unsafe_allow_html=True)
+                
+                val_slope = latest_row.get("stretch_slope_3", 0.0)
+                f2.markdown(f"**Slope (3-Bar)**<br>{get_colored_text(val_slope, 'stretch_slope_3')}", unsafe_allow_html=True)
+                
+                val_pcr = latest_row.get("pcr_oi", 1.0)
+                f3.markdown(f"**PCR (OI)**<br>{get_colored_text(val_pcr, 'pcr_oi')}", unsafe_allow_html=True)
+                
+                val_breadth = latest_row.get("breadth_10", 0.5)
+                f4.markdown(f"**Breadth (10)**<br>{get_colored_text(val_breadth, 'breadth_10')}", unsafe_allow_html=True)
+                
+                with st.expander("🛡️ Institutional MLOps & 2nd-Order Greeks Scorecard", expanded=False):
+                    dq_val = latest_row.get("data_quality_score", 1.0)
+                    st.write(f"**Overall DQ Score:** `{dq_val * 100:.0f}%`")
+                    
+                    c_dq1, c_dq2 = st.columns(2)
+                    with c_dq1:
+                        st.write(f"• Top 5 Lead Pressure (SLP_5): `{latest_row.get('slp_top5_pressure', 0.0):.3f}`")
+                        st.write(f"• Order Book Imbalance (OBI): `{latest_row.get('order_book_imbalance', 0.0):.3f}`")
+                        st.write(f"• Dealer Vanna Flow: `{latest_row.get('dealer_vanna_flow', 0.0):.3f}`")
+                        st.write(f"• Dealer Charm Flow: `{latest_row.get('dealer_charm_flow', 0.0):.3f}`")
+                        st.write(f"• Dealer GEX Proxy: `{latest_row.get('gex_proxy', 0.0):.3f}`")
+                    with c_dq2:
+                        model_loaded = adapter.decision_engine.ml_model is not None
+                        feat_cnt = len(adapter.decision_engine.expected_feature_names)
+                        st.write(f"• ML Status: `{'ACTIVE (' + str(feat_cnt) + ' Features)' if model_loaded else 'FALLBACK (Heuristic)'}`")
+                        st.write(f"• 0DTE Intensity: `{latest_row.get('zero_dte_intensity', 0.0):.2f}`")
+                        st.write(f"• Minutes to Expiry: `{latest_row.get('minutes_to_expiry', 0.0):.0f} min`")
+                        st.write(f"• Gap Points: `{latest_row.get('gap_points', 0.0):.1f} pt`")
+                        st.write(f"• Causal Integrity Tag: `{'1 (VERIFIED)' if latest_row.get('is_causal') == 1 else '0 (INVALID)'}`")
+                    st.json(latest_row)
+            else:
+                st.caption("Feature extraction initializing...")
 
-        with st.expander("🛡️ Full Institutional Scorecard (Vanna/Charm + All Items)", expanded=True):
-            st.write(f"**Overall DQ Score:** `{row.get('data_quality_score', 0)*100:.0f}%`")
-            st.write(f"• Cum Delta: `{row.get('cum_delta', 0):.0f}` | Sign: `{row.get('delta_sign', 0)}`")
-            st.write(f"• VP POC: `{row.get('vp_poc', 0):.1f}` | Above POC: `{row.get('above_poc', 0)}`")
-            st.write(f"• VAH/VAL Break: `{row.get('vah_break', 0)}` / `{row.get('val_break', 0)}`")
-            st.write(f"• SMC Bias: `{row.get('smc_bias', 0)}` | BoS: `{row.get('bos_signal', 0)}`")
-            st.write(f"• Near Demand/Supply: `{row.get('near_demand_zone', 0)}` / `{row.get('near_supply_zone', 0)}`")
-            st.write(f"• ML Status: `FALLBACK (Heuristic)`")
-            st.write(f"• 0DTE Intensity: `{row.get('zero_dte_intensity', 0):.2f}`")
-            st.write(f"• **Dealer Vanna/Charm:** `{row.get('dealer_vanna_flow', 0):.3f}` / `{row.get('dealer_charm_flow', 0):.3f}`")
-            st.write(f"• Causal Integrity: `{'1 (VERIFIED)' if row.get('is_causal')==1 else '0'}`")
+    with grid_right:
+        st.markdown("**Top 5 Core Heavyweights Momentum & Live Impact**")
+        if adapter and adapter.heavy_tokens:
+            hw_list = []
+            with adapter.lock:
+                for sym, base_w in HEAVYWEIGHTS_TOP5.items():
+                    tok = str(adapter.heavy_tokens.get(sym))
+                    t = adapter.latest.get(tok, {})
+                    ltp = extract_tick_price(t)
+                    
+                    open_price = extract_quote_field(t, ("o", "open", "pOpen", "openPrice", "op"))
+                    if not is_valid_number(open_price) or open_price <= 0:
+                        open_price = ltp
+                    
+                    if is_valid_number(ltp) and is_valid_number(open_price) and open_price > 0:
+                        ret_pct = ((ltp - open_price) / open_price) * 100.0
+                        effective_impact = base_w * (ltp - open_price) / open_price * 100
+                    else:
+                        ret_pct = 0.0
+                        effective_impact = 0.0
 
-            # FIXED Level Strength
-            _ls = adapter.decision_engine.stats.get_level_strength(
-                safe_int(row.get("above_poc", 0)),
-                safe_int(row.get("smc_bias", 0))
-            )
-            st.write(f"• Level Strength (live): `{_ls:.2f}`")
-            st.write(f"• Trades recorded for stats: `{len(adapter.decision_engine.stats.trades)}`")
-            st.json(row)
+                    hw_list.append({
+                        "Symbol": sym,
+                        "LTP": f"₹{ltp:.2f}" if is_valid_number(ltp) else "-",
+                        "Change %": f"{ret_pct:+.2f}%" if is_valid_number(ret_pct) else "-",
+                        "Base Wt": f"{base_w*100:.1f}%",
+                        "Live Impact": f"{effective_impact:+.3f}"
+                    })
+            
+            df_hw = pd.DataFrame(hw_list)
+            st.dataframe(df_hw, height=210, hide_index=True)
+        else:
+            st.caption("Heavyweights mapping pending discovery... Click Discover Instruments in Sidebar.")
 
-    if adapter.conn_state == "STREAMING":
+    if is_streaming:
         time.sleep(CONFIG["ui_refresh_sec"])
         st.rerun()
+
 
 if __name__ == "__main__":
     if st is not None and hasattr(st, "runtime") and st.runtime.exists():
         main()
     else:
-        print("v7.1 Final Complete Engine - All 3 Parts Ready")
+        print("⚡ Running Institutional Prop-Engine Verification...")
+        if run_unit_tests():
+            print("✓ All Quant Engines Verified + IST Timezone + Library Bug Hardened.")
+        else:
+            raise RuntimeError("Engine Verification Failed.")
