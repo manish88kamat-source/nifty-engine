@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-NIFTY 3-Min Micro Engine | v6.8 Institutional Prop-Grade Architecture
+NIFTY 3-Min Micro Engine | v6.8.1 Institutional Prop-Grade Architecture
 DATA-COLLECTION READY & OPTION-CENTRIC DESK:
 - Price action, Kalman filter, ATR, and slope strictly use Future (fut_vwap / fut_c).
 - PCR, OI changes, Greeks (Vanna/Charm), and GEX strictly use Option Chain (22 strikes).
 - Integrated Heikin Ashi, SuperTrend, Hilega Milega, Live Heavyweight Impact Desk,
-  and Two-Way Dynamic Indicator Alignment Target Stretching & Journal Logging.
+  Two-Way Dynamic Indicator Alignment Target Stretching, and Safe UI Getattr Fallbacks.
 """
 
 from __future__ import annotations
@@ -69,7 +69,7 @@ def to_ist(dt: datetime) -> datetime:
 # =========================================================
 
 CONFIG = {
-    "app_version": "v6.8_institutional_prop",
+    "app_version": "v6.8.1_institutional_prop",
     "feature_version": "v5.5_data_collection_ready",
     "label_version": "TB_v3.0_clean",
     "schema_version": "4.1",
@@ -1334,7 +1334,7 @@ class DecisionEngine:
             return TradeDecision(
                 action="SKIP", regime="TIME_GUARD_ACTIVE",
                 reason=f"Time guard active: Cutoff reached ({cutoff_hour}:{cutoff_min:02d})",
-                timestamp=feats.get("timestamp"), decision_timestamp=now_ts
+                timestamp=feats.get("timestamp"), decision_timestamp=now_ts, aligned_count=3
             )
 
         regime = self.regime_engine.detect(feats)
@@ -1344,7 +1344,7 @@ class DecisionEngine:
             return TradeDecision(
                 action="SKIP", regime=regime,
                 reason="Data quality low / warmup pending",
-                timestamp=feats.get("timestamp"), decision_timestamp=now_ts
+                timestamp=feats.get("timestamp"), decision_timestamp=now_ts, aligned_count=3
             )
 
         atr = safe_float(feats.get("atr_14_prev"), 15.0)
@@ -1502,7 +1502,7 @@ class PaperTradingDesk:
                 "effective_delta": decision.effective_delta,
                 "size": decision.size_factor,
                 "regime": decision.regime,
-                "aligned_count": decision.aligned_count,
+                "aligned_count": getattr(decision, "aligned_count", 3),
             }
 
     def on_bar_open_fill(self, candle: Candle3Min, atr: float):
@@ -1551,14 +1551,12 @@ class PaperTradingDesk:
         pos = self.active_position
         pos.bars_held += 1
         
-        # Track alignment path & peak strength dynamically
         last_recorded = int(pos.alignment_path.split(" -> ")[-1])
         if current_aligned_count != last_recorded:
             pos.alignment_path += f" -> {current_aligned_count}"
 
         if current_aligned_count > pos.peak_aligned_count:
             pos.peak_aligned_count = current_aligned_count
-            # TWO-WAY SCENARIO A: Momentum Strengths up (4 or 5) -> Extend Target
             if current_aligned_count >= 4:
                 pos.option_target = round(pos.option_target * 1.30, 1)
 
@@ -1577,7 +1575,6 @@ class PaperTradingDesk:
 
         pos.max_favorable_pts = max(pos.max_favorable_pts, option_high_pnl)
 
-        # TWO-WAY SCENARIO B: Profit Lock (10+ pts profit seen -> Risk-free stop)
         if pos.max_favorable_pts >= 10.0 and pos.option_stop > 0.5:
             pos.option_stop = 0.5  
 
@@ -1586,7 +1583,6 @@ class PaperTradingDesk:
         hit_target = option_high_pnl >= pos.option_target
         hit_stop = option_low_pnl <= -pos.option_stop
         
-        # TWO-WAY SCENARIO C: Momentum Fade Exit (Good profit seen but alignment dropped to 1 or 0)
         momentum_fade = (pos.max_favorable_pts >= 8.0 and current_aligned_count <= 1)
 
         self.check_total_risk_limit()
@@ -2186,7 +2182,6 @@ class KotakNeoAdapter:
             decision = self.decision_engine.decide(feats)
             self.last_decision = decision
 
-            # Calculate current indicator alignment count for live tracking
             signals = self.decision_engine._get_high_priority_signals(decision.regime, feats)
             current_aligned_count = max(sum(1 for s in signals if s == 1), sum(1 for s in signals if s == -1))
 
@@ -2366,7 +2361,7 @@ def main():
         print("Streamlit not installed.")
         return
 
-    st.set_page_config(page_title="NIFTY 3M | Micro Engine v6.8", page_icon="⚡", layout="wide", initial_sidebar_state="expanded")
+    st.set_page_config(page_title="NIFTY 3M | Micro Engine v6.8.1", page_icon="⚡", layout="wide", initial_sidebar_state="expanded")
     inject_custom_css()
 
     adapter: KotakNeoAdapter = get_global_adapter()
@@ -2429,7 +2424,7 @@ def main():
         st.markdown("---")
         if st.button("Run Unit Tests", key="btn_tests"):
             try:
-                st.success("Engine Verification Passed (v6.8)" if run_unit_tests() else "Test Failed")
+                st.success("Engine Verification Passed (v6.8.1)" if run_unit_tests() else "Test Failed")
             except Exception as exc:
                 st.error(str(exc))
 
@@ -2469,21 +2464,31 @@ def main():
     
     if adapter and adapter.last_decision:
         d = adapter.last_decision
-        badge_cls = "badge-ce" if d.action == "CE" else ("badge-pe" if d.action == "PE" else "badge-neutral")
+        # Safe attribute extraction preventing any AttributeError from cache mismatch
+        action_val = getattr(d, 'action', 'SKIP')
+        regime_val = getattr(d, 'regime', 'NEUTRAL')
+        opt_target = getattr(d, 'option_target_pts', 0.0)
+        opt_stop = getattr(d, 'option_stop_pts', 0.0)
+        eff_delta = getattr(d, 'effective_delta', 0.52)
+        align_cnt = getattr(d, 'aligned_count', 3)
+        conf_val = getattr(d, 'confidence', 0.5)
+        reason_val = getattr(d, 'reason', '')
+
+        badge_cls = "badge-ce" if action_val == "CE" else ("badge-pe" if action_val == "PE" else "badge-neutral")
         
         with col_hud1:
             st.caption("TACTICAL SIGNAL")
-            st.markdown(f'<div class="{badge_cls}">{d.action}</div>', unsafe_allow_html=True)
+            st.markdown(f'<div class="{badge_cls}">{action_val}</div>', unsafe_allow_html=True)
         with col_hud2:
-            st.metric("Regime", d.regime)
+            st.metric("Regime", regime_val)
         with col_hud3:
-            st.metric("Option Target / SL", f"+{d.option_target_pts} / -{d.option_stop_pts} pt")
-            st.caption(f"**Effective Delta:** {d.effective_delta:.2f} | **Align:** {d.aligned_count}/5")
+            st.metric("Option Target / SL", f"+{opt_target} / -{opt_stop} pt")
+            st.caption(f"**Effective Delta:** {eff_delta:.2f} | **Align:** {align_cnt}/5")
         with col_hud4:
-            st.metric("Confidence", f"{d.confidence * 100:.0f}%")
+            st.metric("Confidence", f"{conf_val * 100:.0f}%")
         with col_hud5:
             st.caption("Engine Rationale")
-            st.write(f"_{d.reason}_")
+            st.write(f"_{reason_val}_")
     else:
         st.info("Awaiting first completed 3-minute bar to establish baseline regime and signal...")
     st.markdown('</div>', unsafe_allow_html=True)
@@ -2509,7 +2514,7 @@ def main():
             col_p4.markdown(f"**Status:** <span style='color:red; font-weight:bold;'>KILL-SWITCH LOCKED (Max Daily Loss Reached)</span>", unsafe_allow_html=True)
         elif active_pos:
             dir_str = "CE (LONG)" if active_pos.direction == 1 else "PE (SHORT)"
-            col_p4.markdown(f"**Active Position:** `{dir_str}`<br>Entry Opt: `₹{active_pos.entry_option_price}` | Target: `+{active_pos.option_target}` pt<br>Align Journey: `{active_pos.alignment_path}`", unsafe_allow_html=True)
+            col_p4.markdown(f"**Active Position:** `{dir_str}`<br>Entry Opt: `₹{active_pos.entry_option_price}` | Target: `+{active_pos.option_target}` pt<br>Align Journey: `{getattr(active_pos, 'alignment_path', '3')}`", unsafe_allow_html=True)
         elif desk.pending_order:
             p_dir = "CE" if desk.pending_order["direction"] == 1 else "PE"
             col_p4.markdown(f"**Order Staged:** `{p_dir}` (Filling Next Open)", unsafe_allow_html=True)
@@ -2520,7 +2525,7 @@ def main():
             st.markdown("---")
             col_tbl_head, col_tbl_dl = st.columns([3, 1])
             with col_tbl_head:
-                st.caption("Recent Closed Option Paper Trades (Option-Centric Journal v6.8 with Alignment Journey)")
+                st.caption("Recent Closed Option Paper Trades (Option-Centric Journal v6.8.1 with Alignment Journey)")
             
             trades_raw = [asdict(t) for t in desk.closed_trades]
             df_full_journal = pd.DataFrame(trades_raw)
@@ -2530,7 +2535,7 @@ def main():
                 st.download_button(
                     label="📥 Download Journal (.csv)",
                     data=csv_data,
-                    file_name=f"nifty_option_journal_v68_{now_ist().strftime('%Y%m%d')}.csv",
+                    file_name=f"nifty_option_journal_v681_{now_ist().strftime('%Y%m%d')}.csv",
                     mime="text/csv"
                 )
             
@@ -2542,7 +2547,7 @@ def main():
                     "Entry Opt (₹)": f"{t.entry_option_price:.2f}",
                     "Exit Opt (₹)": f"{t.exit_option_price:.2f}" if t.exit_option_price else "-",
                     "Option PnL (pt)": t.pnl_pts,
-                    "Align Path (Start -> Peak -> Exit)": t.alignment_path,
+                    "Align Path (Start -> Peak -> Exit)": getattr(t, 'alignment_path', '3'),
                     "Exit Reason": t.exit_reason
                 })
             
@@ -2641,6 +2646,6 @@ if __name__ == "__main__":
     else:
         print("⚡ Running Institutional Prop-Engine Verification...")
         if run_unit_tests():
-            print("✓ All Quant Engines Verified + IST Timezone + Two-Way Alignment Hardened.")
+            print("✓ All Quant Engines Verified + IST Timezone + Safe UI Getattr Hardened.")
         else:
             raise RuntimeError("Engine Verification Failed.")
