@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """
-NIFTY 3-Min Micro Engine | v7.1 Full Verbose Complete Version
-PART 1 of 2
-
-Is version mein sab kuch detailed + verbose + full comments + full safety checks hain.
-Pehle wale 3000-line feel ke liye banaya gaya hai.
+NIFTY 3-Min Micro Engine | v7.1 Full Complete (Bug Fixed)
+- Two-Way Reversal included
+- Full Scorecard (Vanna/Charm + All)
+- Enhanced Journal + Level Strength
+- Cum Delta + Volume Profile + SMC
+- Time Guard + Alignment fixes
+- Level Strength TypeError fixed
 """
 
 from __future__ import annotations
@@ -21,7 +23,7 @@ import base64
 import threading
 from collections import deque, defaultdict
 from dataclasses import dataclass, field, asdict
-from datetime import datetime, timedelta, date, timezone
+from datetime import datetime, timedelta, date
 from pathlib import Path
 from typing import Dict, List, Optional, Any, Tuple
 from zoneinfo import ZoneInfo
@@ -46,9 +48,6 @@ try:
 except ImportError:
     NeoAPI = None
 
-# =========================================================
-# TIMEZONE - FORCE IST EVERYWHERE
-# =========================================================
 IST = ZoneInfo("Asia/Kolkata")
 
 def now_ist() -> datetime:
@@ -61,11 +60,8 @@ def to_ist(dt: datetime) -> datetime:
         return dt.replace(tzinfo=IST)
     return dt.astimezone(IST)
 
-# =========================================================
-# CONFIGURATION - FULL DETAILED
-# =========================================================
 CONFIG = {
-    "app_version": "v7.1_full_verbose",
+    "app_version": "v7.1_full_complete_fixed",
     "feature_version": "v6.2_full_ui_stats",
     "label_version": "TB_v3.0_clean",
     "schema_version": "4.3",
@@ -76,11 +72,7 @@ CONFIG = {
     "triple_lower_atr": 0.75,
     "time_barrier_min": 30,
     "mfe_horizons_min": [15, 30, 45],
-    "max_label_horizon_min": 45,
-    "purge_bars": 15,
-    "embargo_bars": 5,
     "opening_range_minutes": 15,
-    "atr_mode": "session_local",
     "execution_model": "next_bar_open",
     "session_start": "09:15",
     "session_end": "15:30",
@@ -88,19 +80,13 @@ CONFIG = {
     "dataset_path": "./nifty_3min_dataset",
     "model_path": "./model/nifty_lgbm_latest.joblib",
     "neo_environment": "prod",
-    "nifty_index_name": "Nifty 50",
     "nifty_spot_token": "Nifty 50",
     "nifty_future_token": os.getenv("NIFTY_FUT_TOKEN", "").strip(),
     "pcr_strike_count": int(os.getenv("PCR_STRIKE_COUNT", "5")),
     "pcr_strike_step": float(os.getenv("PCR_STRIKE_STEP", "50")),
     "min_data_quality_to_trade": 0.45,
-    "signal_min_hold_bars": 2,
     "ui_refresh_sec": 3,
-    "bar_close_grace_sec": 2,
     "session_end_flush": True,
-    "hw_max_quote_age_sec": 240,
-    "hw_min_symbols_required": 5,
-    "feed_silence_sec": 60,
     "base_delta": 0.52,
     "base_slippage_pts": 0.35,
     "option_exit_spread_penalty": 0.65,
@@ -111,51 +97,26 @@ CONFIG = {
     "vp_tick_size": 1.0,
     "bos_lookback": 8,
     "fvg_min_gap_atr": 0.25,
-    "min_aligned_for_entry": 3,                    # Paper trading ke liye 3
-    "time_guard_non_expiry": (15, 20),             # 15:20 tak allow
+    "min_aligned_for_entry": 3,
+    "time_guard_non_expiry": (15, 20),
     "time_guard_expiry": (15, 25),
     "stats_min_trades_for_strength": 30,
     "dq_weights": {
-        "missing_future": 0.25,
-        "missing_spot": 0.20,
-        "bad_ohlc": 0.15,
-        "missing_oi": 0.10,
-        "zero_oi": 0.05,
-        "missing_volume": 0.08,
-        "zero_volume": 0.05,
-        "missing_option_chain": 0.08,
-        "missing_heavyweight": 0.04,
+        "missing_future": 0.25, "missing_spot": 0.20, "bad_ohlc": 0.15,
+        "missing_oi": 0.10, "zero_oi": 0.05, "missing_volume": 0.08,
+        "zero_volume": 0.05, "missing_option_chain": 0.08, "missing_heavyweight": 0.04,
     },
 }
 
-HEAVYWEIGHTS_TOP5 = {
-    "HDFCBANK": 0.115,
-    "RELIANCE": 0.098,
-    "ICICIBANK": 0.080,
-    "INFY": 0.058,
-    "ITC": 0.042,
-}
-
-HEAVYWEIGHTS_ALL = {
-    **HEAVYWEIGHTS_TOP5,
-    "TCS": 0.040, "LT": 0.038, "AXISBANK": 0.033,
-    "KOTAKBANK": 0.029, "SBIN": 0.028,
-}
-
+HEAVYWEIGHTS_TOP5 = {"HDFCBANK": 0.115, "RELIANCE": 0.098, "ICICIBANK": 0.080, "INFY": 0.058, "ITC": 0.042}
+HEAVYWEIGHTS_ALL = {**HEAVYWEIGHTS_TOP5, "TCS": 0.040, "LT": 0.038, "AXISBANK": 0.033, "KOTAKBANK": 0.029, "SBIN": 0.028}
 NSE_CASH_TOKENS = {
-    "HDFCBANK": "1333", "RELIANCE": "2885", "ICICIBANK": "4963",
-    "INFY": "1594", "ITC": "1660", "TCS": "11536",
-    "LT": "11483", "AXISBANK": "5900", "KOTAKBANK": "1922", "SBIN": "3045",
+    "HDFCBANK": "1333", "RELIANCE": "2885", "ICICIBANK": "4963", "INFY": "1594", "ITC": "1660",
+    "TCS": "11536", "LT": "11483", "AXISBANK": "5900", "KOTAKBANK": "1922", "SBIN": "3045",
 }
 
-# =========================================================
-# MATHEMATICAL & SECURITY UTILITIES (FULL)
-# =========================================================
 def norm_pdf(x: float) -> float:
     return math.exp(-0.5 * x * x) / math.sqrt(2.0 * math.pi)
-
-def norm_cdf(x: float) -> float:
-    return 0.5 * (1.0 + math.erf(x / math.sqrt(2.0)))
 
 def generate_live_totp(secret_or_otp: str) -> str:
     raw = str(secret_or_otp or "").strip().replace(" ", "").upper()
@@ -294,8 +255,7 @@ def parse_expiry(value):
     text = str(value).strip()
     if not text:
         return None
-    for fmt in ["%d%b%Y", "%d%b%y", "%Y-%m-%d", "%d-%m-%Y", "%d/%m/%Y",
-                "%d%b%Y %H:%M:%S", "%Y-%m-%d %H:%M:%S", "%Y%m%d"]:
+    for fmt in ["%d%b%Y", "%d%b%y", "%Y-%m-%d", "%d-%m-%Y", "%d/%m/%Y", "%d%b%Y %H:%M:%S", "%Y-%m-%d %H:%M:%S", "%Y%m%d"]:
         try:
             dt = datetime.strptime(text.upper(), fmt)
             return dt.replace(tzinfo=IST)
@@ -381,9 +341,6 @@ def record_list(response):
                     return value[k]
     return []
 
-# =========================================================
-# STATE-SPACE KALMAN FILTER & 2ND-ORDER GREEKS
-# =========================================================
 class KalmanPriceEngine:
     def __init__(self, process_variance=1e-4, measurement_variance=0.08):
         self.q = process_variance
@@ -412,10 +369,7 @@ class KalmanPriceEngine:
 
 class GreeksEngine:
     @staticmethod
-    def compute_second_order_greeks(
-        spot: float, strike: float, minutes_to_exp: float,
-        iv: float = 0.135, r: float = 0.065
-    ) -> Dict[str, float]:
+    def compute_second_order_greeks(spot: float, strike: float, minutes_to_exp: float, iv: float = 0.135, r: float = 0.065) -> Dict[str, float]:
         if not (is_valid_number(spot) and is_valid_number(strike) and spot > 0 and strike > 0):
             return {"vanna": 0.0, "charm_ce": 0.0, "charm_pe": 0.0, "d1": 0.0, "d2": 0.0}
         tau = max(minutes_to_exp / (375.0 * 252.0), 1e-6)
@@ -427,17 +381,8 @@ class GreeksEngine:
         term1 = pdf_d1 * (r / vol_sqrt_tau - d2 / (2.0 * tau))
         charm_ce = float(-term1)
         charm_pe = float(charm_ce + r * math.exp(-r * tau))
-        return {
-            "vanna": vanna,
-            "charm_ce": charm_ce,
-            "charm_pe": charm_pe,
-            "d1": d1,
-            "d2": d2
-        }
+        return {"vanna": vanna, "charm_ce": charm_ce, "charm_pe": charm_pe, "d1": d1, "d2": d2}
 
-# =========================================================
-# INDICATOR ENGINES
-# =========================================================
 class HeikinAshiEngine:
     def __init__(self):
         self.prev_ha_open = None
@@ -459,12 +404,7 @@ class HeikinAshiEngine:
         self.prev_ha_close = ha_close
         color = 1 if ha_close >= ha_open else -1
         strong = 1 if (color == 1 and l >= ha_open - 1e-6) or (color == -1 and h <= ha_open + 1e-6) else 0
-        return {
-            "ha_open": ha_open,
-            "ha_close": ha_close,
-            "ha_color": color,
-            "ha_strong": strong
-        }
+        return {"ha_open": ha_open, "ha_close": ha_close, "ha_color": color, "ha_strong": strong}
 
 class SuperTrendEngine:
     def __init__(self, period=10, multiplier=3.0):
@@ -512,11 +452,7 @@ class SuperTrendEngine:
         self.prev_lower = final_lower
         self.prev_supertrend = supertrend
         self.prev_direction = direction
-        return {
-            "supertrend": supertrend,
-            "st_direction": direction,
-            "st_flip": flip
-        }
+        return {"supertrend": supertrend, "st_direction": direction, "st_flip": flip}
 
 class HilegaMilegaEngine:
     def __init__(self):
@@ -574,18 +510,9 @@ class HilegaMilegaEngine:
                 signal = 1
             elif rsi < 50 and ema3 > rsi and wma21 < 50:
                 signal = -1
-        return {
-            "hm_rsi": rsi,
-            "hm_ema": ema3,
-            "hm_wma": wma21,
-            "hm_signal": signal
-        }
+        return {"hm_rsi": rsi, "hm_ema": ema3, "hm_wma": wma21, "hm_signal": signal}
 
-# =========================================================
-# ADVANCED ENGINES (CUMULATIVE DELTA + VOLUME PROFILE + SMC)
-# =========================================================
 class CumulativeDeltaEngine:
-    """Real-time tick-based Cumulative Delta"""
     def __init__(self):
         self.cum_delta = 0.0
         self.prev_ltp = None
@@ -645,11 +572,8 @@ class VolumeProfileEngine:
     def update(self, high: float, low: float, close: float, volume: float):
         if not all(is_valid_number(x) for x in [high, low, close]) or volume <= 0:
             return
-        price_levels = np.arange(
-            math.floor(low / self.tick_size) * self.tick_size,
-            math.ceil(high / self.tick_size) * self.tick_size + self.tick_size,
-            self.tick_size
-        )
+        price_levels = np.arange(math.floor(low / self.tick_size) * self.tick_size,
+                                 math.ceil(high / self.tick_size) * self.tick_size + self.tick_size, self.tick_size)
         if len(price_levels) == 0:
             price_levels = [round(close / self.tick_size) * self.tick_size]
         vol_per_level = volume / max(len(price_levels), 1)
@@ -677,27 +601,15 @@ class VolumeProfileEngine:
 
     def features(self, current_price: float, atr: float = 15.0) -> Dict[str, float]:
         if not is_valid_number(self.poc):
-            return {
-                "vp_poc": np.nan, "vp_vah": np.nan, "vp_val": np.nan,
-                "dist_to_poc_atr": np.nan, "above_poc": 0, "inside_va": 0,
-                "vah_break": 0, "val_break": 0
-            }
+            return {"vp_poc": np.nan, "vp_vah": np.nan, "vp_val": np.nan, "dist_to_poc_atr": np.nan,
+                    "above_poc": 0, "inside_va": 0, "vah_break": 0, "val_break": 0}
         dist_poc = (current_price - self.poc) / atr if atr > 0 else 0.0
         above_poc = 1 if current_price > self.poc else -1
-        inside_va = 1 if (is_valid_number(self.val) and is_valid_number(self.vah) and
-                          self.val <= current_price <= self.vah) else 0
+        inside_va = 1 if (is_valid_number(self.val) and is_valid_number(self.vah) and self.val <= current_price <= self.vah) else 0
         vah_break = 1 if is_valid_number(self.vah) and current_price > self.vah else 0
         val_break = -1 if is_valid_number(self.val) and current_price < self.val else 0
-        return {
-            "vp_poc": self.poc,
-            "vp_vah": self.vah,
-            "vp_val": self.val,
-            "dist_to_poc_atr": dist_poc,
-            "above_poc": above_poc,
-            "inside_va": inside_va,
-            "vah_break": vah_break,
-            "val_break": val_break,
-        }
+        return {"vp_poc": self.poc, "vp_vah": self.vah, "vp_val": self.val, "dist_to_poc_atr": dist_poc,
+                "above_poc": above_poc, "inside_va": inside_va, "vah_break": vah_break, "val_break": val_break}
 
 class SMCEngine:
     def __init__(self, lookback=8, fvg_min_gap_atr=0.25):
@@ -751,11 +663,11 @@ class SMCEngine:
         near_demand = 0
         near_supply = 0
         for z in self.demand_zones[-3:]:
-            if z["bottom"] - 0.3*atr <= current_price <= z["top"] + 0.3*atr:
+            if z["bottom"] - 0.3 * atr <= current_price <= z["top"] + 0.3 * atr:
                 near_demand = 1
                 break
         for z in self.supply_zones[-3:]:
-            if z["bottom"] - 0.3*atr <= current_price <= z["top"] + 0.3*atr:
+            if z["bottom"] - 0.3 * atr <= current_price <= z["top"] + 0.3 * atr:
                 near_supply = 1
                 break
         bullish_fvg = any(f["type"] == "bullish" for f in self.active_fvgs[-3:])
@@ -766,13 +678,9 @@ class SMCEngine:
             "near_supply_zone": near_supply,
             "bullish_fvg_active": int(bullish_fvg),
             "bearish_fvg_active": int(bearish_fvg),
-            "smc_bias": 1 if (self.last_bos == 1 or bullish_fvg or near_demand) else
-                       (-1 if (self.last_bos == -1 or bearish_fvg or near_supply) else 0),
+            "smc_bias": 1 if (self.last_bos == 1 or bullish_fvg or near_demand) else (-1 if (self.last_bos == -1 or bearish_fvg or near_supply) else 0),
         }
 
-# =========================================================
-# STATS COLLECTOR (Practical Advanced Math)
-# =========================================================
 class StatsCollector:
     def __init__(self):
         self.trades: List[Dict] = []
@@ -802,8 +710,7 @@ class StatsCollector:
         if len(self.trades) < CONFIG["stats_min_trades_for_strength"]:
             return 1.0
         scores = []
-        for key in ["above_poc" if above_poc == 1 else "below_poc",
-                    "smc_bull" if smc_bias == 1 else "smc_bear"]:
+        for key in ["above_poc" if above_poc == 1 else "below_poc", "smc_bull" if smc_bias == 1 else "smc_bear"]:
             d = self.strength_cache[key]
             if d["total"] >= 8:
                 wr = d["win"] / d["total"]
@@ -814,9 +721,6 @@ class StatsCollector:
             return 1.0
         return float(np.mean(scores))
 
-# =========================================================
-# CANDLE + RESEARCH ENGINES
-# =========================================================
 @dataclass
 class Candle3Min:
     timestamp: datetime
@@ -888,8 +792,7 @@ class SessionContextEngine:
         op = self.today_open if is_valid_number(self.today_open) else candle.fut_o
         gap = op - self.prev_close
         return {
-            "gap_points": gap,
-            "gap_atr": gap / atr,
+            "gap_points": gap, "gap_atr": gap / atr,
             "gap_direction": 1 if gap > 0 else (-1 if gap < 0 else 0),
             "dist_to_pdh_atr": (candle.fut_c - self.prev_high) / atr if is_valid_number(self.prev_high) else np.nan,
             "dist_to_pdl_atr": (candle.fut_c - self.prev_low) / atr if is_valid_number(self.prev_low) else np.nan,
@@ -903,13 +806,10 @@ class OptionChainEngine:
         self.pcr_history.clear()
 
     def compute(self, chain: Dict[str, Any], candle_ts: datetime, spot_price: float):
-        keys = [
-            "pcr_oi", "pcr_volume", "ce_oi_change", "pe_oi_change", "ce_oi_atm", "pe_oi_atm",
-            "atm_strike", "ce_pe_oi_imbalance", "atm_oi_imbalance", "pcr_oi_delta",
-            "pcr_velocity", "days_to_expiry", "minutes_to_expiry", "expiry_day_flag",
-            "gex_proxy", "zero_dte_intensity", "gex_x_0dte", "atm_gamma_imbalance",
-            "dealer_vanna_flow", "dealer_charm_flow"
-        ]
+        keys = ["pcr_oi", "pcr_volume", "ce_oi_change", "pe_oi_change", "ce_oi_atm", "pe_oi_atm", "atm_strike",
+                "ce_pe_oi_imbalance", "atm_oi_imbalance", "pcr_oi_delta", "pcr_velocity", "days_to_expiry",
+                "minutes_to_expiry", "expiry_day_flag", "gex_proxy", "zero_dte_intensity", "gex_x_0dte",
+                "atm_gamma_imbalance", "dealer_vanna_flow", "dealer_charm_flow"]
         if not chain:
             out = {k: np.nan for k in keys}
             for k in keys:
@@ -962,25 +862,14 @@ class OptionChainEngine:
         dealer_vanna_flow = float(np.clip(atm_gamma_imb * greeks["vanna"] * 10.0, -1.0, 1.0))
         dealer_charm_flow = float(np.clip((atm_ce * greeks["charm_ce"] - atm_pe * greeks["charm_pe"]) / (atm_sum + 1e-5), -1.0, 1.0))
         raw_metrics = {
-            "pcr_oi": curr_pcr,
-            "pcr_volume": chain.get("pcr_volume", np.nan),
-            "ce_oi_change": chain.get("ce_oi_change", np.nan),
-            "pe_oi_change": chain.get("pe_oi_change", np.nan),
-            "ce_oi_atm": atm_ce,
-            "pe_oi_atm": atm_pe,
-            "atm_strike": atm_strike,
-            "ce_pe_oi_imbalance": ce_pe_imbalance,
-            "atm_oi_imbalance": atm_imbalance,
-            "pcr_oi_delta": pcr_delta,
-            "pcr_velocity": pcr_velocity,
-            "days_to_expiry": days_to_exp,
-            "minutes_to_expiry": mins_to_exp,
-            "expiry_day_flag": exp_flag,
-            "gex_proxy": gex_proxy,
-            "zero_dte_intensity": zero_dte_intensity,
-            "gex_x_0dte": gex_x_0dte,
-            "atm_gamma_imbalance": atm_gamma_imb,
-            "dealer_vanna_flow": dealer_vanna_flow,
+            "pcr_oi": curr_pcr, "pcr_volume": chain.get("pcr_volume", np.nan),
+            "ce_oi_change": chain.get("ce_oi_change", np.nan), "pe_oi_change": chain.get("pe_oi_change", np.nan),
+            "ce_oi_atm": atm_ce, "pe_oi_atm": atm_pe, "atm_strike": atm_strike,
+            "ce_pe_oi_imbalance": ce_pe_imbalance, "atm_oi_imbalance": atm_imbalance,
+            "pcr_oi_delta": pcr_delta, "pcr_velocity": pcr_velocity,
+            "days_to_expiry": days_to_exp, "minutes_to_expiry": mins_to_exp, "expiry_day_flag": exp_flag,
+            "gex_proxy": gex_proxy, "zero_dte_intensity": zero_dte_intensity, "gex_x_0dte": gex_x_0dte,
+            "atm_gamma_imbalance": atm_gamma_imb, "dealer_vanna_flow": dealer_vanna_flow,
             "dealer_charm_flow": dealer_charm_flow
         }
         for key in keys:
@@ -1033,21 +922,12 @@ class HeavyweightEngine:
         n = max(len(contributions), 1)
         slp_5 = float(sum(top5_pressures) * 1000.0) if top5_pressures else 0.0
         return {
-            "twc": total_twc,
-            "breadth_10": bullish / n if contributions else 0.5,
+            "twc": total_twc, "breadth_10": bullish / n if contributions else 0.5,
             "dispersion_index": float(np.std(returns)) if returns else 0.0,
             "contribution_concentration": max(contributions, key=abs) / (abs(total_twc) + 1e-9) if contributions else 0.0,
-            "slp_top5_pressure": slp_5,
-            "hw_bullish_count": bullish,
-            "hw_symbols_seen": len(contributions),
+            "slp_top5_pressure": slp_5, "hw_bullish_count": bullish, "hw_symbols_seen": len(contributions),
         }
 
-# ========== PART 1 END ==========
-# Ab Part 2 mein FeatureEngine se lekar end tak aayega.
-print("PART 1 LOADED SUCCESSFULLY - Ab Part 2 ka wait karo")
-# =========================================================
-# FEATURE ENGINE (FULL)
-# =========================================================
 class FeatureEngine:
     def __init__(self, maxlen=150):
         self.vwap_pv = self.vwap_vol = 0.0
@@ -1104,37 +984,30 @@ class FeatureEngine:
         self.vwap_pv += typical * max(volume, 0.0)
         self.vwap_vol += max(volume, 0.0)
         fut_vwap = self.vwap_pv / self.vwap_vol if self.vwap_vol > 0 else typical
-
         if prev:
             pc = prev[-1].fut_c
             tr = max(candle.fut_h - candle.fut_l, abs(candle.fut_h - pc), abs(candle.fut_l - pc))
         else:
             tr = candle.fut_h - candle.fut_l
-
         atr_prev = wilder_atr(list(self.tr_history), CONFIG["atr_period"])
         self.tr_history.append(tr)
         atr = atr_prev if is_valid_number(atr_prev) else 15.0
-
         kalman_price, kalman_velocity = self.kalman.update(candle.fut_c)
-
         all_closes = list(self.preloaded_closes) + [c.spot_c for c in prev]
         all_closes.append(candle.spot_c)
         sma_window = all_closes[-CONFIG["sma_period"]:]
         sma_ready = len(sma_window) >= CONFIG["sma_period"] and all(is_valid_number(x) for x in sma_window)
         spot_sma = float(np.mean(sma_window)) if sma_ready else np.nan
-
         if is_valid_number(atr) and atr > 0:
             normalized_stretch = (candle.fut_c - fut_vwap) / atr
             kalman_stretch = (kalman_price - fut_vwap) / atr if is_valid_number(kalman_price) else normalized_stretch
             normalized_spread = (spot_sma - fut_vwap) / atr if is_valid_number(spot_sma) else np.nan
         else:
             normalized_stretch = kalman_stretch = normalized_spread = 0.0
-
         self.stretch_history.append(normalized_stretch)
         self.spread_history.append(normalized_spread)
         stretch_slope = calc_3bar_slope(list(self.stretch_history))
         spread_slope = calc_3bar_slope(list(self.spread_history))
-
         l2 = candle.l2_depth or {}
         best_bid = safe_float(l2.get("best_bid"), candle.fut_c)
         best_ask = safe_float(l2.get("best_ask"), candle.fut_c)
@@ -1144,7 +1017,6 @@ class FeatureEngine:
         obi = (bid_qty - ask_qty) / tot_depth if tot_depth > 0 else 0.0
         micro_price = (best_bid * ask_qty + best_ask * bid_qty) / tot_depth if tot_depth > 0 else candle.fut_c
         micro_price_drift = (micro_price - candle.fut_c) / atr if atr > 0 else 0.0
-
         if prev:
             oi_change = candle.fut_oi - prev[-1].fut_oi if is_valid_number(candle.fut_oi) and is_valid_number(prev[-1].fut_oi) else np.nan
             price_up = candle.fut_c > prev[-1].fut_c
@@ -1152,7 +1024,6 @@ class FeatureEngine:
         else:
             oi_change = np.nan
             price_up = price_down = False
-
         oi_has_val = is_valid_number(oi_change)
         oi_long_buildup = int(price_up and oi_has_val and oi_change > 0)
         oi_short_buildup = int(price_down and oi_has_val and oi_change > 0)
@@ -1160,17 +1031,14 @@ class FeatureEngine:
         oi_long_unwinding = int(price_down and oi_has_val and oi_change < 0)
         oi_neutral = int(not oi_has_val or oi_change == 0 or (not price_up and not price_down))
         oi_strength = ((1 if price_up else -1) * np.sign(oi_change) * np.log1p(abs(oi_change))) if (oi_has_val and oi_change != 0) else 0.0
-
         self.or_eng.update(candle)
         self.vol_profile.update(candle.fut_h, candle.fut_l, candle.fut_c, volume)
         self.cum_delta.on_bar_close()
         self.smc.update(candle, atr)
-
         self._last_3_candles.append(candle)
         if len(self._last_3_candles) == 3:
             c1, c2, c3 = self._last_3_candles
             self.smc.detect_fvg(c1, c2, c3, atr)
-
         missing_spot = int(not is_valid_number(candle.spot_c))
         missing_future = int(not is_valid_number(candle.fut_c))
         missing_oi = int(not is_valid_number(candle.fut_oi))
@@ -1180,20 +1048,12 @@ class FeatureEngine:
         missing_heavyweight = int(len(candle.heavy) == 0)
         missing_option = int(len(candle.option_chain) == 0)
         bad_ohlc = int(candle.fut_h < candle.fut_l or candle.spot_h < candle.spot_l)
-
         w = CONFIG["dq_weights"]
-        penalty = (
-            w["missing_spot"] * missing_spot +
-            w["missing_future"] * missing_future +
-            w["missing_oi"] * missing_oi +
-            w["zero_oi"] * zero_oi +
-            w["missing_volume"] * missing_volume +
-            w["zero_volume"] * zero_volume +
-            w["missing_heavyweight"] * missing_heavyweight +
-            w["missing_option_chain"] * missing_option +
-            w["bad_ohlc"] * bad_ohlc
-        )
-
+        penalty = (w["missing_spot"] * missing_spot + w["missing_future"] * missing_future +
+                   w["missing_oi"] * missing_oi + w["zero_oi"] * zero_oi +
+                   w["missing_volume"] * missing_volume + w["zero_volume"] * zero_volume +
+                   w["missing_heavyweight"] * missing_heavyweight + w["missing_option_chain"] * missing_option +
+                   w["bad_ohlc"] * bad_ohlc)
         pcr_features = self.opt.compute(candle.option_chain, candle.timestamp, candle.spot_c)
         ha_res = self.ha.update(candle.fut_o, candle.fut_h, candle.fut_l, candle.fut_c)
         st_res = self.st.update(candle.fut_h, candle.fut_l, candle.fut_c, atr=atr)
@@ -1201,15 +1061,9 @@ class FeatureEngine:
         delta_res = self.cum_delta.features()
         vp_res = self.vol_profile.features(candle.fut_c, atr)
         smc_res = self.smc.features(candle.fut_c, atr)
-
         now_ts = now_ist()
-        is_causal_verified = int(
-            to_ist(candle.timestamp) <= now_ts and
-            is_valid_number(candle.fut_c) and
-            is_valid_number(candle.spot_c)
-        )
+        is_causal_verified = int(to_ist(candle.timestamp) <= now_ts and is_valid_number(candle.fut_c) and is_valid_number(candle.spot_c))
         ts_ist = to_ist(candle.timestamp)
-
         features = {
             "timestamp": candle.timestamp,
             "feature_available_timestamp": now_ts,
@@ -1217,7 +1071,7 @@ class FeatureEngine:
             "feature_version": CONFIG["feature_version"],
             "schema_version": CONFIG["schema_version"],
             "weight_version": CONFIG["weight_version"],
-            "atr_mode": CONFIG["atr_mode"],
+            "atr_mode": "session_local",
             "execution_model": CONFIG["execution_model"],
             "basis": candle.fut_c - candle.spot_c,
             "fut_vwap": fut_vwap,
@@ -1253,24 +1107,16 @@ class FeatureEngine:
             **delta_res,
             **vp_res,
             **smc_res,
-            "missing_spot": missing_spot,
-            "missing_future": missing_future,
-            "missing_oi": missing_oi,
-            "missing_volume": missing_volume,
-            "missing_heavyweight": missing_heavyweight,
-            "missing_option_chain": missing_option,
-            "bad_ohlc": bad_ohlc,
-            "zero_volume": zero_volume,
-            "zero_oi": zero_oi,
+            "missing_spot": missing_spot, "missing_future": missing_future,
+            "missing_oi": missing_oi, "missing_volume": missing_volume,
+            "missing_heavyweight": missing_heavyweight, "missing_option_chain": missing_option,
+            "bad_ohlc": bad_ohlc, "zero_volume": zero_volume, "zero_oi": zero_oi,
             "data_quality_score": float(max(0.0, 1.0 - penalty)),
             "bar_complete": 1,
         }
         self.history.append(features)
         return features
 
-# =========================================================
-# REGIME + DECISION ENGINE
-# =========================================================
 class RegimeEngine:
     def detect(self, feats: Dict[str, Any]) -> str:
         dq = safe_float(feats.get("data_quality_score"), 0.0)
@@ -1287,7 +1133,6 @@ class RegimeEngine:
         gex_val = safe_float(feats.get("gex_proxy"), 0.0)
         z_dte = safe_float(feats.get("zero_dte_intensity"), 0.0)
         delta_sign = safe_int(feats.get("delta_sign"), 0)
-
         if z_dte > 0.5 and gex_val > 0.70 and abs(k_stretch) <= 0.65:
             return "GRIND"
         if z_dte > 0.4 and gex_val < -0.70 and abs(k_stretch) > 0.40:
@@ -1346,56 +1191,39 @@ class DecisionEngine:
         delta_sign = safe_int(feats.get("delta_sign"), 0)
         above_poc = safe_int(feats.get("above_poc"), 0)
         smc_bias = safe_int(feats.get("smc_bias"), 0)
-
         def sign(val, thresh=0.0):
             if val > thresh: return 1
             if val < -thresh: return -1
             return 0
-
-        return [
-            sign(stretch, 0.25), sign(slope, 0.03), st_dir, hm_sig, ha_color,
-            delta_sign, above_poc, smc_bias
-        ]
+        return [sign(stretch, 0.25), sign(slope, 0.03), st_dir, hm_sig, ha_color, delta_sign, above_poc, smc_bias]
 
     def decide(self, feats: Dict[str, Any], current_position_direction: int = 0) -> TradeDecision:
         self.bar_counter += 1
         now_ts = now_ist()
         expiry_flag = safe_int(feats.get("expiry_day_flag"), 0)
         cutoff = CONFIG["time_guard_expiry"] if expiry_flag == 1 else CONFIG["time_guard_non_expiry"]
-
         if now_ts.hour > cutoff[0] or (now_ts.hour == cutoff[0] and now_ts.minute >= cutoff[1]):
-            return TradeDecision(
-                action="SKIP", regime="TIME_GUARD_ACTIVE",
-                reason=f"Time guard active ({cutoff[0]}:{cutoff[1]:02d})",
-                timestamp=feats.get("timestamp"), decision_timestamp=now_ts
-            )
-
+            return TradeDecision(action="SKIP", regime="TIME_GUARD_ACTIVE",
+                                 reason=f"Time guard ({cutoff[0]}:{cutoff[1]:02d})",
+                                 timestamp=feats.get("timestamp"), decision_timestamp=now_ts)
         regime = self.regime_engine.detect(feats)
         dq = safe_float(feats.get("data_quality_score"), 0.0)
-
         if regime == "DATA_BAD" or dq < CONFIG["min_data_quality_to_trade"]:
-            return TradeDecision(
-                action="SKIP", regime=regime,
-                reason="Data quality low / warmup",
-                timestamp=feats.get("timestamp"), decision_timestamp=now_ts
-            )
-
+            return TradeDecision(action="SKIP", regime=regime, reason="Data quality / warmup",
+                                 timestamp=feats.get("timestamp"), decision_timestamp=now_ts)
         atr = safe_float(feats.get("atr_14_prev"), 15.0)
         signals = self._get_high_priority_signals(regime, feats)
         aligned_buy = sum(1 for s in signals if s == 1)
         aligned_sell = sum(1 for s in signals if s == -1)
         aligned_count = max(aligned_buy, aligned_sell)
-
         above_poc = safe_int(feats.get("above_poc"), 0)
         smc_bias = safe_int(feats.get("smc_bias"), 0)
         level_strength = self.stats.get_level_strength(above_poc, smc_bias, regime)
-
         action = "SKIP"
         size_mult = 1.0
         reason_parts = [f"Regime={regime}", f"B{aligned_buy}/S{aligned_sell}", f"LS={level_strength:.2f}"]
         is_reversal = False
         min_req = CONFIG["min_aligned_for_entry"]
-
         if current_position_direction == 1 and aligned_sell >= min_req and aligned_sell > aligned_buy:
             action = "PE"
             is_reversal = True
@@ -1407,42 +1235,26 @@ class DecisionEngine:
         elif aligned_buy >= min_req and aligned_buy > aligned_sell:
             action = "CE"
             size_mult = 1.0 + (aligned_buy - 3) * 0.12
-            reason_parts.append(f"Buy {aligned_buy}/8")
+            reason_parts.append(f"Buy {aligned_buy}")
         elif aligned_sell >= min_req and aligned_sell > aligned_buy:
             action = "PE"
             size_mult = 1.0 + (aligned_sell - 3) * 0.12
-            reason_parts.append(f"Sell {aligned_sell}/8")
+            reason_parts.append(f"Sell {aligned_sell}")
         else:
-            reason_parts.append("Insufficient alignment")
-
+            reason_parts.append("Low alignment")
         target, stop, base_size = self._realistic_target(atr, regime, aligned_count)
         size = base_size * size_mult * level_strength
         conf = float(np.clip(0.48 + (aligned_count - 3) * 0.07, 0.30, 0.85))
-
         opt_target = round(target * CONFIG["base_delta"], 1)
         opt_stop = round(stop * 0.75, 1)
-
         return TradeDecision(
-            action=action,
-            regime=regime,
-            target_points=round(target, 1),
-            stop_points=round(stop, 1),
-            option_target_pts=opt_target,
-            option_stop_pts=opt_stop,
-            effective_delta=CONFIG["base_delta"],
-            size_factor=round(size, 2),
-            confidence=round(conf, 3),
-            reason=" | ".join(reason_parts),
-            timestamp=feats.get("timestamp"),
-            decision_timestamp=now_ts,
-            aligned_count=aligned_count,
-            is_reversal=is_reversal,
-            level_strength=level_strength
+            action=action, regime=regime, target_points=round(target, 1), stop_points=round(stop, 1),
+            option_target_pts=opt_target, option_stop_pts=opt_stop, effective_delta=CONFIG["base_delta"],
+            size_factor=round(size, 2), confidence=round(conf, 3), reason=" | ".join(reason_parts),
+            timestamp=feats.get("timestamp"), decision_timestamp=now_ts,
+            aligned_count=aligned_count, is_reversal=is_reversal, level_strength=level_strength
         )
 
-# =========================================================
-# PAPER TRADING DESK + JOURNAL
-# =========================================================
 class DatasetManager:
     def __init__(self, path=None):
         self.base = Path(path or CONFIG["dataset_path"])
@@ -1455,11 +1267,9 @@ class DatasetManager:
         if "timestamp" in data.columns:
             data["date"] = pd.to_datetime(data["timestamp"]).dt.date.astype(str)
         table = pa.Table.from_pandas(data, preserve_index=False)
-        pq.write_to_dataset(
-            table, root_path=str(self.base / name),
-            partition_cols=["date"] if "date" in data.columns else None,
-            existing_data_behavior="overwrite_or_ignore",
-        )
+        pq.write_to_dataset(table, root_path=str(self.base / name),
+                            partition_cols=["date"] if "date" in data.columns else None,
+                            existing_data_behavior="overwrite_or_ignore")
 
 @dataclass
 class PaperPosition:
@@ -1519,8 +1329,7 @@ class PaperTradingDesk:
             self.risk_locked = False
 
     def check_total_risk_limit(self) -> bool:
-        total = self.realized_pnl_pts + self.unrealized_pnl_pts
-        if total <= -CONFIG["max_daily_loss_pts"]:
+        if self.realized_pnl_pts + self.unrealized_pnl_pts <= -CONFIG["max_daily_loss_pts"]:
             self.risk_locked = True
             self.pending_order = None
             return True
@@ -1532,14 +1341,10 @@ class PaperTradingDesk:
         if decision.action in ("CE", "PE") and self.active_position is None and self.pending_order is None:
             direction = 1 if decision.action == "CE" else -1
             self.pending_order = {
-                "target_fill_time": next_bar_time,
-                "direction": direction,
-                "option_target": decision.option_target_pts,
-                "option_stop": decision.option_stop_pts,
-                "effective_delta": decision.effective_delta,
-                "size": decision.size_factor,
-                "regime": decision.regime,
-                "aligned_count": decision.aligned_count,
+                "target_fill_time": next_bar_time, "direction": direction,
+                "option_target": decision.option_target_pts, "option_stop": decision.option_stop_pts,
+                "effective_delta": decision.effective_delta, "size": decision.size_factor,
+                "regime": decision.regime, "aligned_count": decision.aligned_count,
                 "is_reversal": decision.is_reversal,
                 "above_poc": safe_int(feats.get("above_poc"), 0),
                 "smc_bias": safe_int(feats.get("smc_bias"), 0),
@@ -1562,27 +1367,17 @@ class PaperTradingDesk:
             slippage = CONFIG["base_slippage_pts"] * vol_factor * direction
             fill_price = candle.fut_o + slippage
             baseline = round(max(80.0, (fill_price * CONFIG["default_atm_iv"] * math.sqrt(1.0 / 252.0)) * 2.2), 2)
-
             self.active_position = PaperPosition(
-                entry_time=candle.timestamp,
-                direction=direction,
-                entry_future_price=round(fill_price, 2),
-                entry_option_price=baseline,
-                option_target=order["option_target"],
-                option_stop=order["option_stop"],
-                effective_delta=order["effective_delta"],
-                size=order["size"],
-                regime=order["regime"],
-                initial_aligned_count=order.get("aligned_count", 0),
-                peak_aligned_count=order.get("aligned_count", 0),
-                exit_aligned_count=order.get("aligned_count", 0),
+                entry_time=candle.timestamp, direction=direction,
+                entry_future_price=round(fill_price, 2), entry_option_price=baseline,
+                option_target=order["option_target"], option_stop=order["option_stop"],
+                effective_delta=order["effective_delta"], size=order["size"],
+                regime=order["regime"], initial_aligned_count=order.get("aligned_count", 0),
+                peak_aligned_count=order.get("aligned_count", 0), exit_aligned_count=order.get("aligned_count", 0),
                 alignment_path=str(order.get("aligned_count", 0)),
-                above_poc=order.get("above_poc", 0),
-                smc_bias=order.get("smc_bias", 0),
-                delta_sign=order.get("delta_sign", 0),
-                near_demand=order.get("near_demand", 0),
-                near_supply=order.get("near_supply", 0),
-                level_strength=order.get("level_strength", 1.0),
+                above_poc=order.get("above_poc", 0), smc_bias=order.get("smc_bias", 0),
+                delta_sign=order.get("delta_sign", 0), near_demand=order.get("near_demand", 0),
+                near_supply=order.get("near_supply", 0), level_strength=order.get("level_strength", 1.0),
                 vp_poc=order.get("vp_poc", 0.0),
             )
             self.pending_order = None
@@ -1591,14 +1386,10 @@ class PaperTradingDesk:
         if self.active_position is None:
             return
         pos = self.active_position
-        if pos.direction == 1:
-            fut_close_move = candle.fut_c - pos.entry_future_price
-        else:
-            fut_close_move = pos.entry_future_price - candle.fut_c
+        fut_close_move = (candle.fut_c - pos.entry_future_price) if pos.direction == 1 else (pos.entry_future_price - candle.fut_c)
         option_close_pnl = fut_close_move * pos.effective_delta
         penalty = min(1.40, CONFIG["option_exit_spread_penalty"] * max(1.0, abs(option_close_pnl) / 10.0))
         net = (option_close_pnl - penalty) * pos.size
-
         pos.exit_time = candle.timestamp
         pos.exit_future_price = round(candle.fut_c, 2)
         pos.exit_option_price = round(max(5.0, pos.entry_option_price + option_close_pnl), 2)
@@ -1607,19 +1398,12 @@ class PaperTradingDesk:
         pos.exit_reason = f"TWO-WAY REVERSAL (Spread -{penalty:.2f})"
         pos.exit_aligned_count = decision.aligned_count
         pos.failure_reason = "Reversal" if net < 0 else ""
-
         self.realized_pnl_pts = round(self.realized_pnl_pts + pos.pnl_pts, 2)
         self.closed_trades.append(pos)
-        self.stats.record({
-            "pnl_pts": pos.pnl_pts,
-            "above_poc": pos.above_poc,
-            "smc_bias": pos.smc_bias,
-            "regime": pos.regime
-        })
+        self.stats.record({"pnl_pts": pos.pnl_pts, "above_poc": pos.above_poc, "smc_bias": pos.smc_bias, "regime": pos.regime})
         self.dataset_manager.write_parquet(pd.DataFrame([asdict(pos)]), name="paper_trades_log")
         self.active_position = None
         self.unrealized_pnl_pts = 0.0
-
         next_t = candle.timestamp + timedelta(minutes=CONFIG["bar_minutes"])
         self.stage_signal(decision, atr, next_t, feats)
 
@@ -1630,19 +1414,15 @@ class PaperTradingDesk:
             self.unrealized_pnl_pts = 0.0
             self.check_total_risk_limit()
             return
-
         pos = self.active_position
         pos.bars_held += 1
-
         last = int(pos.alignment_path.split(" -> ")[-1])
         if current_aligned_count != last:
             pos.alignment_path += f" -> {current_aligned_count}"
-
         if current_aligned_count > pos.peak_aligned_count:
             pos.peak_aligned_count = current_aligned_count
             if current_aligned_count >= 5:
                 pos.option_target = round(pos.option_target * 1.25, 1)
-
         if pos.direction == 1:
             fut_high_move = candle.fut_h - pos.entry_future_price
             fut_low_move = pos.entry_future_price - candle.fut_l
@@ -1651,30 +1431,23 @@ class PaperTradingDesk:
             fut_high_move = pos.entry_future_price - candle.fut_l
             fut_low_move = candle.fut_h - pos.entry_future_price
             fut_close_move = pos.entry_future_price - candle.fut_c
-
         option_high_pnl = fut_high_move * pos.effective_delta
         option_low_pnl = -(fut_low_move * pos.effective_delta)
         option_close_pnl = fut_close_move * pos.effective_delta
-
         pos.max_favorable_pts = max(pos.max_favorable_pts, option_high_pnl)
         if pos.max_favorable_pts >= 10.0 and pos.option_stop > 0.5:
             pos.option_stop = 0.5
-
         self.unrealized_pnl_pts = round(option_close_pnl * pos.size, 2)
-
         hit_target = option_high_pnl >= pos.option_target
         hit_stop = option_low_pnl <= -pos.option_stop
         momentum_fade = (pos.max_favorable_pts >= 8.0 and current_aligned_count <= 1)
-
         if decision and decision.is_reversal and decision.action in ("CE", "PE"):
             new_dir = 1 if decision.action == "CE" else -1
             if new_dir != pos.direction:
                 self.force_close_and_reverse(candle, decision, 15.0, feats or {})
                 return
-
         self.check_total_risk_limit()
         timeout = pos.bars_held >= (CONFIG["time_barrier_min"] // CONFIG["bar_minutes"])
-
         if is_session_end or hit_target or hit_stop or momentum_fade or timeout or self.risk_locked:
             if hit_target:
                 exit_pnl = pos.option_target
@@ -1696,7 +1469,6 @@ class PaperTradingDesk:
                 exit_pnl = option_close_pnl
                 reason = "TIME / KILL"
                 fail = "Timeout"
-
             pos.exit_time = candle.timestamp
             pos.exit_future_price = round(candle.fut_c, 2)
             pos.exit_option_price = round(max(5.0, pos.entry_option_price + exit_pnl), 2)
@@ -1706,22 +1478,13 @@ class PaperTradingDesk:
             pos.status = "CLOSED"
             pos.exit_reason = reason + f" (Spread -{penalty:.2f})"
             pos.failure_reason = fail
-
             self.realized_pnl_pts = round(self.realized_pnl_pts + pos.pnl_pts, 2)
             self.closed_trades.append(pos)
-            self.stats.record({
-                "pnl_pts": pos.pnl_pts,
-                "above_poc": pos.above_poc,
-                "smc_bias": pos.smc_bias,
-                "regime": pos.regime
-            })
+            self.stats.record({"pnl_pts": pos.pnl_pts, "above_poc": pos.above_poc, "smc_bias": pos.smc_bias, "regime": pos.regime})
             self.dataset_manager.write_parquet(pd.DataFrame([asdict(pos)]), name="paper_trades_log")
             self.active_position = None
             self.unrealized_pnl_pts = 0.0
 
-# =========================================================
-# KOTAK NEO ADAPTER (FULL)
-# =========================================================
 class KotakNeoAdapter:
     def __init__(self):
         self.consumer_key = env_or_secret("KOTAK_CONSUMER_KEY")
@@ -1810,22 +1573,12 @@ class KotakNeoAdapter:
         if NeoAPI is None:
             raise RuntimeError("neo_api_client missing")
         totp = (live_totp_override or "").strip() or self.totp
-        required = {
-            "KOTAK_CONSUMER_KEY": self.consumer_key,
-            "KOTAK_MOBILE": self.mobile,
-            "KOTAK_UCC": self.ucc,
-            "TOTP": totp,
-            "KOTAK_MPIN": self.mpin
-        }
+        required = {"KOTAK_CONSUMER_KEY": self.consumer_key, "KOTAK_MOBILE": self.mobile,
+                    "KOTAK_UCC": self.ucc, "TOTP": totp, "KOTAK_MPIN": self.mpin}
         missing = [k for k, v in required.items() if not v]
         if missing:
-            raise RuntimeError("Missing credentials: " + ", ".join(missing))
-        self.client = NeoAPI(
-            environment=CONFIG["neo_environment"],
-            access_token=None,
-            neo_fin_key=None,
-            consumer_key=self.consumer_key
-        )
+            raise RuntimeError("Missing: " + ", ".join(missing))
+        self.client = NeoAPI(environment=CONFIG["neo_environment"], access_token=None, neo_fin_key=None, consumer_key=self.consumer_key)
         self.client.on_message = self.on_message
         self.client.on_error = self.on_error
         self.client.on_close = self.on_close
@@ -2034,19 +1787,16 @@ class KotakNeoAdapter:
             ticks_source = self.current_bar_ticks or list(self.tick_buffer)
             if not ticks_source:
                 return
-
             def _prices(token):
                 ticks = [t for t in ticks_source if str(token_from_record(t)) == str(token)]
                 vals = [extract_tick_price(t) for t in ticks if is_valid_number(extract_tick_price(t))]
                 return ticks, vals
-
             _, spot_prices = _prices("Nifty 50")
             if not spot_prices:
                 last = extract_tick_price(self.latest.get("Nifty 50", {}))
                 spot_o = spot_h = spot_l = spot_c = last if is_valid_number(last) else 24300.0
             else:
                 spot_o, spot_h, spot_l, spot_c = spot_prices[0], max(spot_prices), min(spot_prices), spot_prices[-1]
-
             fut_ticks, fut_prices = _prices(self.future_token)
             if not fut_prices:
                 last = extract_tick_price(self.latest.get(str(self.future_token), {})) or spot_c
@@ -2059,13 +1809,8 @@ class KotakNeoAdapter:
                 fut_vol = self._resolve_volume_clean(fut_ticks)
                 last_t = fut_ticks[-1] if fut_ticks else {}
                 fut_oi = self._extract_oi(last_t) or self._extract_oi(self.latest.get(str(self.future_token), {})) or 1e7
-                l2 = {
-                    "best_bid": safe_float(last_t.get("bp"), fut_c),
-                    "best_ask": safe_float(last_t.get("ap"), fut_c),
-                    "bid_qty": safe_float(last_t.get("bq"), 1),
-                    "ask_qty": safe_float(last_t.get("aq"), 1)
-                }
-
+                l2 = {"best_bid": safe_float(last_t.get("bp"), fut_c), "best_ask": safe_float(last_t.get("ap"), fut_c),
+                      "bid_qty": safe_float(last_t.get("bq"), 1), "ask_qty": safe_float(last_t.get("aq"), 1)}
             hw_snap = {}
             for sym, tok in self.heavy_tokens.items():
                 t = self.latest.get(str(tok), {})
@@ -2074,7 +1819,6 @@ class KotakNeoAdapter:
                 vwap = extract_quote_field(t, ("vwap", "avp")) or o_val
                 if is_valid_number(c_val):
                     hw_snap[sym] = {"o": o_val, "c": c_val, "vwap": vwap}
-
             total_ce = total_pe = 0.0
             atm_ce = atm_pe = np.nan
             atm = round((spot_c or 24300) / CONFIG["pcr_strike_step"]) * CONFIG["pcr_strike_step"]
@@ -2091,58 +1835,36 @@ class KotakNeoAdapter:
                         total_pe += oi
                         if info.get("strike") == atm:
                             atm_pe = oi
-
             ce_chg = total_ce - self._prev_ce_oi if is_valid_number(self._prev_ce_oi) else 0.0
             pe_chg = total_pe - self._prev_pe_oi if is_valid_number(self._prev_pe_oi) else 0.0
             self._prev_ce_oi = total_ce if total_ce > 0 else self._prev_ce_oi
             self._prev_pe_oi = total_pe if total_pe > 0 else self._prev_pe_oi
-
             pcr_chain = {
-                "pcr_oi": total_pe / max(total_ce, 1),
-                "pcr_volume": np.nan,
-                "ce_oi_change": ce_chg,
-                "pe_oi_change": pe_chg,
-                "ce_oi_atm": atm_ce,
-                "pe_oi_atm": atm_pe,
-                "atm_strike": atm,
-                "total_ce_oi": total_ce,
-                "total_pe_oi": total_pe,
+                "pcr_oi": total_pe / max(total_ce, 1), "pcr_volume": np.nan,
+                "ce_oi_change": ce_chg, "pe_oi_change": pe_chg,
+                "ce_oi_atm": atm_ce, "pe_oi_atm": atm_pe, "atm_strike": atm,
+                "total_ce_oi": total_ce, "total_pe_oi": total_pe,
                 "active_expiry": self.active_pcr_expiry,
                 "ce_contracts_seen": sum(1 for t in self.pcr_tokens if self.pcr_records.get(t, {}).get("option_type") == "CE"),
                 "pe_contracts_seen": sum(1 for t in self.pcr_tokens if self.pcr_records.get(t, {}).get("option_type") == "PE"),
             }
-
-            candle = Candle3Min(
-                timestamp=bar_time,
-                spot_o=spot_o, spot_h=spot_h, spot_l=spot_l, spot_c=spot_c,
-                fut_o=fut_o, fut_h=fut_h, fut_l=fut_l, fut_c=fut_c,
-                fut_volume=fut_vol, fut_oi=fut_oi,
-                heavy=hw_snap, option_chain=pcr_chain, l2_depth=l2
-            )
-
+            candle = Candle3Min(timestamp=bar_time, spot_o=spot_o, spot_h=spot_h, spot_l=spot_l, spot_c=spot_c,
+                                fut_o=fut_o, fut_h=fut_h, fut_l=fut_l, fut_c=fut_c, fut_volume=fut_vol, fut_oi=fut_oi,
+                                heavy=hw_snap, option_chain=pcr_chain, l2_depth=l2)
             feats = self.feature_engine.compute(candle, self.candles_3m)
             atr_v = safe_float(feats.get("atr_14_prev"), 15.0)
-
             self.paper_desk.on_bar_open_fill(candle, atr_v)
-
             curr_dir = self.paper_desk.active_position.direction if self.paper_desk.active_position else 0
             decision = self.decision_engine.decide(feats, current_position_direction=curr_dir)
             self.last_decision = decision
-
             signals = self.decision_engine._get_high_priority_signals(decision.regime, feats)
             curr_align = max(sum(1 for s in signals if s == 1), sum(1 for s in signals if s == -1))
-
-            self.paper_desk.on_bar_update_and_exit_eval(
-                candle, is_session_end=is_session_end,
-                current_aligned_count=curr_align, decision=decision, feats=feats
-            )
-
+            self.paper_desk.on_bar_update_and_exit_eval(candle, is_session_end=is_session_end,
+                                                       current_aligned_count=curr_align, decision=decision, feats=feats)
             self.candles_3m.append(candle)
-
             if not is_session_end:
                 next_t = bar_time + timedelta(minutes=CONFIG["bar_minutes"])
                 self.paper_desk.stage_signal(decision, atr_v, next_t, feats)
-
             feats["decision_action"] = decision.action
             feats["decision_regime"] = decision.regime
             feats["aligned_count"] = decision.aligned_count
@@ -2168,9 +1890,6 @@ class KotakNeoAdapter:
     def stop_bar_watchdog(self):
         self._watchdog_stop.set()
 
-# =========================================================
-# STREAMLIT UI (FULL DETAILED SCORECARD)
-# =========================================================
 def inject_custom_css():
     st.markdown("""
         <style>
@@ -2216,20 +1935,18 @@ def main():
     if st is None:
         print("Streamlit not installed")
         return
-
-    st.set_page_config(page_title="NIFTY 3M v7.1 Full Verbose", page_icon="⚡", layout="wide", initial_sidebar_state="expanded")
+    st.set_page_config(page_title="NIFTY 3M v7.1 Complete Fixed", page_icon="⚡", layout="wide", initial_sidebar_state="expanded")
     inject_custom_css()
     adapter = get_global_adapter()
     is_logged_in = adapter.connected
 
     with st.sidebar:
-        st.subheader("⚡ Gateway Controls")
+        st.subheader("⚡ Gateway")
         if is_logged_in:
             st.markdown(f'<span class="status-pill status-{"active" if adapter.conn_state=="STREAMING" else "auth"}">● {adapter.conn_state}</span>', unsafe_allow_html=True)
         else:
             st.markdown('<span class="status-pill status-offline">● DISCONNECTED</span>', unsafe_allow_html=True)
-
-        totp = st.text_input("Live TOTP (Optional)", type="password")
+        totp = st.text_input("Live TOTP", type="password")
         c1, c2 = st.columns(2)
         with c1:
             if st.button("Connect"):
@@ -2242,28 +1959,23 @@ def main():
             if st.button("Reconnect", disabled=not is_logged_in):
                 adapter.login(live_totp_override=totp)
                 st.rerun()
-
-        if st.button("Discover Instruments", disabled=not is_logged_in):
+        if st.button("Discover", disabled=not is_logged_in):
             adapter.discover_nifty_instruments()
             st.session_state.discovered = True
             st.rerun()
-
         if st.session_state.get("discovered"):
             for l in adapter.discovery_log:
                 st.caption(l)
-
         if st.button("Start Live Feed", disabled=not is_logged_in or adapter.conn_state == "STREAMING"):
             adapter.subscribe_live_feed()
             adapter.start_bar_watchdog()
             st.rerun()
-
         if adapter.last_error:
             st.warning(adapter.last_error)
 
     if adapter.conn_state == "STREAMING":
         adapter.fetch_market_snapshot()
 
-    # Top metrics
     spot_val = fut_val = "-"
     ticks = 0
     if adapter.latest:
@@ -2275,13 +1987,11 @@ def main():
             if is_valid_number(fp):
                 fut_val = f"{fp:.2f}"
             ticks = len(adapter.tick_buffer)
-
     t1, t2, t3 = st.columns(3)
     t1.metric("NIFTY SPOT", f"₹{spot_val}")
     t2.metric("NIFTY FUT", f"₹{fut_val}")
     t3.metric("TICKS", f"{ticks}")
 
-    # Decision HUD
     st.markdown('<div class="terminal-card">', unsafe_allow_html=True)
     if adapter.last_decision:
         d = adapter.last_decision
@@ -2298,18 +2008,16 @@ def main():
             st.caption("Reason")
             st.write(d.reason)
     else:
-        st.info("Waiting for first 3-min bar...")
+        st.info("Waiting for first bar...")
     st.markdown('</div>', unsafe_allow_html=True)
 
-    # Paper Desk + Journal
     st.markdown('<div class="terminal-card">', unsafe_allow_html=True)
-    st.markdown("**Paper Trading Desk + Enhanced Journal (v7.1)**")
+    st.markdown("**Paper Trading + Enhanced Journal**")
     desk = adapter.paper_desk
     total = round(desk.realized_pnl_pts + desk.unrealized_pnl_pts, 2)
     closed = len(desk.closed_trades)
     wins = sum(1 for t in desk.closed_trades if t.pnl_pts > 0)
     wr = (wins / closed * 100) if closed else 0
-
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Net PnL", f"{total:+.2f}")
     c2.metric("Unrealized", f"{desk.unrealized_pnl_pts:+.2f}")
@@ -2318,10 +2026,9 @@ def main():
         c4.markdown(f"**Active:** `{'CE' if desk.active_position.direction==1 else 'PE'}`")
     else:
         c4.markdown("**Active:** `FLAT`")
-
     if desk.closed_trades:
         recent = []
-        for t in list(desk.closed_trades)[-10:]:
+        for t in list(desk.closed_trades)[-8:]:
             recent.append({
                 "Time": t.exit_time.strftime("%H:%M") if t.exit_time else "-",
                 "Type": "CE" if t.direction == 1 else "PE",
@@ -2333,14 +2040,13 @@ def main():
                 "SMC": t.smc_bias,
                 "LS": round(t.level_strength, 2),
                 "Fail": t.failure_reason,
-                "Reason": t.exit_reason[:40]
+                "Reason": t.exit_reason[:35]
             })
         st.dataframe(pd.DataFrame(recent), hide_index=True)
         csv = pd.DataFrame([asdict(t) for t in desk.closed_trades]).to_csv(index=False).encode()
-        st.download_button("Download Full Journal", csv, f"journal_v71_{now_ist().strftime('%Y%m%d')}.csv")
+        st.download_button("Download Journal", csv, f"journal_v71_{now_ist().strftime('%Y%m%d')}.csv")
     st.markdown('</div>', unsafe_allow_html=True)
 
-    # Core Features + FULL Scorecard
     if adapter.feature_engine.history:
         row = dict(adapter.feature_engine.history[-1])
         st.markdown("**Core Features + New Pillars**")
@@ -2361,7 +2067,13 @@ def main():
             st.write(f"• 0DTE Intensity: `{row.get('zero_dte_intensity', 0):.2f}`")
             st.write(f"• **Dealer Vanna/Charm:** `{row.get('dealer_vanna_flow', 0):.3f}` / `{row.get('dealer_charm_flow', 0):.3f}`")
             st.write(f"• Causal Integrity: `{'1 (VERIFIED)' if row.get('is_causal')==1 else '0'}`")
-            st.write(f"• Level Strength (live): `{adapter.decision_engine.stats.get_level_strength(row.get('above_poc',0), row.get('smc_bias',0)):.2f}`")
+            
+            # FIXED LINE
+            _ls = adapter.decision_engine.stats.get_level_strength(
+                safe_int(row.get("above_poc", 0)),
+                safe_int(row.get("smc_bias", 0))
+            )
+            st.write(f"• Level Strength (live): `{_ls:.2f}`")
             st.write(f"• Trades recorded for stats: `{len(adapter.decision_engine.stats.trades)}`")
             st.json(row)
 
@@ -2373,4 +2085,4 @@ if __name__ == "__main__":
     if st is not None and hasattr(st, "runtime") and st.runtime.exists():
         main()
     else:
-        print("v7.1 Full Verbose Engine - Part 2 Ready")
+        print("v7.1 Complete Fixed Engine Ready")
