@@ -4748,6 +4748,565 @@ def append_outcome(
 
 
 # ============================================================================
+# V7 FINAL HARDENING / MTF / MACRO / SECTOR / RISK EXTENSION
+# ============================================================================
+# This extension is intentionally appended to the existing V4 implementation.
+# It does not delete or replace the original engines. Later definitions below
+# override only the day-ahead/morning orchestration points, while preserving all
+# existing adapters, helpers, catalyst logic, UI and storage contracts.
+
+import contextlib
+
+V7_VERSION = "FINAL_V7_FULL_MTF_MACRO_RISK_AUDIT"
+V7_BASKET_SIZE = max(10, int(os.getenv("NEXT_DAY_V7_BASKET_SIZE", "30")))
+V7_MAX_STOCKS_PER_SECTOR = max(1, int(os.getenv("NEXT_DAY_V7_MAX_PER_SECTOR", "4")))
+V7_MTF_MIN_SCORE = float(os.getenv("NEXT_DAY_V7_MTF_MIN_SCORE", "62"))
+V7_MIN_RR = max(1.0, float(os.getenv("NEXT_DAY_V7_MIN_RR", "1.5")))
+V7_RR_TARGET_MULT = max(1.5, float(os.getenv("NEXT_DAY_V7_RR_TARGET_MULT", "2.0")))
+V7_MAX_INVALIDATION_DISTANCE_ATR = max(0.25, float(os.getenv("NEXT_DAY_V7_MAX_INVALIDATION_DISTANCE_ATR", "2.5")))
+V7_MTF_THREADS = max(2, int(os.getenv("NEXT_DAY_V7_MTF_THREADS", "6")))
+V7_VIX_CAUTION = float(os.getenv("NEXT_DAY_V7_VIX_CAUTION", "18"))
+V7_VIX_HIGH = float(os.getenv("NEXT_DAY_V7_VIX_HIGH", "20"))
+V7_VIX_SPIKE_PCT = float(os.getenv("NEXT_DAY_V7_VIX_SPIKE_PCT", "12"))
+V7_VIX_HIGH_CONFIRM_BONUS = float(os.getenv("NEXT_DAY_V7_VIX_HIGH_CONFIRM_BONUS", "5"))
+V7_VIX_CAUTION_CONFIRM_BONUS = float(os.getenv("NEXT_DAY_V7_VIX_CAUTION_CONFIRM_BONUS", "2"))
+V7_AUDIT_FILE = ROOT / "audit_summary.json"
+V7_MTF_CACHE_DIR = ROOT / "mtf_cache"
+V7_MTF_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+V7_LOCK_FILE = SHARED_RAW_CACHE_DIR / ".shared_raw.lock"
+
+# Extra raw fields only. These are still raw quote values; no calculated field
+# from either engine is allowed across the isolation boundary.
+_RAW_ALLOWED.update({
+    "upper_circuit", "lower_circuit", "upper_price_band", "lower_price_band",
+    "bid", "ask", "bid_qty", "ask_qty", "last_traded_time",
+})
+
+@contextlib.contextmanager
+def _v7_process_lock(path: Path):
+    """Best-effort cross-process lock; fcntl on Linux, thread lock fallback."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fh = None
+    try:
+        fh = path.open("a+")
+        try:
+            import fcntl
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+            yield fh
+            fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+        except ImportError:
+            with LOCK:
+                yield fh
+    finally:
+        if fh is not None:
+            fh.close()
+
+
+def write_shared_raw(symbol: str, records: List[Dict[str, Any]]) -> None:
+    """Append raw JSONL safely; never writes calculated features/scores."""
+    if not records:
+        return
+    path = shared_raw_path(symbol)
+    payload = "".join(
+        json.dumps(_raw_only(record), ensure_ascii=False, default=str) + "\n"
+        for record in records
+    )
+    with _v7_process_lock(V7_LOCK_FILE):
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+
+
+def _v7_sector_bucket(industry: Any) -> str:
+    s = str(industry or "UNKNOWN").upper()
+    mapping = {
+        "BANK": "BANKING", "FINANC": "BANKING", "NBFC": "BANKING",
+        "IT": "IT", "SOFTWARE": "IT", "TECH": "IT",
+        "PHARMA": "HEALTHCARE_PHARMA", "HEALTH": "HEALTHCARE_PHARMA",
+        "HOSPITAL": "HEALTHCARE_PHARMA", "BIOTECH": "HEALTHCARE_PHARMA",
+        "AUTO": "AUTOMOBILE", "TYRE": "AUTOMOBILE", "AUTOMOB": "AUTOMOBILE",
+        "CHEM": "CHEMICAL", "FERTIL": "CHEMICAL", "SPECIALTY": "CHEMICAL",
+        "DEFENCE": "DEFENCE", "DEFENSE": "DEFENCE", "AEROSPACE": "DEFENCE",
+        "RAIL": "RAILWAY", "TRAVEL": "RAILWAY", "LOGISTICS": "RAILWAY",
+        "FMCG": "FMCG", "FOOD": "FMCG", "CONSUMER": "FMCG",
+        "ENERGY": "ENERGY", "OIL": "ENERGY", "GAS": "ENERGY", "POWER": "ENERGY",
+        "METAL": "METALS_MINING", "MINING": "METALS_MINING", "STEEL": "METALS_MINING",
+        "CEMENT": "CEMENT_CONSTRUCTION", "CONSTRUCTION": "CEMENT_CONSTRUCTION",
+        "INFRA": "CEMENT_CONSTRUCTION", "REAL ESTATE": "REALTY",
+        "TELECOM": "TELECOM", "MEDIA": "MEDIA", "TEXTILE": "TEXTILES",
+    }
+    for key, value in mapping.items():
+        if key in s:
+            return value
+    return str(industry or "UNKNOWN").strip().upper() or "UNKNOWN"
+
+
+def _v7_resample_ohlc(df: pd.DataFrame, rule: str) -> pd.DataFrame:
+    if df is None or df.empty:
+        return pd.DataFrame()
+    x = df.copy()
+    if "DateTime" not in x.columns:
+        return pd.DataFrame()
+    x["DateTime"] = pd.to_datetime(x["DateTime"], errors="coerce")
+    x = x.dropna(subset=["DateTime"]).set_index("DateTime")
+    for c in ("Open", "High", "Low", "Close", "Volume"):
+        if c not in x.columns:
+            x[c] = np.nan
+        x[c] = pd.to_numeric(x[c], errors="coerce")
+    out = x.resample(rule).agg({
+        "Open": "first", "High": "max", "Low": "min", "Close": "last", "Volume": "sum"
+    }).dropna(subset=["Open", "High", "Low", "Close"])
+    return out.reset_index()
+
+
+def _v7_local_levels(df: pd.DataFrame) -> Dict[str, float]:
+    if df is None or len(df) < 8:
+        return {"support": np.nan, "resistance": np.nan, "atr": np.nan, "distance_support_pct": np.nan, "distance_resistance_pct": np.nan}
+    x = df.copy()
+    close = safe_float(x["Close"].iloc[-1])
+    a = atr(x, 14)
+    av = safe_float(a.iloc[-1]) if len(a) else np.nan
+    lows = pd.to_numeric(x["Low"], errors="coerce").tail(min(60, len(x)))
+    highs = pd.to_numeric(x["High"], errors="coerce").tail(min(60, len(x)))
+    supports = [safe_float(v) for v in lows if np.isfinite(safe_float(v)) and safe_float(v) < close]
+    resistances = [safe_float(v) for v in highs if np.isfinite(safe_float(v)) and safe_float(v) > close]
+    support = max(supports) if supports else safe_float(lows.min())
+    resistance = min(resistances) if resistances else safe_float(highs.max())
+    return {
+        "support": support,
+        "resistance": resistance,
+        "atr": av,
+        "distance_support_pct": ((close / support) - 1) * 100 if np.isfinite(close) and np.isfinite(support) and support else np.nan,
+        "distance_resistance_pct": ((resistance / close) - 1) * 100 if np.isfinite(close) and np.isfinite(resistance) and close else np.nan,
+    }
+
+
+def _v7_mw_pattern(df: pd.DataFrame) -> Tuple[str, float]:
+    """Conservative M/W heuristic from swing highs/lows; not a chart-image claim."""
+    if df is None or len(df) < 25:
+        return "NONE", 0.0
+    c = pd.to_numeric(df["Close"], errors="coerce").dropna().tail(80)
+    if len(c) < 25:
+        return "NONE", 0.0
+    vals = c.values
+    peaks, troughs = [], []
+    w = 2
+    for i in range(w, len(vals) - w):
+        window = vals[i-w:i+w+1]
+        if vals[i] == max(window): peaks.append((i, vals[i]))
+        if vals[i] == min(window): troughs.append((i, vals[i]))
+    if len(peaks) >= 2:
+        a, b = peaks[-2], peaks[-1]
+        if a[0] < b[0] and abs(a[1]-b[1]) / max(abs(a[1]), 1e-9) < 0.025:
+            neckline = min(vals[a[0]:b[0]+1])
+            if vals[-1] < max(a[1], b[1]) * 0.995:
+                return "M_TOP", 82.0
+    if len(troughs) >= 2:
+        a, b = troughs[-2], troughs[-1]
+        if a[0] < b[0] and abs(a[1]-b[1]) / max(abs(a[1]), 1e-9) < 0.025:
+            if vals[-1] > min(a[1], b[1]) * 1.005:
+                return "W_BOTTOM", 82.0
+    return "NONE", 0.0
+
+
+def _v7_mtf_fetch(symbol: str) -> Dict[str, Any]:
+    """Fetch expensive MTF data only for the 30-stock bet basket."""
+    ticker = f"{symbol}.NS"
+    result: Dict[str, Any] = {"symbol": symbol}
+    try:
+        daily = fetch_yahoo_chart(ticker, days=320, interval="1d")
+        hourly = fetch_yahoo_chart(ticker, days=180, interval="1h")
+        mins15 = fetch_yahoo_chart(ticker, days=55, interval="15m")
+        if daily is not None and not daily.empty:
+            weekly = _v7_resample_ohlc(daily, "W-FRI")
+        else:
+            weekly = pd.DataFrame()
+        four_h = _v7_resample_ohlc(hourly, "4h") if hourly is not None else pd.DataFrame()
+        frames = {"W": weekly, "D": daily, "4H": four_h, "1H": hourly, "15M": mins15}
+        levels = {}
+        score_parts = []
+        for name, frame in frames.items():
+            lv = _v7_local_levels(frame)
+            pat, pat_score = _v7_mw_pattern(frame)
+            lv["pattern"] = pat
+            lv["pattern_score"] = pat_score
+            levels[name] = lv
+            if pat == "M_TOP": score_parts.append(25.0)
+            elif pat == "W_BOTTOM": score_parts.append(75.0)
+            else: score_parts.append(50.0)
+        result["mtf"] = levels
+        result["mtf_score"] = float(np.mean(score_parts)) if score_parts else 50.0
+    except Exception as exc:
+        LOGGER.warning("MTF enrichment failed for %s: %s", symbol, exc)
+        result["mtf"] = {}
+        result["mtf_score"] = 50.0
+    return result
+
+
+def _v7_directional_mtf(row: pd.Series, mtf: Dict[str, Any]) -> Dict[str, Any]:
+    direction = str(row.get("Direction", "NEUTRAL"))
+    price = safe_float(row.get("LTP"), np.nan)
+    av = safe_float(row.get("ATR"), np.nan)
+    if not np.isfinite(av) or av <= 0:
+        atrpct = safe_float(row.get("ATRpct"), np.nan)
+        av = price * atrpct / 100.0 if np.isfinite(price) and np.isfinite(atrpct) else np.nan
+    support_candidates, resistance_candidates = [], []
+    pattern_conflicts, pattern_supports = 0, 0
+    for tf, lv in mtf.items():
+        s = safe_float(lv.get("support")); r = safe_float(lv.get("resistance"))
+        if np.isfinite(s) and np.isfinite(price) and s < price: support_candidates.append(s)
+        if np.isfinite(r) and np.isfinite(price) and r > price: resistance_candidates.append(r)
+        p = lv.get("pattern")
+        if direction == "LONG":
+            if p == "M_TOP": pattern_conflicts += 1
+            elif p == "W_BOTTOM": pattern_supports += 1
+        elif direction == "SHORT":
+            if p == "W_BOTTOM": pattern_conflicts += 1
+            elif p == "M_TOP": pattern_supports += 1
+    support = max(support_candidates) if support_candidates else np.nan
+    resistance = min(resistance_candidates) if resistance_candidates else np.nan
+    if direction == "LONG":
+        invalidation = support if np.isfinite(support) else (price - av if np.isfinite(price) and np.isfinite(av) else np.nan)
+        risk = price - invalidation if np.isfinite(price) and np.isfinite(invalidation) else np.nan
+        target = resistance if np.isfinite(resistance) else (price + V7_RR_TARGET_MULT * av if np.isfinite(price) and np.isfinite(av) else np.nan)
+        reward = target - price if np.isfinite(target) and np.isfinite(price) else np.nan
+    else:
+        invalidation = resistance if np.isfinite(resistance) else (price + av if np.isfinite(price) and np.isfinite(av) else np.nan)
+        risk = invalidation - price if np.isfinite(price) and np.isfinite(invalidation) else np.nan
+        target = support if np.isfinite(support) else (price - V7_RR_TARGET_MULT * av if np.isfinite(price) and np.isfinite(av) else np.nan)
+        reward = price - target if np.isfinite(target) and np.isfinite(price) else np.nan
+    rr = reward / risk if np.isfinite(reward) and np.isfinite(risk) and risk > 0 else np.nan
+    invalidation_atr = risk / av if np.isfinite(risk) and np.isfinite(av) and av > 0 else np.nan
+    mtf_score = 50.0 + pattern_supports * 6.0 - pattern_conflicts * 9.0
+    for tf in ("W", "D", "4H", "1H", "15M"):
+        lv = mtf.get(tf, {})
+        if direction == "LONG" and np.isfinite(price) and np.isfinite(lv.get("support", np.nan)) and np.isfinite(lv.get("resistance", np.nan)):
+            if price > lv["support"]: mtf_score += 2.0
+        if direction == "SHORT" and np.isfinite(price) and np.isfinite(lv.get("resistance", np.nan)) and np.isfinite(lv.get("support", np.nan)):
+            if price < lv["resistance"]: mtf_score += 2.0
+    return {
+        "mtf_score": clip(mtf_score),
+        "support": support,
+        "resistance": resistance,
+        "invalidation": invalidation,
+        "target": target,
+        "risk_points": risk,
+        "reward_points": reward,
+        "rr": rr,
+        "invalidation_atr": invalidation_atr,
+        "pattern_conflicts": pattern_conflicts,
+        "pattern_supports": pattern_supports,
+        "hard_rr_pass": bool(np.isfinite(rr) and rr >= V7_MIN_RR and np.isfinite(invalidation_atr) and invalidation_atr <= V7_MAX_INVALIDATION_DISTANCE_ATR),
+    }
+
+
+def _v7_vix_context() -> Dict[str, Any]:
+    try:
+        vix = fetch_yahoo_chart("^INDIAVIX", days=320, interval="1d")
+        if vix is None or vix.empty or "Close" not in vix:
+            return {"status": "UNAVAILABLE", "directional_predictor": False}
+        c = pd.to_numeric(vix["Close"], errors="coerce").dropna()
+        if c.empty: return {"status": "UNAVAILABLE", "directional_predictor": False}
+        level = safe_float(c.iloc[-1])
+        prev5 = safe_float(c.iloc[-6]) if len(c) >= 6 else np.nan
+        change5 = (level / prev5 - 1.0) * 100 if np.isfinite(prev5) and prev5 else np.nan
+        percentile = float((c <= level).mean() * 100)
+        if level >= V7_VIX_HIGH or (np.isfinite(change5) and change5 >= V7_VIX_SPIKE_PCT):
+            regime = "HIGH_VOLATILITY"
+            confirm_bonus = V7_VIX_HIGH_CONFIRM_BONUS
+            risk_multiplier = 0.65
+        elif level >= V7_VIX_CAUTION:
+            regime = "CAUTION"
+            confirm_bonus = V7_VIX_CAUTION_CONFIRM_BONUS
+            risk_multiplier = 0.80
+        else:
+            regime = "NORMAL"
+            confirm_bonus = 0.0
+            risk_multiplier = 1.0
+        return {
+            "status": "OK", "level": round(level, 3), "change_5d_pct": round(change5, 3) if np.isfinite(change5) else None,
+            "percentile": round(percentile, 2), "regime": regime, "confirmation_bonus": confirm_bonus,
+            "risk_multiplier": risk_multiplier, "directional_predictor": False,
+            "note": "VIX controls caution/confirmation/risk only; it does not predict LONG or SHORT direction.",
+        }
+    except Exception as exc:
+        LOGGER.warning("VIX context unavailable: %s", exc)
+        return {"status": "UNAVAILABLE", "directional_predictor": False}
+
+
+def _v7_preselect_30(scored: pd.DataFrame) -> pd.DataFrame:
+    if scored is None or scored.empty:
+        return pd.DataFrame()
+    x = scored[scored["Direction"].isin(["LONG", "SHORT"])].copy()
+    x = x[x["DayAheadScore"] >= DAY_AHEAD_MIN_SCORE].sort_values("DayAheadScore", ascending=False)
+    if x.empty: return x
+    selected, counts = [], {}
+    for _, row in x.iterrows():
+        sector = _v7_sector_bucket(row.get("Industry"))
+        if counts.get(sector, 0) >= V7_MAX_STOCKS_PER_SECTOR:
+            continue
+        item = row.copy()
+        item["SectorBucket"] = sector
+        selected.append(item)
+        counts[sector] = counts.get(sector, 0) + 1
+        if len(selected) >= V7_BASKET_SIZE: break
+    if len(selected) < V7_BASKET_SIZE:
+        used = {str(r["Symbol"]) for r in selected}
+        for _, row in x.iterrows():
+            if str(row["Symbol"]) in used: continue
+            item = row.copy(); item["SectorBucket"] = _v7_sector_bucket(row.get("Industry")); selected.append(item); used.add(str(row["Symbol"]))
+            if len(selected) >= V7_BASKET_SIZE: break
+    return pd.DataFrame(selected).reset_index(drop=True)
+
+
+def _v7_enrich_basket(basket: pd.DataFrame) -> pd.DataFrame:
+    if basket.empty: return basket
+    jobs = {}
+    with ThreadPoolExecutor(max_workers=V7_MTF_THREADS) as pool:
+        for symbol in basket["Symbol"].astype(str): jobs[symbol] = pool.submit(_v7_mtf_fetch, symbol)
+        rows = []
+        for _, row in basket.iterrows():
+            symbol = str(row["Symbol"])
+            try: mtf = jobs[symbol].result()
+            except Exception: mtf = {"mtf": {}, "mtf_score": 50.0}
+            risk = _v7_directional_mtf(row, mtf.get("mtf", {}))
+            out = row.to_dict(); out.update(risk); out["MTF"] = mtf.get("mtf", {})
+            # MTF is an additional confirmation layer, not a replacement for the original score.
+            base = safe_float(out.get("DayAheadScore"), 0.0)
+            out["V7Score"] = clip(base * 0.72 + safe_float(risk.get("mtf_score"), 50.0) * 0.18 + safe_float(out.get("AntiFalsePositiveScore"), 50.0) * 0.10)
+            rows.append(out)
+    return pd.DataFrame(rows).sort_values("V7Score", ascending=False).reset_index(drop=True)
+
+
+def _v7_select_final5(enriched: pd.DataFrame) -> pd.DataFrame:
+    if enriched.empty: return enriched
+    x = enriched.copy()
+    # Hard exclusions: no direction, no structural RR, or invalidation too close.
+    x = x[x["Direction"].isin(["LONG", "SHORT"])].copy()
+    x = x[x["hard_rr_pass"] == True].copy()
+    if x.empty: return x
+    selected, sector_count = [], {}
+    for _, row in x.sort_values("V7Score", ascending=False).iterrows():
+        sector = str(row.get("SectorBucket", "UNKNOWN"))
+        if sector_count.get(sector, 0) >= 2: continue
+        selected.append(row)
+        sector_count[sector] = sector_count.get(sector, 0) + 1
+        if len(selected) >= TOP5_COUNT: break
+    return pd.DataFrame(selected).reset_index(drop=True)
+
+
+def _v7_risk_profile(row: Dict[str, Any], vix: Dict[str, Any]) -> Dict[str, Any]:
+    direction = str(row.get("direction", row.get("Direction", "LONG")))
+    entry = safe_float(row.get("ltp", row.get("LTP", np.nan)))
+    atrv = safe_float(row.get("ATR", np.nan))
+    if not np.isfinite(atrv) or atrv <= 0:
+        atrpct = safe_float(row.get("atr_pct", row.get("ATRpct", np.nan)))
+        atrv = entry * atrpct / 100 if np.isfinite(entry) and np.isfinite(atrpct) else np.nan
+    stop = safe_float(row.get("invalidation", np.nan))
+    target = safe_float(row.get("target", np.nan))
+    if not np.isfinite(stop) and np.isfinite(entry) and np.isfinite(atrv): stop = entry - 1.5*atrv if direction == "LONG" else entry + 1.5*atrv
+    if not np.isfinite(target) and np.isfinite(entry) and np.isfinite(atrv): target = entry + 2.25*atrv if direction == "LONG" else entry - 2.25*atrv
+    risk = abs(entry-stop) if np.isfinite(entry) and np.isfinite(stop) else np.nan
+    reward = abs(target-entry) if np.isfinite(entry) and np.isfinite(target) else np.nan
+    rr = reward/risk if np.isfinite(risk) and risk > 0 and np.isfinite(reward) else np.nan
+    return {
+        "entry_reference": round(entry, 2) if np.isfinite(entry) else None,
+        "atr": round(atrv, 4) if np.isfinite(atrv) else None,
+        "suggested_stop": round(stop, 2) if np.isfinite(stop) else None,
+        "target_1": round(entry + (risk*1.5 if direction == "LONG" else -risk*1.5), 2) if np.isfinite(entry) and np.isfinite(risk) else None,
+        "target_2": round(target, 2) if np.isfinite(target) else None,
+        "rr": round(rr, 3) if np.isfinite(rr) else None,
+        "risk_multiplier": vix.get("risk_multiplier", 1.0),
+        "distance_to_invalidation_atr": row.get("invalidation_atr"),
+    }
+
+
+def _v7_circuit_gate(symbol: str, opening: pd.DataFrame) -> Tuple[bool, str]:
+    """Reject only when a raw circuit/price-band field proves a lock.
+    Unknown is not treated as locked because some broker quote schemas omit bands.
+    """
+    adapter = get_kotak_adapter()
+    if adapter is not None and adapter.connected:
+        q = adapter.quote(symbol)
+        if q:
+            ltp = safe_float(q.get("ltp")); upper = safe_float(q.get("upper_circuit", q.get("upper_price_band"))); lower = safe_float(q.get("lower_circuit", q.get("lower_price_band")))
+            if np.isfinite(ltp) and np.isfinite(upper) and upper > 0 and ltp >= upper * 0.999: return False, "CIRCUIT_LOCKED_UPPER"
+            if np.isfinite(ltp) and np.isfinite(lower) and lower > 0 and ltp <= lower * 1.001: return False, "CIRCUIT_LOCKED_LOWER"
+    return True, "OK_OR_BAND_UNAVAILABLE"
+
+
+def _v7_sector_regimes(candidates: List[Dict[str, Any]]) -> Dict[str, Any]:
+    groups: Dict[str, List[float]] = {}
+    for c in candidates:
+        sec = str(c.get("sector_bucket", _v7_sector_bucket(c.get("industry"))))
+        intra = fetch_intraday(str(c.get("symbol", "")))
+        opening = opening_slice(intra)
+        ret = np.nan
+        if not opening.empty:
+            op = safe_float(opening["Open"].iloc[0]); last = safe_float(opening["Close"].iloc[-1])
+            if np.isfinite(op) and op: ret = (last/op-1)*100
+        if np.isfinite(ret): groups.setdefault(sec, []).append(ret)
+    regimes = {}
+    for sec, vals in groups.items():
+        r = float(np.mean(vals)); regimes[sec] = {"return_5m_pct": round(r,3), "breadth": round(float(np.mean(np.array(vals)>0)),3), "regime": "BULLISH" if r > 0.15 and np.mean(np.array(vals)>0) >= .60 else ("BEARISH" if r < -0.15 and np.mean(np.array(vals)<0) >= .60 else "NEUTRAL")}
+    return regimes
+
+
+def _v7_confirm_sector_filter(confirmations: List[Dict[str, Any]], regimes: Dict[str, Any]) -> List[Dict[str, Any]]:
+    out=[]
+    for c in confirmations:
+        sec = str(c.get("sector_bucket", "UNKNOWN")); reg = regimes.get(sec, {}).get("regime", "NEUTRAL")
+        direction = c.get("direction")
+        if reg == "BULLISH" and direction == "LONG": c["sector_live_alignment"] = True; c["confirmation_score"] = clip(safe_float(c.get("confirmation_score"),0)+5)
+        elif reg == "BEARISH" and direction == "SHORT": c["sector_live_alignment"] = True; c["confirmation_score"] = clip(safe_float(c.get("confirmation_score"),0)+5)
+        elif reg == "NEUTRAL": c["sector_live_alignment"] = False
+        else: c["sector_live_alignment"] = False; c["confirmation_score"] = max(0.0, safe_float(c.get("confirmation_score"),0)-10)
+        out.append(c)
+    return out
+
+
+def _v7_audit() -> Dict[str, Any]:
+    rows=[]
+    if OUTCOME_JSONL.exists():
+        try:
+            with OUTCOME_JSONL.open("r", encoding="utf-8") as fh:
+                for line in fh:
+                    if line.strip(): rows.append(json.loads(line))
+        except Exception as exc:
+            return {"status":"ERROR", "error":str(exc)}
+    if not rows: return {"status":"NO_DATA", "trades":0}
+    df=pd.DataFrame(rows)
+    def mean_col(cols):
+        for c in cols:
+            if c in df.columns:
+                x=pd.to_numeric(df[c],errors="coerce").dropna()
+                if not x.empty:return float(x.mean())
+        return None
+    result={"status":"OK","trades":len(df),"avg_slippage_pct":mean_col(["execution_slippage_pct","slippage_pct"]),"avg_slippage_points":mean_col(["execution_slippage_points","slippage_points"])}
+    if "sector" in df.columns:
+        result["sector_breakdown"]=df.groupby("sector").size().to_dict()
+    if "quality_score" in df.columns and "win" in df.columns:
+        try: result["quality_score_win_correlation"]=float(df[["quality_score","win"]].corr().iloc[0,1])
+        except Exception: result["quality_score_win_correlation"]=None
+    _atomic_write_text(V7_AUDIT_FILE, json.dumps(result,ensure_ascii=False,indent=2,default=str))
+    return result
+
+
+def _v7_build_day_ahead_watchlist() -> Dict[str, Any]:
+    """V7 orchestration: original 500 scan -> 30 bet basket -> expensive MTF -> final 5."""
+    timestamp = now_ist()
+    universe = load_nifty500_universe()
+    symbols = universe["Symbol"].astype(str).str.upper().str.strip().drop_duplicates().tolist()
+    benchmark = fetch_yahoo_chart(NIFTY_TICKER, days=320, interval="1d")
+    histories = fetch_history(symbols, days=320)
+    rows=[]
+    for _, item in universe.iterrows():
+        symbol=str(item["Symbol"]).upper().strip(); df=histories.get(symbol)
+        if df is None: continue
+        industry=str(item.get("Industry","UNKNOWN"))
+        features=build_features(symbol,df,benchmark,industry)
+        if features is not None: rows.append(features)
+    if not rows: raise RuntimeError("No usable stock data available")
+    frame=add_sector_features(pd.DataFrame(rows)); scored=score_candidates(frame)
+    basket=_v7_preselect_30(scored)
+    enriched=_v7_enrich_basket(basket)
+    vix=_v7_vix_context()
+    if not enriched.empty:
+        enriched["MacroVIXRegime"] = vix.get("regime","UNAVAILABLE")
+    top5=_v7_select_final5(enriched)
+    kotak_snapshot=capture_kotak_day_ahead_snapshot([str(x).upper() for x in top5["Symbol"].tolist()] if not top5.empty else [])
+    candidates=[]
+    for rank,(_,row) in enumerate(top5.iterrows(),start=1):
+        d=row.to_dict(); sym=str(row["Symbol"]); q=kotak_snapshot.get(sym,{})
+        if np.isfinite(safe_float(q.get("ltp"))): d["LTP"]=safe_float(q.get("ltp"))
+        d["sector_bucket"]=_v7_sector_bucket(d.get("Industry")); d["risk_profile"]=_v7_risk_profile(d,vix)
+        candidates.append({
+            "rank":rank,"symbol":sym,"industry":str(d.get("Industry","UNKNOWN")),"sector_bucket":d["sector_bucket"],"direction":str(d.get("Direction")),
+            "day_ahead_score":round(safe_float(d.get("DayAheadScore"),0),2),"v7_score":round(safe_float(d.get("V7Score"),0),2),
+            "selection_score":round(safe_float(d.get("V7Score"),0),2),"setup_type":str(d.get("SetupType","UNKNOWN")),
+            "trend_score":round(safe_float(d.get("TrendScore"),50),2),"momentum_score":round(safe_float(d.get("MomentumScore"),50),2),
+            "relative_strength_score":round(safe_float(d.get("RelativeStrengthScore"),50),2),"sector_score":round(safe_float(d.get("SectorScore"),50),2),
+            "volume_score":round(safe_float(d.get("VolumeScore"),50),2),"volatility_score":round(safe_float(d.get("VolatilityScore"),50),2),
+            "catalyst_score":round(safe_float(d.get("CatalystScoreFinal"),50),2),"anti_false_positive_score":round(safe_float(d.get("AntiFalsePositiveScore"),50),2),
+            "ltp":round(safe_float(d.get("LTP"),np.nan),2),"atr_pct":round(safe_float(d.get("ATRpct"),np.nan),3),
+            "ret_1d":round(safe_float(d.get("Ret1D"),np.nan),3),"ret_5d":round(safe_float(d.get("Ret5D"),np.nan),3),"ret_20d":round(safe_float(d.get("Ret20D"),np.nan),3),
+            "rs_5d":round(safe_float(d.get("RS5D"),np.nan),3),"rs_20d":round(safe_float(d.get("RS20D"),np.nan),3),
+            "mtf_score":round(safe_float(d.get("mtf_score"),50),2),"support":safe_float(d.get("support"),np.nan),"resistance":safe_float(d.get("resistance"),np.nan),
+            "invalidation":safe_float(d.get("invalidation"),np.nan),"target":safe_float(d.get("target"),np.nan),"rr":round(safe_float(d.get("rr"),np.nan),3),
+            "invalidation_atr":round(safe_float(d.get("invalidation_atr"),np.nan),3),"pattern_conflicts":int(d.get("pattern_conflicts",0)),"pattern_supports":int(d.get("pattern_supports",0)),
+            "risk_profile":d["risk_profile"],"thesis":"THESIS_PENDING_MORNING_CONFIRMATION","invalidation_rule":"Structural S/R or ATR fallback; hard R:R gate applies."
+        })
+    basket_records=[]
+    for _,row in enriched.iterrows():
+        basket_records.append({"symbol":str(row["Symbol"]),"sector_bucket":str(row.get("SectorBucket",_v7_sector_bucket(row.get("Industry")))),"direction":str(row.get("Direction")),"day_ahead_score":round(safe_float(row.get("DayAheadScore"),0),2),"v7_score":round(safe_float(row.get("V7Score"),0),2),"mtf_score":round(safe_float(row.get("mtf_score"),50),2),"rr":round(safe_float(row.get("rr"),np.nan),3),"hard_rr_pass":bool(row.get("hard_rr_pass",False))})
+    result={"engine":"NEXT_DAY_ALPHA_ENGINE","version":V7_VERSION,"generated_at":timestamp.isoformat(),"data_as_of":timestamp.strftime("%Y-%m-%d"),"architecture":{"nifty_3min_engine_modified":False,"shared_raw_data_allowed":True,"shared_calculated_features":False,"shared_scores":False,"shared_regime_decisions":False,"shared_decisions":False,"shared_labels":False,"shared_predictions":False,"shared_raw_fields_only":True,"next_day_can_write_to_nifty_engine":False,"next_day_can_read_nifty_calculations":False},"macro_regime":vix,"day_ahead":{"universe_size":len(symbols),"usable_symbols":len(frame),"scored_symbols":len(scored),"bet_basket_size":len(basket_records),"bet_basket_30":basket_records,"top5_count":len(candidates),"top5":candidates},"morning_confirmation":{"status":"PENDING","final":[]},"probability_note":"Quality scores are not win probabilities. VIX is not a directional predictor. Historical calibration is required before any probability claim.","quality_controls":{"hard_rr_gate":V7_MIN_RR,"max_invalidation_atr":V7_MAX_INVALIDATION_DISTANCE_ATR,"mtf_timeframes":["W","D","4H","1H","15M"],"sector_basket_max_per_sector":V7_MAX_STOCKS_PER_SECTOR,"no_trade_allowed":True}}
+    _atomic_write_text(CACHE_JSON,json.dumps(result,ensure_ascii=False,indent=2,default=str))
+    return result
+
+
+# Override the original orchestration without removing its implementation.
+build_day_ahead_watchlist = _v7_build_day_ahead_watchlist
+
+
+def _v7_run_morning_confirmation() -> Dict[str, Any]:
+    latest=load_latest()
+    if not latest: return {"status":"NO_DAY_AHEAD_DATA","final":[]}
+    candidates=latest.get("day_ahead",{}).get("top5",[])
+    if not candidates: return {"status":"NO_CANDIDATES","final":[],"confirmations":[]}
+    nifty_gap=market_gap(NIFTY_TICKER)
+    vix=latest.get("macro_regime",{})
+    # Morning sector regime is calculated from the 30-stock raw basket first.
+    basket=latest.get("day_ahead",{}).get("bet_basket_30",[])
+    regimes=_v7_sector_regimes(basket)
+    confirmations=[]
+    for c in candidates:
+        sec=str(c.get("sector_bucket",_v7_sector_bucket(c.get("industry"))))
+        sector_ret=safe_float(regimes.get(sec,{}).get("return_5m_pct"),np.nan)
+        conf=confirm_candidate(c,nifty_gap,sector_ret)
+        item=asdict(conf); item["sector_bucket"]=sec; item["sector_live_regime"]=regimes.get(sec,{}).get("regime","UNKNOWN"); item["vix_regime"]=vix.get("regime","UNKNOWN")
+        ok, circuit_reason=_v7_circuit_gate(str(c["symbol"]),pd.DataFrame()); item["circuit_gate"]=circuit_reason
+        if not ok: item["status"]="REJECTED"; item["reason"]=circuit_reason; item["confirmation_score"]=0.0
+        confirmations.append(item)
+    confirmations=_v7_confirm_sector_filter(confirmations,regimes)
+    bonus=safe_float(vix.get("confirmation_bonus"),0)
+    required=min(99.0,MORNING_CONFIRMATION_MIN_SCORE+bonus)
+    confirmed=[]
+    for item in confirmations:
+        score=safe_float(item.get("confirmation_score"),0)
+        sector_ok=item.get("sector_live_alignment") is True
+        # In neutral sectors the original confirmation may still stand; opposite live sectors are hard rejection.
+        if item.get("sector_live_regime") in ("BULLISH","BEARISH") and not sector_ok:
+            item["status"]="REJECTED"; item["reason"]="Live sector regime contradicts thesis"
+        elif score >= required and item.get("status") not in ("REJECTED","DATA_NOT_READY") and (item.get("acceptance") or item.get("breakout")):
+            item["status"]="CONFIRMED"; item["reason"]="Thesis + morning price acceptance + sector + VWAP aligned"; confirmed.append(item)
+        elif score >= MORNING_WATCH_SCORE and item.get("status") not in ("REJECTED","DATA_NOT_READY"):
+            item["status"]="WATCH"
+        else:
+            item["status"]="REJECTED"
+    confirmed.sort(key=lambda x:(safe_float(x.get("confirmation_score"),0),safe_float(x.get("previous_day_score"),0)),reverse=True)
+    # FINAL-2 correlation gate: avoid two same-sector names unless market breadth is exceptionally strong.
+    final=[]; sector_used={}
+    for item in confirmed:
+        sec=item.get("sector_bucket","UNKNOWN")
+        if sector_used.get(sec,0)>=1: continue
+        final.append(item); sector_used[sec]=sector_used.get(sec,0)+1
+        if len(final)>=2: break
+    if len(final)<2:
+        for item in confirmed:
+            if item in final: continue
+            final.append(item)
+            if len(final)>=2: break
+    status="FINAL_2" if len(final)>=2 else ("FINAL_1" if len(final)==1 else "NO_TRADE")
+    result={"status":status,"generated_at":now_ist().isoformat(),"required_confirmation_score":required,"vix_regime":vix,"sector_regimes":regimes,"final":final,"confirmations":confirmations,"no_trade_reason":"No candidate satisfied thesis, sector, circuit, R:R and morning confirmation gates." if not final else ""}
+    latest["morning_confirmation"]=result
+    _atomic_write_text(CACHE_JSON,json.dumps(latest,ensure_ascii=False,indent=2,default=str))
+    return result
+
+run_morning_confirmation = _v7_run_morning_confirmation
+
+
+# ============================================================================
 # PUBLIC ENGINE
 # ============================================================================
 
@@ -4847,6 +5406,10 @@ class NextDayAlphaEngine:
             )
         )
 
+    def live_basket30(self) -> List[Dict[str, Any]]:
+        latest = load_latest()
+        return latest.get("day_ahead", {}).get("bet_basket_30", [])
+
     def start_if_due_background(
         self,
     ) -> None:
@@ -4887,8 +5450,8 @@ class NextDayAlphaEngine:
                 # Only raw fields are written to the shared cache.
                 if current.hour == 9 and 15 <= current.minute < 20:
                     try:
-                        top5_now = self.live_top5()
-                        symbols_now = [str(x.get("symbol", "")) for x in top5_now if x.get("symbol")]
+                        basket_now = self.live_basket30()
+                        symbols_now = [str(x.get("symbol", "")) for x in basket_now if x.get("symbol")]
                         adapter = get_kotak_adapter()
                         if adapter is not None and adapter.connected:
                             for symbol in symbols_now:
@@ -5183,6 +5746,12 @@ def main() -> None:
         help="Launch the optional Streamlit dashboard",
     )
 
+    parser.add_argument(
+        "--audit",
+        action="store_true",
+        help="Audit outcomes.jsonl for slippage, score correlation and sector results",
+    )
+
     args = parser.parse_args()
 
     # Fail fast: validate directories, environment/configuration, and
@@ -5197,6 +5766,10 @@ def main() -> None:
 
     if args.streamlit:
         run_streamlit_dashboard()
+        return
+
+    if args.audit:
+        print(json.dumps(_v7_audit(), indent=2, ensure_ascii=False, default=str))
         return
 
     if args.day_ahead:
