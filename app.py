@@ -46,6 +46,15 @@ try:
 except ImportError:
     NeoAPI = None
 
+# =========================================================
+# INDEPENDENT NEXT-DAY STOCK ALPHA LAYER
+# Core NIFTY engine remains untouched.
+# =========================================================
+try:
+    from next_day_alpha_engine import NextDayAlphaEngine
+except ImportError:
+    NextDayAlphaEngine = None
+
 
 # =========================================================
 # TIMEZONE FIX - FORCE IST EVERYWHERE
@@ -2343,6 +2352,60 @@ if st is not None:
     def get_global_adapter():
         return KotakNeoAdapter()
 
+    @st.cache_resource
+    def get_next_day_alpha_engine():
+        return NextDayAlphaEngine() if NextDayAlphaEngine is not None else None
+
+
+def render_next_day_alpha():
+    """Independent next-day stock layer. It never feeds decisions into the NIFTY engine."""
+    if NextDayAlphaEngine is None:
+        return
+    alpha = get_next_day_alpha_engine()
+    if alpha is None:
+        return
+
+    # After 16:30 IST this starts the scan in a daemon thread.
+    alpha.start_if_due_background()
+    data = alpha.latest()
+
+    st.markdown('<div class="terminal-card">', unsafe_allow_html=True)
+    st.markdown("### ðŸš€ Next-Day Intraday Stock Alpha")
+    st.caption("Independent backend layer â€¢ NIFTY core/Regime/Decision/Option engines are not modified or used for stock ranking")
+
+    if alpha.scan_running():
+        st.info("â³ After-market scan is running in the backend: Universe â†’ 100 â†’ 30 â†’ Top-50 â†’ 7D Volume Shock â†’ Top-5 â†’ Top-2")
+    elif not data:
+        st.warning("Waiting for the first after-market scan. Scheduled start: 16:30 IST.")
+    elif data.get("status") == "ERROR":
+        st.error(f"Alpha scan error: {data.get('error', 'unknown error')}")
+    else:
+        top5 = alpha.live_top5(refresh_seconds=60)
+        top2_symbols = {str(x.get("Symbol")) for x in data.get("top2", [])}
+
+        if top5:
+            rows = []
+            for i, x in enumerate(top5, 1):
+                rows.append({
+                    "Rank": i,
+                    "Stock": x.get("Symbol", "-"),
+                    "LTP": f"â‚¹{x.get('LiveLTP', x.get('LTP', 0)):.2f}" if is_valid_number(x.get('LiveLTP', x.get('LTP'))) else "-",
+                    "Live %": f"{x.get('LiveChangePct', 0):+.2f}%" if is_valid_number(x.get('LiveChangePct', np.nan)) else "-",
+                    "Alpha": f"{x.get('FinalScore', 0):.1f}",
+                    "Conf.â€ ": f"{x.get('ConfidencePct', 0):.0f}%",
+                    "7D Vol Shock": f"{x.get('VolumeRatio7D', 0):.2f}x",
+                    "Exp. Move": f"{x.get('ExpectedMoveLowPct', 0):.1f}â€“{x.get('ExpectedMoveHighPct', 0):.1f}%",
+                    "Status": "ðŸ¥‡ TOP 2" if str(x.get("Symbol")) in top2_symbols else "TOP 5",
+                })
+            st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+            st.caption("â€  Confidence is a heuristic ranking score, not a calibrated ML probability. Live price refreshes approximately every 60 seconds.")
+        else:
+            st.warning("No valid Top-5 candidates available yet.")
+
+        generated = data.get("generated_at", "-")
+        st.caption(f"Generated: {generated} â€¢ Universe: {data.get('universe_count', 0)} â€¢ History OK: {data.get('history_count', 0)} â€¢ Top-50 checkpoint: {data.get('checkpoint50_count', 0)}")
+    st.markdown('</div>', unsafe_allow_html=True)
+
 
 def main():
     if st is None:
@@ -2612,6 +2675,9 @@ def main():
             st.dataframe(df_hw, height=210, hide_index=True)
         else:
             st.caption("Heavyweights mapping pending discovery... Click Discover Instruments in Sidebar.")
+
+    # Independent stock alpha display; no data is written back into the NIFTY decision path.
+    render_next_day_alpha()
 
     if is_streaming:
         time.sleep(CONFIG["ui_refresh_sec"])
