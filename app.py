@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-NIFTY 3-Min Micro Engine | v6.7 Institutional Prop-Grade Architecture
+NIFTY 3-Min Micro Engine | v7.0 Institutional Prop-Grade Architecture
 DATA-COLLECTION READY & OPTION-CENTRIC DESK:
 - Price action, Kalman filter, ATR, and slope strictly use Future (fut_vwap / fut_c).
 - PCR, OI changes, Greeks (Vanna/Charm), and GEX strictly use Option Chain (22 strikes).
@@ -46,15 +46,6 @@ try:
 except ImportError:
     NeoAPI = None
 
-# =========================================================
-# INDEPENDENT NEXT-DAY STOCK ALPHA LAYER
-# Core NIFTY engine remains untouched.
-# =========================================================
-try:
-    from next_day_alpha_engine import NextDayAlphaEngine
-except ImportError:
-    NextDayAlphaEngine = None
-
 
 # =========================================================
 # TIMEZONE FIX - FORCE IST EVERYWHERE
@@ -77,10 +68,10 @@ def to_ist(dt: datetime) -> datetime:
 # =========================================================
 
 CONFIG = {
-    "app_version": "v6.7_institutional_prop",
-    "feature_version": "v5.5_data_collection_ready",
+    "app_version": "v7.0_bucket_adaptive_dynamic_ride",
+    "feature_version": "v6.0_bucket_smc_volume_profile",
     "label_version": "TB_v3.0_clean",
-    "schema_version": "4.1",
+    "schema_version": "5.0",
     "weight_version": "NIFTY_STATIC_2025Q1",
     "atr_period": 14,
     "sma_period": 20,
@@ -893,6 +884,8 @@ class FeatureEngine:
         self.ha = HeikinAshiEngine()
         self.st = SuperTrendEngine(period=10, multiplier=3.0)
         self.hm = HilegaMilegaEngine()
+        self.advanced = AdvancedStructureEngine(maxlen=maxlen)
+        self.baskets = SignalBasketEngine()
 
     def reset_session(self):
         self.vwap_pv = self.vwap_vol = 0.0
@@ -909,6 +902,7 @@ class FeatureEngine:
         self.ha.reset()
         self.st.reset()
         self.hm.reset()
+        self.advanced.reset()
 
     def preload_warmup(self, historical_closes: List[float], historical_trs: List[float]):
         if historical_closes:
@@ -1019,6 +1013,18 @@ class FeatureEngine:
         ha_res = self.ha.update(candle.fut_o, candle.fut_h, candle.fut_l, candle.fut_c)
         st_res = self.st.update(candle.fut_h, candle.fut_l, candle.fut_c, atr=atr if is_valid_number(atr) else None)
         hm_res = self.hm.update(candle.fut_c)
+        advanced_res = self.advanced.compute(candle, prev)
+        advanced_res["fut_c"] = candle.fut_c
+        hw_res = self.hw.compute(candle)
+        or_res = self.or_eng.features(candle, atr if is_valid_number(atr) else 0.0)
+        sess_res = self.sess.features(candle, atr if is_valid_number(atr) else 0.0)
+        basket_input = {**advanced_res, **st_res, **hm_res, **ha_res, **pcr_features, **hw_res, **or_res, **sess_res,
+                        "kalman_stretch": kalman_stretch, "stretch_slope_3": stretch_slope,
+                        "order_book_imbalance": obi, "oi_long_buildup": oi_long_buildup,
+                        "oi_short_buildup": oi_short_buildup, "twc": hw_res.get("twc",0.0),
+                        "breadth_10": hw_res.get("breadth_10",0.5), "fut_volume": candle.fut_volume,
+                        "atr_14_prev": atr}
+        basket_res = self.baskets.score(basket_input)
 
         now_ts = now_ist()
         is_causal_verified = int(
@@ -1061,13 +1067,20 @@ class FeatureEngine:
             "oi_strength": oi_strength,
             "minutes_from_open": (ts_ist.hour * 60 + ts_ist.minute) - 555,
             "day_of_week": ts_ist.weekday(),
-            **self.hw.compute(candle),
-            **self.or_eng.features(candle, atr if is_valid_number(atr) else 0.0),
-            **self.sess.features(candle, atr if is_valid_number(atr) else 0.0),
+            **hw_res,
+            **or_res,
+            **sess_res,
             **pcr_features,
             **ha_res,
             **st_res,
             **hm_res,
+            **advanced_res,
+            "basket_scores_json": json.dumps(basket_res["basket_scores"], sort_keys=True),
+            "indicator_signals_json": json.dumps(basket_res["indicator_signals"], sort_keys=True),
+            "basket_alignments_json": json.dumps(basket_res["basket_alignments"], sort_keys=True),
+            "composite_alignment_score": basket_res["composite_score"],
+            "positive_baskets": basket_res["positive_baskets"],
+            "negative_baskets": basket_res["negative_baskets"],
             "missing_spot": missing_spot, "missing_future": missing_future,
             "missing_oi": missing_oi, "missing_volume": missing_volume,
             "missing_heavyweight": missing_heavyweight, "missing_option_chain": missing_option,
@@ -1172,6 +1185,195 @@ class LabelEngine:
         return labels
 
 
+
+# =========================================================
+# 6. ORTHOGONAL SIGNAL BASKETS / SMC / VOLUME PROFILE
+# =========================================================
+
+class AdvancedStructureEngine:
+    """Causal, bar-close structure engine.
+
+    IMPORTANT: CVD is an estimated directional-volume proxy when true aggressor
+    buy/sell prints are unavailable from the feed. It is never labelled as true
+    exchange cumulative delta.
+    """
+    def __init__(self, maxlen=150):
+        self.closes = deque(maxlen=maxlen)
+        self.highs = deque(maxlen=maxlen)
+        self.lows = deque(maxlen=maxlen)
+        self.volumes = deque(maxlen=maxlen)
+        self.cvd = 0.0
+        self.prev_pivot_high = np.nan
+        self.prev_pivot_low = np.nan
+        self.last_bos = 0
+        self.last_fvg = 0
+
+    def reset(self):
+        self.closes.clear(); self.highs.clear(); self.lows.clear(); self.volumes.clear()
+        self.cvd = 0.0; self.prev_pivot_high = np.nan; self.prev_pivot_low = np.nan
+        self.last_bos = 0; self.last_fvg = 0
+
+    @staticmethod
+    def _ema(values, period):
+        vals=[float(x) for x in values if is_valid_number(x)]
+        if len(vals)<period: return np.nan
+        a=2.0/(period+1.0); e=vals[0]
+        for x in vals[1:]: e=a*x+(1-a)*e
+        return float(e)
+
+    @staticmethod
+    def _rsi(values, period=14):
+        vals=np.asarray([x for x in values if is_valid_number(x)], dtype=float)
+        if len(vals)<period+1: return np.nan
+        d=np.diff(vals[-(period+1):]); g=np.mean(np.maximum(d,0)); l=np.mean(np.maximum(-d,0))
+        if l==0: return 100.0
+        return float(100-100/(1+g/l))
+
+    @staticmethod
+    def _adx(highs,lows,closes,period=14):
+        h=np.asarray(list(highs),float); l=np.asarray(list(lows),float); c=np.asarray(list(closes),float)
+        if len(c)<period+2: return np.nan
+        h=h[-(period+2):]; l=l[-(period+2):]; c=c[-(period+2):]
+        tr=[]; plus=[]; minus=[]
+        for i in range(1,len(c)):
+            tr.append(max(h[i]-l[i],abs(h[i]-c[i-1]),abs(l[i]-c[i-1])))
+            up=h[i]-h[i-1]; dn=l[i-1]-l[i]
+            plus.append(up if up>dn and up>0 else 0.0); minus.append(dn if dn>up and dn>0 else 0.0)
+        atr=np.mean(tr[-period:])
+        if atr<=0: return 0.0
+        p=100*np.mean(plus[-period:])/atr; m=100*np.mean(minus[-period:])/atr
+        return float(100*abs(p-m)/max(p+m,1e-9))
+
+    def _volume_profile(self, close, atr):
+        if len(self.closes)<10: return {"vp_poc":np.nan,"vp_vah":np.nan,"vp_val":np.nan,"vp_position":0,"vp_breakout":0}
+        prices=np.asarray(list(self.closes),float); vols=np.asarray(list(self.volumes),float)
+        lo=float(np.min(prices)); hi=float(np.max(prices))
+        if hi<=lo: return {"vp_poc":close,"vp_vah":close,"vp_val":close,"vp_position":0,"vp_breakout":0}
+        bins=max(12,min(40,int(np.sqrt(len(prices))*3)))
+        edges=np.linspace(lo,hi,bins+1); hist=np.zeros(bins)
+        idx=np.clip(np.digitize(prices,edges)-1,0,bins-1)
+        for i,v in zip(idx,vols): hist[i]+=max(float(v),0.0)
+        if hist.sum()<=0: hist=np.ones(bins)
+        poc_i=int(np.argmax(hist)); total=hist.sum(); target=0.70*total
+        order=np.argsort(hist)[::-1]; selected=[]; acc=0
+        for i in order:
+            selected.append(i); acc+=hist[i]
+            if acc>=target: break
+        val_i=min(selected); vah_i=max(selected)
+        centers=(edges[:-1]+edges[1:])/2
+        poc=float(centers[poc_i]); val=float(edges[val_i]); vah=float(edges[vah_i+1])
+        pos=1 if close>vah else (-1 if close<val else 0)
+        br=1 if close>vah else (-1 if close<val else 0)
+        return {"vp_poc":poc,"vp_vah":vah,"vp_val":val,"vp_position":pos,"vp_breakout":br}
+
+    def compute(self, candle, prev):
+        self.closes.append(float(candle.fut_c)); self.highs.append(float(candle.fut_h)); self.lows.append(float(candle.fut_l));
+        self.volumes.append(float(candle.fut_volume) if is_valid_number(candle.fut_volume) else 0.0)
+        if prev:
+            d=candle.fut_c-prev[-1].fut_c
+            self.cvd += (1.0 if d>0 else (-1.0 if d<0 else 0.0))*max(float(candle.fut_volume),0.0)
+        closes=list(self.closes); highs=list(self.highs); lows=list(self.lows); vols=list(self.volumes)
+        atr=abs(float(candle.fut_h-candle.fut_l)); atr=max(atr,0.01)
+        ema20=self._ema(closes,20); ema50=self._ema(closes,50)
+        macd_fast=self._ema(closes,12); macd_slow=self._ema(closes,26)
+        macd=float(macd_fast-macd_slow) if is_valid_number(macd_fast) and is_valid_number(macd_slow) else np.nan
+        macd_hist=macd
+        rsi=self._rsi(closes,14)
+        if len(closes)>=14:
+            hh=max(highs[-14:]); ll=min(lows[-14:]); stoch=100*(candle.fut_c-ll)/max(hh-ll,1e-9)
+        else: stoch=np.nan
+        adx=self._adx(highs,lows,closes,14)
+
+        # Causal structure: previous completed 3-bar pivot, not future bars.
+        bos=0; hh_hl=0
+        if len(closes)>=3:
+            ph=highs[-2]; pl=lows[-2]
+            if not is_valid_number(self.prev_pivot_high) or ph>self.prev_pivot_high: self.prev_pivot_high=ph
+            if not is_valid_number(self.prev_pivot_low) or pl<self.prev_pivot_low: self.prev_pivot_low=pl
+            if is_valid_number(self.prev_pivot_high) and candle.fut_c>self.prev_pivot_high: bos=1
+            elif is_valid_number(self.prev_pivot_low) and candle.fut_c<self.prev_pivot_low: bos=-1
+            hh_hl=1 if candle.fut_c>ema20 and candle.fut_l>=lows[-2] else (-1 if candle.fut_c<ema20 and candle.fut_h<=highs[-2] else 0)
+        self.last_bos=bos
+
+        # Three-candle fair-value-gap proxy, confirmed only from completed prior candles.
+        fvg=0
+        if len(highs)>=3:
+            if lows[-1]>highs[-3]: fvg=1
+            elif highs[-1]<lows[-3]: fvg=-1
+        self.last_fvg=fvg
+
+        # Supply / demand proxy: recent swing rejection/impulse zones.
+        demand=0; supply=0
+        if len(closes)>=5:
+            rng=max(highs[-2]-lows[-2],0.01)
+            body=abs(closes[-2]-closes[-3])
+            if candle.fut_c>highs[-2] and body>0.5*rng: demand=1
+            if candle.fut_c<lows[-2] and body>0.5*rng: supply=1
+        vp=self._volume_profile(candle.fut_c,atr)
+        cvd_slope=0.0
+        if len(closes)>=3:
+            # local estimated CVD acceleration, not true trade-side delta.
+            cvd_slope=self.cvd
+
+        return {
+            "ema20":ema20,"ema50":ema50,"macd":macd,"macd_hist":macd_hist,
+            "rsi_14":rsi,"stoch_14":stoch,"adx_14":adx,
+            "bos_signal":bos,"hh_hl_signal":hh_hl,"fvg_signal":fvg,
+            "demand_zone_signal":demand,"supply_zone_signal":supply,
+            "cvd_est":self.cvd,"cvd_est_slope":cvd_slope,
+            **vp
+        }
+
+
+class SignalBasketEngine:
+    """Scores every indicator individually AND the orthogonal basket as a whole.
+
+    Each indicator returns {-1,0,+1}; the basket combines them with capped,
+    normalized weights. A basket cannot contribute more than its assigned
+    budget, preventing correlated indicators from dominating the decision.
+    """
+    BASKETS = {
+        "trend": {"ema":1.0,"supertrend":1.0,"adx":0.7},
+        "momentum": {"rsi":0.7,"macd":1.0,"stochastic":0.6,"kalman":1.0},
+        "location": {"vwap":1.0,"volume_profile":1.0,"supply_demand":0.8,"fvg":0.8},
+        "structure": {"bos":1.2,"hh_hl":0.9,"breakout_retest":0.8},
+        "flow": {"obi":0.9,"cvd":0.8,"volume":0.7,"oi":0.9},
+        "options": {"pcr":0.7,"gex":0.8,"vanna":0.6,"charm":0.5,"iv":0.5},
+        "internals": {"breadth":1.0,"heavyweights":1.0},
+    }
+    def _s(self,x,thr=0.0):
+        x=safe_float(x,0.0)
+        return 1 if x>thr else (-1 if x<-thr else 0)
+
+    def score(self, f):
+        k=safe_float(f.get("kalman_stretch"),0); slope=safe_float(f.get("stretch_slope_3"),0)
+        st=safe_int(f.get("st_direction"),0); adx=safe_float(f.get("adx_14"),0)
+        ema20=safe_float(f.get("ema20"),np.nan); ema50=safe_float(f.get("ema50"),np.nan); price=safe_float(f.get("fut_c"),np.nan)
+        ema_sig=self._s((price-ema20) if is_valid_number(price) and is_valid_number(ema20) else 0, max(safe_float(f.get("atr_14_prev"),15)*0.03,0.1))
+        trend={"ema":ema_sig,"supertrend":st,"adx":(1 if adx>=20 and ema_sig>0 else (-1 if adx>=20 and ema_sig<0 else 0))}
+        macd=self._s(f.get("macd"),0.0); rsi=safe_float(f.get("rsi_14"),50); stoch=safe_float(f.get("stoch_14"),50)
+        momentum={"rsi":1 if rsi>55 else (-1 if rsi<45 else 0),"macd":macd,"stochastic":1 if stoch>55 else (-1 if stoch<45 else 0),"kalman":self._s(k,0.08)}
+        vp_pos=safe_int(f.get("vp_position"),0); fvg=safe_int(f.get("fvg_signal"),0)
+        loc={"vwap":self._s(k,0.20),"volume_profile":vp_pos,"supply_demand":1 if safe_int(f.get("demand_zone_signal")) else (-1 if safe_int(f.get("supply_zone_signal")) else 0),"fvg":fvg}
+        bos=safe_int(f.get("bos_signal"),0); hhl=safe_int(f.get("hh_hl_signal"),0); br=safe_int(f.get("or_breakout_state"),0)
+        structure={"bos":bos,"hh_hl":hhl,"breakout_retest":br}
+        obi=self._s(f.get("order_book_imbalance"),0.08); cvd=self._s(f.get("cvd_est_slope"),0.0)
+        vol=safe_float(f.get("fut_volume"),0); flow={"obi":obi,"cvd":cvd,"volume":1 if vol>0 else 0,"oi":1 if safe_int(f.get("oi_long_buildup")) else (-1 if safe_int(f.get("oi_short_buildup")) else 0)}
+        pcr=safe_float(f.get("pcr_oi"),1); pcrs=1 if pcr>1.05 else (-1 if pcr<0.95 else 0)
+        options={"pcr":pcrs,"gex":self._s(f.get("gex_proxy"),0.15),"vanna":self._s(f.get("dealer_vanna_flow"),0.05),"charm":self._s(f.get("dealer_charm_flow"),0.05),"iv":0}
+        breadth=safe_float(f.get("breadth_10"),0.5); twc=safe_float(f.get("twc"),0)
+        internals={"breadth":1 if breadth>0.55 else (-1 if breadth<0.45 else 0),"heavyweights":self._s(twc,0.0005)}
+        raw={"trend":trend,"momentum":momentum,"location":loc,"structure":structure,"flow":flow,"options":options,"internals":internals}
+        basket_scores={}; basket_align={}
+        for name,weights in self.BASKETS.items():
+            vals=raw[name]; den=sum(weights.values()); score=sum(weights[k]*vals.get(k,0) for k in weights)/max(den,1e-9)
+            basket_scores[name]=float(np.clip(score,-1,1)); basket_align[name]=sum(1 for v in vals.values() if v==1)-sum(1 for v in vals.values() if v==-1)
+        # Equal basket budgets: orthogonal evidence, not raw indicator counting.
+        total=float(np.mean(list(basket_scores.values())))
+        pos=sum(1 for x in basket_scores.values() if x>=0.25); neg=sum(1 for x in basket_scores.values() if x<=-0.25)
+        return {"indicator_signals":raw,"basket_scores":basket_scores,"basket_alignments":basket_align,"composite_score":total,"positive_baskets":pos,"negative_baskets":neg}
+
+
 # =========================================================
 # 6. REGIME & DECISION ENGINE
 # =========================================================
@@ -1231,214 +1433,88 @@ class TradeDecision:
     timestamp: Optional[datetime] = None
     decision_timestamp: Optional[datetime] = None
     ml_probability: float = 0.5
+    alignment: int = 0
+    positive_baskets: int = 0
+    negative_baskets: int = 0
+    target_stretch: float = 1.0
+    momentum_state: str = "NEUTRAL"
 
 
 class DecisionEngine:
     def __init__(self):
-        self.regime_engine = RegimeEngine()
-        self.last_action: Optional[str] = None
-        self.last_action_bar_idx: int = -999
-        self.bar_counter: int = 0
-        self.ml_model = None
-        self.expected_feature_names: List[str] = []
-        self._load_production_model()
+        self.regime_engine=RegimeEngine(); self.last_action=None; self.last_action_bar_idx=-999; self.bar_counter=0
+        self.ml_model=None; self.expected_feature_names=[]; self._load_production_model()
 
     def _load_production_model(self):
-        model_p = Path(CONFIG.get("model_path", ""))
+        model_p=Path(CONFIG.get("model_path",""))
         if joblib and model_p.exists():
             try:
-                loaded = joblib.load(model_p)
-                if isinstance(loaded, dict) and "model" in loaded:
-                    self.ml_model = loaded["model"]
-                    self.expected_feature_names = loaded.get("features", [])
-                else:
-                    self.ml_model = loaded
-                    if hasattr(self.ml_model, "feature_name_"):
-                        self.expected_feature_names = list(self.ml_model.feature_name_)
-                    elif hasattr(self.ml_model, "feature_names_in_"):
-                        self.expected_feature_names = list(self.ml_model.feature_names_in_)
-            except Exception:
-                self.ml_model = None
-                self.expected_feature_names = []
+                loaded=joblib.load(model_p)
+                self.ml_model=loaded.get("model") if isinstance(loaded,dict) else loaded
+                if isinstance(loaded,dict): self.expected_feature_names=loaded.get("features",[])
+                elif hasattr(self.ml_model,"feature_name_"): self.expected_feature_names=list(self.ml_model.feature_name_)
+                elif hasattr(self.ml_model,"feature_names_in_"): self.expected_feature_names=list(self.ml_model.feature_names_in_)
+            except Exception: self.ml_model=None; self.expected_feature_names=[]
 
-    def get_adaptive_weights(self, regime: str) -> Tuple[float, float]:
-        if regime in ["IMPULSE_UP", "IMPULSE_DOWN", "STAIRCASE_UP", "STAIRCASE_DOWN"]:
-            return 0.82, 0.18
-        if regime in ["GRIND", "NEUTRAL"]:
-            return 0.55, 0.45
-        if regime == "FAILURE":
-            return 0.35, 0.65
-        return 0.70, 0.30
-
-    def _realistic_target(self, atr: float, regime: str, strategy: str) -> Tuple[float, float, float]:
-        if not is_valid_number(atr) or atr <= 0:
-            atr = 15.0
-        if strategy == "TREND":
-            if regime in ("IMPULSE_UP", "IMPULSE_DOWN"):
-                return 1.15 * atr, 0.70 * atr, 1.00
-            if regime in ("STAIRCASE_UP", "STAIRCASE_DOWN"):
-                return 0.90 * atr, 0.65 * atr, 0.85
-            return 0.70 * atr, 0.55 * atr, 0.70
-        if strategy == "MEAN_REVERSION":
-            return 0.55 * atr, 0.40 * atr, 0.75
-        return 0.60 * atr, 0.50 * atr, 0.55
-
-    def _predict_real_ml_proba(self, feats: Dict[str, Any]) -> float:
-        if self.ml_model is None:
-            return 0.5
+    def _ml(self,f):
+        if self.ml_model is None:return 0.5
         try:
-            if self.expected_feature_names:
-                row = [safe_float(feats.get(k), np.nan) for k in self.expected_feature_names]
-                df_in = pd.DataFrame([row], columns=self.expected_feature_names)
+            cols=self.expected_feature_names
+            if cols:
+                x=pd.DataFrame([[safe_float(f.get(k),np.nan) for k in cols]],columns=cols)
             else:
-                numeric_feats = {k: v for k, v in feats.items() if isinstance(v, (int, float)) and np.isfinite(v)}
-                df_in = pd.DataFrame([numeric_feats])
-                
-            if hasattr(self.ml_model, "predict_proba"):
-                probs = self.ml_model.predict_proba(df_in)
-                return float(probs[0][1])
-            elif hasattr(self.ml_model, "predict"):
-                pred = self.ml_model.predict(df_in)
-                return float(pred[0])
-        except Exception:
-            pass
-        return 0.5
+                x=pd.DataFrame([{k:v for k,v in f.items() if isinstance(v,(int,float)) and np.isfinite(v)}])
+            if hasattr(self.ml_model,"predict_proba"):return float(self.ml_model.predict_proba(x)[0][1])
+            return float(self.ml_model.predict(x)[0])
+        except Exception:return 0.5
 
-    def _get_high_priority_signals(self, regime: str, feats: Dict[str, Any]) -> List[int]:
-        stretch = safe_float(feats.get("kalman_stretch"), 0.0)
-        slope = safe_float(feats.get("stretch_slope_3"), 0.0)
-        st_dir = safe_int(feats.get("st_direction"), 0)
-        hm_sig = safe_int(feats.get("hm_signal"), 0)
-        ha_color = safe_int(feats.get("ha_color"), 0)
-        pcr = safe_float(feats.get("pcr_oi"), 1.0)
-        vanna = safe_float(feats.get("dealer_vanna_flow"), 0.0)
+    def _basket_data(self,f):
+        try:
+            bs=json.loads(f.get("basket_scores_json","{}"))
+            inds=json.loads(f.get("indicator_signals_json","{}"))
+        except Exception: bs={}; inds={}
+        return bs,inds
 
-        def sign(val, thresh=0.0):
-            if val > thresh: return 1
-            if val < -thresh: return -1
-            return 0
+    def _side_score(self, bs, inds, side):
+        sign=1 if side=="CE" else -1
+        aligned=sum(1 for x in bs.values() if x*sign>=0.25)
+        opposed=sum(1 for x in bs.values() if x*sign<=-0.25)
+        strong=aligned>=4
+        min_ok=aligned>=3 and aligned>opposed
+        return aligned,opposed,strong,min_ok
 
-        if regime in ("IMPULSE_UP", "IMPULSE_DOWN"):
-            return [
-                sign(stretch, 0.35),
-                sign(slope, 0.04),
-                st_dir,
-                hm_sig,
-                ha_color
-            ]
-        elif regime in ("STAIRCASE_UP", "STAIRCASE_DOWN"):
-            return [
-                sign(slope, 0.03),
-                hm_sig,
-                st_dir,
-                ha_color,
-                sign(stretch, 0.25)
-            ]
-        elif regime in ("GRIND", "NEUTRAL"):
-            return [
-                ha_color,
-                hm_sig,
-                sign(1.0 - pcr, 0.05),
-                sign(vanna, 0.05),
-                sign(-stretch, 0.20)
-            ]
-        else:
-            return [0, 0, 0, 0, 0]
+    def _dynamic_target(self,atr,regime,alignment,composite):
+        base_mult=1.15 if regime.startswith("IMPULSE") else (0.90 if regime.startswith("STAIRCASE") else 0.70)
+        stretch={3:1.00,4:1.30,5:1.55}.get(min(alignment,5),1.0)
+        # Composite evidence can add a small bounded extension, never an unbounded target.
+        if alignment>=4 and abs(composite)>=0.55: stretch*=1.08
+        target=atr*base_mult*stretch
+        cap=atr*(2.20 if regime.startswith("IMPULSE") else 1.80)
+        target=min(target,cap)
+        stop=atr*(0.70 if regime.startswith("IMPULSE") else 0.65)
+        return target,stop,stretch
 
-    def decide(self, feats: Dict[str, Any]) -> TradeDecision:
-        self.bar_counter += 1
-        now_ts = now_ist()
-        
-        expiry_flag = safe_int(feats.get("expiry_day_flag"), 0)
-        cutoff_hour, cutoff_min = (15, 25) if expiry_flag == 1 else (15, 0)
-        
-        if now_ts.hour > cutoff_hour or (now_ts.hour == cutoff_hour and now_ts.minute >= cutoff_min):
-            return TradeDecision(
-                action="SKIP", regime="TIME_GUARD_ACTIVE",
-                reason=f"Time guard active: Cutoff reached ({cutoff_hour}:{cutoff_min:02d})",
-                timestamp=feats.get("timestamp"), decision_timestamp=now_ts
-            )
-
-        regime = self.regime_engine.detect(feats)
-        dq = safe_float(feats.get("data_quality_score"), 0.0)
-        
-        if regime == "DATA_BAD" or dq < CONFIG["min_data_quality_to_trade"]:
-            return TradeDecision(
-                action="SKIP", regime=regime,
-                reason="Data quality low / warmup pending",
-                timestamp=feats.get("timestamp"), decision_timestamp=now_ts
-            )
-
-        atr = safe_float(feats.get("atr_14_prev"), 15.0)
-        signals = self._get_high_priority_signals(regime, feats)
-        aligned_buy = sum(1 for s in signals if s == 1)
-        aligned_sell = sum(1 for s in signals if s == -1)
-
-        action = "SKIP"
-        size_mult = 1.0
-        conf_boost = 0.0
-        reason_parts = [f"Regime={regime}"]
-
-        min_required = 3
-        if regime.startswith("IMPULSE") and abs(safe_float(feats.get("kalman_stretch"), 0)) > 1.8:
-            min_required = 4
-
-        if aligned_buy >= min_required and aligned_buy > aligned_sell:
-            action = "CE"
-            if aligned_buy == 3:
-                size_mult = 1.0
-                conf_boost = 0.0
-            elif aligned_buy == 4:
-                size_mult = 1.25
-                conf_boost = 0.08
-            else:
-                size_mult = 1.45
-                conf_boost = 0.14
-            reason_parts.append(f"HP Buy {aligned_buy}/5")
-        elif aligned_sell >= min_required and aligned_sell > aligned_buy:
-            action = "PE"
-            if aligned_sell == 3:
-                size_mult = 1.0
-                conf_boost = 0.0
-            elif aligned_sell == 4:
-                size_mult = 1.25
-                conf_boost = 0.08
-            else:
-                size_mult = 1.45
-                conf_boost = 0.14
-            reason_parts.append(f"HP Sell {aligned_sell}/5")
-        else:
-            reason_parts.append(f"HP insufficient (Buy={aligned_buy} Sell={aligned_sell})")
-
-        strategy = "TREND" if action != "SKIP" else "NONE"
-        target, stop, base_size = self._realistic_target(atr, regime, strategy)
-        size = base_size * size_mult
-
-        ml_prob = self._predict_real_ml_proba(feats)
-        rule_conf = 0.52 + conf_boost
-        rule_w, ml_w = self.get_adaptive_weights(regime)
-        combined_conf = (rule_w * rule_conf) + (ml_w * abs(ml_prob - 0.5) * 2.0)
-        conf = float(np.clip(combined_conf, 0.28, 0.88))
-
-        effective_delta = CONFIG.get("base_delta", 0.52)
-        opt_target = round(target * effective_delta, 1)
-        opt_stop = round(stop * 0.75, 1)
-
-        return TradeDecision(
-            action=action,
-            regime=regime,
-            target_points=round(target, 1),
-            stop_points=round(stop, 1),
-            option_target_pts=opt_target,
-            option_stop_pts=opt_stop,
-            effective_delta=round(effective_delta, 3),
-            size_factor=round(size, 2),
-            confidence=round(conf, 3),
-            reason=" | ".join(reason_parts),
-            timestamp=feats.get("timestamp"),
-            decision_timestamp=now_ts,
-            ml_probability=ml_prob
-        )
+    def decide(self,feats):
+        self.bar_counter+=1; now=now_ist()
+        expiry=safe_int(feats.get("expiry_day_flag"),0); cutoff=(15,25) if expiry else (15,0)
+        if (now.hour,now.minute)>=(cutoff[0],cutoff[1]):
+            return TradeDecision(action="SKIP",regime="TIME_GUARD_ACTIVE",reason="Time guard active",timestamp=feats.get("timestamp"),decision_timestamp=now)
+        regime=self.regime_engine.detect(feats); dq=safe_float(feats.get("data_quality_score"),0)
+        if regime=="DATA_BAD" or dq<CONFIG["min_data_quality_to_trade"]:
+            return TradeDecision(action="SKIP",regime=regime,reason="Data quality low / warmup",timestamp=feats.get("timestamp"),decision_timestamp=now)
+        bs,inds=self._basket_data(feats); atr=safe_float(feats.get("atr_14_prev"),15)
+        ce_n,ce_o,ce_strong,ce_ok=self._side_score(bs,inds,"CE"); pe_n,pe_o,pe_strong,pe_ok=self._side_score(bs,inds,"PE")
+        # Independent qualification: PE is never inferred merely because CE weakened.
+        action="SKIP"; alignment=0
+        if ce_ok and ce_n>=pe_n: action="CE"; alignment=ce_n
+        elif pe_ok and pe_n>ce_n: action="PE"; alignment=pe_n
+        target,stop,stretch=self._dynamic_target(atr,regime,alignment,safe_float(feats.get("composite_alignment_score"),0)) if action!="SKIP" else (0,0,1)
+        ml=self._ml(feats)
+        side_prob=ml if action=="CE" else (1-ml if action=="PE" else 0.5)
+        conf=float(np.clip(0.45+0.10*max(0,alignment-3)+0.20*abs(safe_float(feats.get("composite_alignment_score"),0))+0.15*max(0,side_prob-0.5)*2,0.25,0.95))
+        size=1.0 if alignment<=3 else (1.10 if alignment==4 else 1.20)
+        reason=f"Regime={regime} | Baskets CE={ce_n}/7 PE={pe_n}/7 | Composite={safe_float(feats.get('composite_alignment_score'),0):+.2f} | {action} alignment={alignment}/7 | Target stretch={stretch:.2f}x"
+        return TradeDecision(action=action,regime=regime,target_points=round(target,1),stop_points=round(stop,1),option_target_pts=round(target*CONFIG["base_delta"],1),option_stop_pts=round(stop*0.75,1),effective_delta=CONFIG["base_delta"],size_factor=size,confidence=round(conf,3),reason=reason,timestamp=feats.get("timestamp"),decision_timestamp=now,ml_probability=ml)
 
 
 # =========================================================
@@ -1482,6 +1558,8 @@ class PaperPosition:
     exit_option_price: Optional[float] = None
     pnl_pts: float = 0.0
     exit_reason: str = ""
+    peak_pnl_pts: float = 0.0
+    locked_floor_pts: float = 0.0
 
 
 class PaperTradingDesk:
@@ -1557,83 +1635,57 @@ class PaperTradingDesk:
                 effective_delta=order["effective_delta"],
                 size=order["size"],
                 regime=order["regime"],
+                peak_pnl_pts=0.0, locked_floor_pts=0.0,
             )
             self.pending_order = None
 
-    def on_bar_update_and_exit_eval(self, candle: Candle3Min, is_session_end: bool = False):
-        if not hasattr(self, "risk_locked"):
-            self.risk_locked = False
-
+    def on_bar_update_and_exit_eval(self, candle: Candle3Min, decision: Optional[TradeDecision]=None, feats: Optional[Dict[str,Any]]=None, is_session_end: bool=False):
         if self.active_position is None:
-            self.unrealized_pnl_pts = 0.0
-            self.check_total_risk_limit()
-            return
-
-        pos = self.active_position
-        pos.bars_held += 1
-        
-        if pos.direction == 1:
-            fut_high_move = candle.fut_h - pos.entry_future_price
-            fut_low_move = pos.entry_future_price - candle.fut_l
-            fut_close_move = candle.fut_c - pos.entry_future_price
+            self.unrealized_pnl_pts=0.0; self.check_total_risk_limit(); return
+        pos=self.active_position; pos.bars_held+=1
+        if pos.direction==1:
+            high_move=candle.fut_h-pos.entry_future_price; low_move=pos.entry_future_price-candle.fut_l; close_move=candle.fut_c-pos.entry_future_price
         else:
-            fut_high_move = pos.entry_future_price - candle.fut_l
-            fut_low_move = candle.fut_h - pos.entry_future_price
-            fut_close_move = pos.entry_future_price - candle.fut_c
-
-        option_high_pnl = fut_high_move * pos.effective_delta
-        option_low_pnl = - (fut_low_move * pos.effective_delta)
-        option_close_pnl = fut_close_move * pos.effective_delta
-
-        self.unrealized_pnl_pts = round(option_close_pnl * pos.size, 2)
-
-        hit_target = option_high_pnl >= pos.option_target
-        hit_stop = option_low_pnl <= -pos.option_stop
-
+            high_move=pos.entry_future_price-candle.fut_l; low_move=candle.fut_h-pos.entry_future_price; close_move=pos.entry_future_price-candle.fut_c
+        option_high=high_move*pos.effective_delta; option_low=-(low_move*pos.effective_delta); option_close=close_move*pos.effective_delta
+        self.unrealized_pnl_pts=round(option_close*pos.size,2)
+        pos.peak_pnl_pts=max(pos.peak_pnl_pts,self.unrealized_pnl_pts)
+        hit_stop=option_low<=-pos.option_stop
         self.check_total_risk_limit()
-        timeout = pos.bars_held >= (CONFIG["time_barrier_min"] // CONFIG["bar_minutes"])
-
-        if is_session_end or hit_target or hit_stop or timeout or self.risk_locked:
-            if self.risk_locked and not (is_session_end or hit_target or hit_stop or timeout):
-                exit_pnl = option_close_pnl
-                reason = "KILL-SWITCH MAX LOSS BREACH"
-            elif is_session_end:
-                exit_pnl = option_close_pnl
-                reason = "SESSION END AUTO-EXIT"
-            elif hit_target and hit_stop:
-                exit_pnl = -pos.option_stop
-                reason = "AMBIGUOUS (SL ASSUMED)"
-            elif hit_target:
-                exit_pnl = pos.option_target
-                reason = "TARGET HIT"
-            elif hit_stop:
-                exit_pnl = -pos.option_stop
-                reason = "STOP LOSS HIT"
-            else:
-                exit_pnl = option_close_pnl
-                reason = "TIME BARRIER EXIT"
-
-            pos.exit_time = candle.timestamp
-            pos.exit_future_price = round(candle.fut_c, 2)
-            pos.exit_option_price = round(max(5.0, pos.entry_option_price + exit_pnl), 2)
-            
-            base_penalty = CONFIG.get("option_exit_spread_penalty", 0.65)
-            net_spread_penalty = min(1.40, base_penalty * max(1.0, abs(exit_pnl) / 10.0))
-
-            net_option_pnl = (exit_pnl - net_spread_penalty) * pos.size
-            pos.pnl_pts = round(net_option_pnl, 2)
-            pos.status = "CLOSED"
-            pos.exit_reason = reason + f" (Spread Penalty: -{net_spread_penalty:.2f}pt)"
-
-            self.realized_pnl_pts = round(self.realized_pnl_pts + pos.pnl_pts, 2)
-            self.closed_trades.append(pos)
-            
-            trade_record = asdict(pos)
-            trade_record["timestamp"] = pos.exit_time
-            self.dataset_manager.write_parquet(pd.DataFrame([trade_record]), name="paper_trades_log")
-
-            self.active_position = None
-            self.unrealized_pnl_pts = 0.0
+        timeout=pos.bars_held >= (CONFIG["time_barrier_min"]//CONFIG["bar_minutes"])
+        exit_reason=None; exit_pnl=option_close
+        # Dynamic ride: target is no longer a mandatory exit when momentum remains aligned.
+        if is_session_end: exit_reason="SESSION END AUTO-EXIT"
+        elif self.risk_locked: exit_reason="KILL-SWITCH MAX LOSS BREACH"
+        elif hit_stop: exit_reason="STOP LOSS HIT"
+        elif decision is not None:
+            current_side="CE" if pos.direction==1 else "PE"
+            try: bs=json.loads((feats or {}).get("basket_scores_json","{}"))
+            except Exception: bs={}
+            aligned=sum(1 for x in bs.values() if x*(1 if pos.direction==1 else -1)>=0.25)
+            opposite=sum(1 for x in bs.values() if x*(1 if pos.direction==1 else -1)<=-0.25)
+            # Reversal only when the opposite side independently qualifies at >=3/7.
+            opp_side="PE" if current_side=="CE" else "CE"
+            opp_aligned=sum(1 for x in bs.values() if x*(-1 if pos.direction==1 else 1)>=0.25)
+            if opp_aligned>=4 and opposite>=3:
+                exit_reason=f"INDEPENDENT OPPOSITE REVERSAL ({opp_side} {opp_aligned}/7)"
+            elif aligned<=1: exit_reason="MOMENTUM COLLAPSE (ALIGNMENT <=1)"
+            elif aligned==2: exit_reason="MOMENTUM DECAY / PROFIT LOCK (ALIGNMENT 2/7)"
+            elif aligned>=3:
+                # Extend target virtually by removing fixed target exit. Stronger alignment keeps riding.
+                if aligned>=5: pos.option_target=max(pos.option_target, pos.option_target*1.55); pos.exit_reason="RIDE EXTENDED 5/7"
+                elif aligned==4: pos.option_target=max(pos.option_target, pos.option_target*1.30); pos.exit_reason="RIDE EXTENDED 4/7"
+                if timeout: exit_reason="TIME BARRIER EXIT"
+            if exit_reason is None and timeout: exit_reason="TIME BARRIER EXIT"
+        elif timeout: exit_reason="TIME BARRIER EXIT"
+        if exit_reason:
+            if exit_reason.startswith("STOP"): exit_pnl=-pos.option_stop
+            pos.exit_time=candle.timestamp; pos.exit_future_price=round(candle.fut_c,2); pos.exit_option_price=round(max(5.0,pos.entry_option_price+exit_pnl),2)
+            penalty=min(1.40,CONFIG.get("option_exit_spread_penalty",0.65)*max(1.0,abs(exit_pnl)/10.0))
+            pos.pnl_pts=round((exit_pnl-penalty)*pos.size,2); pos.status="CLOSED"; pos.exit_reason=exit_reason+f" (Spread Penalty: -{penalty:.2f}pt)"
+            self.realized_pnl_pts=round(self.realized_pnl_pts+pos.pnl_pts,2); self.closed_trades.append(pos)
+            rec=asdict(pos); rec["timestamp"]=pos.exit_time; self.dataset_manager.write_parquet(pd.DataFrame([rec]),name="paper_trades_log")
+            self.active_position=None; self.unrealized_pnl_pts=0.0
 
 
 # =========================================================
@@ -2179,12 +2231,12 @@ class KotakNeoAdapter:
             atr_v = safe_float(feats.get("atr_14_prev"), 15.0)
 
             self.paper_desk.on_bar_open_fill(candle, atr_v)
-            self.paper_desk.on_bar_update_and_exit_eval(candle, is_session_end=is_session_end)
 
             self.candles_3m.append(candle)
 
             decision = self.decision_engine.decide(feats)
             self.last_decision = decision
+            self.paper_desk.on_bar_update_and_exit_eval(candle, decision=decision, feats=feats, is_session_end=is_session_end)
             
             if not is_session_end:
                 next_t = bar_time + timedelta(minutes=CONFIG["bar_minutes"])
@@ -2194,6 +2246,13 @@ class KotakNeoAdapter:
             feats["decision_regime"] = decision.regime
             feats["decision_target"] = decision.target_points
             feats["decision_confidence"] = decision.confidence
+            try:
+                bs=json.loads(feats.get("basket_scores_json","{}")); side=1 if decision.action=="CE" else (-1 if decision.action=="PE" else 0)
+                feats["decision_alignment"] = sum(1 for x in bs.values() if x*side>=0.25) if side else 0
+                feats["decision_positive_baskets"] = feats.get("positive_baskets",0)
+                feats["decision_negative_baskets"] = feats.get("negative_baskets",0)
+            except Exception:
+                feats["decision_alignment"]=0
             feats["decision_timestamp"] = decision.decision_timestamp
             feats["entry_timestamp"] = bar_time + timedelta(minutes=CONFIG["bar_minutes"])
             
@@ -2352,67 +2411,293 @@ if st is not None:
     def get_global_adapter():
         return KotakNeoAdapter()
 
-    @st.cache_resource
-    def get_next_day_alpha_engine():
-        return NextDayAlphaEngine() if NextDayAlphaEngine is not None else None
 
 
-def render_next_day_alpha():
-    """Independent next-day stock layer. It never feeds decisions into the NIFTY engine."""
-    if NextDayAlphaEngine is None:
-        return
-    alpha = get_next_day_alpha_engine()
-    if alpha is None:
-        return
+# ============================================================================
+# V8 ORTHOGONAL MATHEMATICAL SCANNER + COLD-START DECISION LAYER
+# ============================================================================
+# This layer is intentionally additive. Existing FeatureEngine, RegimeEngine,
+# DecisionEngine, LabelEngine, execution model and datasets remain intact.
+# Scanner outputs are evidence, not probabilities. Historical outcomes are
+# learned online from the engine's own future-only labels.
 
-    # After 16:30 IST this starts the scan in a daemon thread.
-    alpha.start_if_due_background()
-    data = alpha.latest()
+SCANNER_HISTORY_FILE = Path(CONFIG.get("dataset_path", "./nifty_3min_dataset")) / "scanner_learning.jsonl"
+SCANNER_PRIOR_STRENGTH = 20.0
+SCANNER_MIN_OBSERVATIONS_HIGH_CONF = 100
 
-    st.markdown('<div class="terminal-card">', unsafe_allow_html=True)
-    st.markdown("### ðŸš€ Next-Day Intraday Stock Alpha")
-    st.caption("Independent backend layer â€¢ NIFTY core/Regime/Decision/Option engines are not modified or used for stock ranking")
 
-    if alpha.scan_running():
-        st.info("â³ After-market scan is running in the backend: Universe â†’ 100 â†’ 30 â†’ Top-50 â†’ 7D Volume Shock â†’ Top-5 â†’ Top-2")
-    elif not data:
-        st.warning("Waiting for the first after-market scan. Scheduled start: 16:30 IST.")
-    elif data.get("status") == "ERROR":
-        st.error(f"Alpha scan error: {data.get('error', 'unknown error')}")
-    else:
-        top5 = alpha.live_top5(refresh_seconds=60)
-        top2_symbols = {str(x.get("Symbol")) for x in data.get("top2", [])}
+def _sc_clip(x, lo=-1.0, hi=1.0):
+    try:
+        return float(np.clip(float(x), lo, hi))
+    except Exception:
+        return 0.0
 
-        if top5:
-            rows = []
-            for i, x in enumerate(top5, 1):
-                rows.append({
-                    "Rank": i,
-                    "Stock": x.get("Symbol", "-"),
-                    "LTP": f"â‚¹{x.get('LiveLTP', x.get('LTP', 0)):.2f}" if is_valid_number(x.get('LiveLTP', x.get('LTP'))) else "-",
-                    "Live %": f"{x.get('LiveChangePct', 0):+.2f}%" if is_valid_number(x.get('LiveChangePct', np.nan)) else "-",
-                    "Alpha": f"{x.get('FinalScore', 0):.1f}",
-                    "Conf.â€ ": f"{x.get('ConfidencePct', 0):.0f}%",
-                    "7D Vol Shock": f"{x.get('VolumeRatio7D', 0):.2f}x",
-                    "Exp. Move": f"{x.get('ExpectedMoveLowPct', 0):.1f}â€“{x.get('ExpectedMoveHighPct', 0):.1f}%",
-                    "Status": "ðŸ¥‡ TOP 2" if str(x.get("Symbol")) in top2_symbols else "TOP 5",
-                })
-            st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
-            st.caption("â€  Confidence is a heuristic ranking score, not a calibrated ML probability. Live price refreshes approximately every 60 seconds.")
+
+def _sc_sig(x, scale=1.0):
+    try:
+        return float(np.tanh(float(x) / max(scale, 1e-9)))
+    except Exception:
+        return 0.0
+
+
+def _sc_ratio(a, b, floor=1e-9):
+    try:
+        return float(a) / max(abs(float(b)), floor)
+    except Exception:
+        return 0.0
+
+
+def _sc_val(f, k, default=0.0):
+    return safe_float(f.get(k), default)
+
+
+def _scanners_3m(f):
+    """Return 48 hypothesis-driven, mathematically defined scanner scores."""
+    st = _sc_val(f, "kalman_stretch", _sc_val(f, "normalized_stretch"))
+    sp = _sc_val(f, "normalized_spread")
+    ss = _sc_val(f, "stretch_slope_3")
+    ps = _sc_val(f, "spread_slope_3")
+    rsi = _sc_val(f, "rsi_14", 50.0)
+    macd = _sc_val(f, "macd_hist", 0.0)
+    adx = _sc_val(f, "adx_14", 0.0)
+    pcr = _sc_val(f, "pcr_oi", 1.0)
+    pcrv = _sc_val(f, "pcr_volume", 1.0)
+    iv = _sc_val(f, "atm_iv", 0.135)
+    ivchg = _sc_val(f, "iv_change", 0.0)
+    breadth = _sc_val(f, "breadth_10", 0.5)
+    disp = _sc_val(f, "dispersion_10", 0.0)
+    twc = _sc_val(f, "twc", 0.0)
+    oi_long = _sc_val(f, "oi_long_buildup", 0.0)
+    oi_short = _sc_val(f, "oi_short_buildup", 0.0)
+    oi_unwind = _sc_val(f, "oi_long_unwinding", 0.0) - _sc_val(f, "oi_short_covering", 0.0)
+    or_state = _sc_val(f, "or_breakout_state", 0.0)
+    orw = _sc_val(f, "or_width_atr", 0.0)
+    d_orh = _sc_val(f, "dist_to_or_high_atr", 0.0)
+    d_orl = _sc_val(f, "dist_to_or_low_atr", 0.0)
+    gap = _sc_val(f, "gap_atr", 0.0)
+    pdh = _sc_val(f, "dist_to_pdh_atr", 0.0)
+    pdl = _sc_val(f, "dist_to_pdl_atr", 0.0)
+    volz = _sc_val(f, "volume_zscore", 0.0)
+    vel = _sc_val(f, "kalman_velocity", 0.0)
+    gex = _sc_val(f, "gex_proxy", 0.0)
+    dte = _sc_val(f, "zero_dte_intensity", 0.0)
+    atr = max(_sc_val(f, "atr_14_prev", 1.0), 1e-9)
+    oi_ch = _sc_ratio(_sc_val(f, "ce_oi_change", 0.0) - _sc_val(f, "pe_oi_change", 0.0), atr)
+    atm_imb = _sc_ratio(_sc_val(f, "pe_oi_atm", 0.0) - _sc_val(f, "ce_oi_atm", 0.0), max(_sc_val(f, "pe_oi_atm", 0.0) + _sc_val(f, "ce_oi_atm", 0.0), 1.0))
+    r = lambda x: _sc_clip(x)
+    scanners = [
+        ("TREND_VWAP_CONT", "TREND", r(0.45*st + 0.30*ss + 0.25*twc)),
+        ("TREND_SLOPE_ACCEL", "TREND", r(0.65*ss + 0.20*vel + 0.15*st)),
+        ("TREND_ADX_ALIGNMENT", "TREND", r(0.55*st + 0.45*_sc_sig(adx-20, 8))),
+        ("TREND_BREADTH_CONFIRM", "TREND", r(0.55*st + 0.45*(2*breadth-1))),
+        ("TREND_BASIS_LEAD", "TREND", r(0.60*sp + 0.40*ss)),
+        ("TREND_PERSISTENCE", "TREND", r(0.50*st + 0.30*ss + 0.20*_sc_sig(adx-18, 10))),
+        ("MOMENTUM_RSI_EXPANSION", "MOMENTUM", r(0.55*_sc_sig(rsi-50, 12) + 0.45*ss)),
+        ("MOMENTUM_MACD_IMPULSE", "MOMENTUM", r(0.60*_sc_sig(macd, max(atr*0.01,0.1)) + 0.40*vel)),
+        ("MOMENTUM_KALMAN_SURGE", "MOMENTUM", r(0.70*vel + 0.30*ss)),
+        ("MOMENTUM_ACCELERATION", "MOMENTUM", r(0.55*ss + 0.25*ps + 0.20*vel)),
+        ("MOMENTUM_EXHAUSTION", "MOMENTUM", r(-0.60*st - 0.25*ss + 0.15*_sc_sig(50-rsi,12))),
+        ("MOMENTUM_DIVERGENCE", "MOMENTUM", r(-0.55*st + 0.45*_sc_sig(50-rsi,12))),
+        ("VWAP_RECLAIM", "LOCATION", r(0.50*ss + 0.30*(-st) + 0.20*twc)),
+        ("VWAP_REJECTION", "LOCATION", r(-0.55*ss + 0.35*st - 0.10*twc)),
+        ("STRETCH_MEAN_REVERT", "LOCATION", r(-0.75*st - 0.25*ss)),
+        ("STRETCH_CONTINUATION", "LOCATION", r(0.70*st + 0.30*ss)),
+        ("BASIS_COMPRESSION", "LOCATION", r(-0.60*sp - 0.40*ps)),
+        ("BASIS_EXPANSION", "LOCATION", r(0.60*sp + 0.40*ps)),
+        ("OR_BREAKOUT", "BREAKOUT", r(0.45*or_state + 0.25*volz + 0.20*ss + 0.10*(2*breadth-1))),
+        ("OR_FAILED_BREAKOUT", "BREAKOUT", r(-0.50*or_state - 0.30*ss + 0.20*(-volz))),
+        ("OR_COMPRESSION_BREAK", "BREAKOUT", r(0.55*_sc_sig(0.8-orw,0.4) + 0.25*volz + 0.20*ss)),
+        ("PDH_ACCEPTANCE", "BREAKOUT", r(-_sc_sig(pdh,1.0)*0.45 + 0.35*ss + 0.20*volz)),
+        ("PDL_ACCEPTANCE", "BREAKOUT", r(_sc_sig(-pdl,1.0)*0.45 + 0.35*ss + 0.20*volz)),
+        ("BREAKOUT_VOLUME_CONFIRM", "BREAKOUT", r(0.55*volz + 0.25*ss + 0.20*(2*breadth-1))),
+        ("ACCUMULATION_PRICE_OI", "FLOW", r(0.40*st + 0.35*oi_long + 0.25*twc)),
+        ("DISTRIBUTION_PRICE_OI", "FLOW", r(0.40*st + 0.35*oi_short + 0.25*(-twc))),
+        ("OI_FLOW_IMBALANCE", "FLOW", r(0.65*oi_ch + 0.35*twc)),
+        ("ATM_OPTION_IMBALANCE", "FLOW", r(0.65*atm_imb + 0.35*(pcr-1.0))),
+        ("PCR_REGIME_SHIFT", "FLOW", r(0.55*(pcr-1.0) + 0.45*(pcrv-1.0))),
+        ("OPTION_FLOW_REVERSAL", "FLOW", r(-0.50*oi_ch - 0.30*atm_imb + 0.20*ivchg)),
+        ("OI_UNWIND_REVERSAL", "FLOW", r(-0.60*oi_unwind + 0.40*(-st))),
+        ("BREADTH_LEADERSHIP", "BREADTH", r(0.75*(2*breadth-1) + 0.25*st)),
+        ("BREADTH_DIVERGENCE", "BREADTH", r(0.60*(2*breadth-1) - 0.40*st)),
+        ("BREADTH_DISPERSION", "BREADTH", r((2*breadth-1) - 0.50*disp)),
+        ("HEAVYWEIGHT_CONFIRM", "BREADTH", r(0.65*twc + 0.35*(2*breadth-1))),
+        ("IV_EXPANSION", "VOLATILITY", r(0.65*ivchg + 0.35*ss)),
+        ("IV_COMPRESSION", "VOLATILITY", r(-0.65*ivchg + 0.35*(-abs(st)))),
+        ("VOLATILITY_BREAK", "VOLATILITY", r(0.55*ivchg + 0.25*volz + 0.20*ss)),
+        ("GEX_DIRECTIONAL", "VOLATILITY", r(-0.45*gex + 0.35*st + 0.20*ss)),
+        ("ZERO_DTE_EXPANSION", "VOLATILITY", r(0.55*dte + 0.25*abs(ss) + 0.20*ivchg) * (1 if ss>=0 else -1)),
+        ("GAP_CONTINUATION", "CONTEXT", r(0.60*gap + 0.25*ss + 0.15*(2*breadth-1))),
+        ("GAP_FADE", "CONTEXT", r(-0.60*gap - 0.25*ss + 0.15*(-st))),
+        ("OR_LOCATION_PRESSURE", "CONTEXT", r(0.45*(d_orh-d_orl) + 0.35*ss + 0.20*st)),
+        ("PDH_PDL_LOCATION", "CONTEXT", r(0.50*(-pdh-pdl) + 0.30*st + 0.20*ss)),
+        ("IMPULSE_SETUP", "STRATEGY", r(0.35*st+0.25*ss+0.20*vel+0.20*(2*breadth-1))),
+        ("STAIRCASE_SETUP", "STRATEGY", r(0.45*st+0.25*ss+0.15*(2*breadth-1)+0.15*_sc_sig(0.55-abs(st),0.25))),
+        ("MEAN_REVERSION_SETUP", "STRATEGY", r(-0.55*st-0.25*ss+0.20*(2*breadth-1))),
+        ("FAILED_BREAKOUT_REVERSAL", "STRATEGY", r(-0.40*or_state-0.25*ss-0.20*volz-0.15*st)),
+        ("MOMENTUM_BREAKOUT_COMBO", "STRATEGY", r(0.30*ss+0.25*vel+0.20*volz+0.15*or_state+0.10*(2*breadth-1))),
+        ("INSTITUTIONAL_ALIGNMENT", "STRATEGY", r(0.25*st+0.20*sp+0.20*twc+0.20*oi_ch+0.15*(2*breadth-1))),
+    ]
+    return scanners
+
+
+def _scanner_groups_3m(scanners):
+    groups = defaultdict(list)
+    for name, group, score in scanners:
+        groups[group].append(score)
+    return {g: float(np.mean(v)) if v else 0.0 for g,v in groups.items()}
+
+
+def _load_scanner_stats_3m():
+    stats = defaultdict(lambda: {"n": 0, "wins": 0})
+    try:
+        if SCANNER_HISTORY_FILE.exists():
+            for line in SCANNER_HISTORY_FILE.read_text(encoding="utf-8").splitlines():
+                if not line.strip():
+                    continue
+                r=json.loads(line); k=str(r.get("key",""))
+                if k:
+                    stats[k]["n"] += int(r.get("n",1) or 1)
+                    stats[k]["wins"] += int(r.get("wins",0) or 0)
+    except Exception:
+        pass
+    return stats
+
+
+def _append_scanner_learning_3m(record):
+    try:
+        SCANNER_HISTORY_FILE.parent.mkdir(parents=True, exist_ok=True)
+        with SCANNER_HISTORY_FILE.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(record, default=str, ensure_ascii=False)+"\n")
+    except Exception:
+        pass
+
+
+def _scanner_estimate_3m(stats, key):
+    r=stats.get(key, {}); n=float(r.get("n",0)); w=float(r.get("wins",0))
+    # Conservative Beta(10,10) prior: usable from day one, gradually replaced by data.
+    p=(10.0+w)/(20.0+n)
+    conf=1.0-math.exp(-n/SCANNER_MIN_OBSERVATIONS_HIGH_CONF)
+    return p, conf, n
+
+
+def evaluate_scanner_layer_3m(feats):
+    scans=_scanners_3m(feats); groups=_scanner_groups_3m(scans); stats=_load_scanner_stats_3m()
+    active=[]
+    for name,group,score in scans:
+        p,conf,n=_scanner_estimate_3m(stats,name)
+        active.append({"id":name,"group":group,"score":round(score,5),"estimate":round(p,5),"confidence":round(conf,5),"n":int(n)})
+    # Group evidence is the mean of independent hypotheses, not a raw vote count.
+    direction=sum(groups.get(g,0.0)*w for g,w in {
+        "TREND":0.16,"MOMENTUM":0.16,"LOCATION":0.14,"BREAKOUT":0.12,
+        "FLOW":0.14,"BREADTH":0.10,"VOLATILITY":0.07,"CONTEXT":0.06,"STRATEGY":0.05
+    }.items())
+    positive=sum(1 for x in active if x["score"]>=0.45); negative=sum(1 for x in active if x["score"]<=-0.45)
+    contradiction=negative if direction>0 else positive
+    evidence=max(0.0,min(1.0,(abs(direction)+0.10*min(positive+negative,10))/2.0))
+    # Cold-start: confidence is explicitly conservative; historical data only nudges the score.
+    hist_conf=float(np.mean([x["confidence"] for x in active])) if active else 0.0
+    adaptive=direction*(0.90+0.10*hist_conf)
+    return {"scanners":active,"groups":groups,"direction_score":adaptive,"evidence_score":evidence,"positive":positive,"negative":negative,"historical_confidence":hist_conf}
+
+
+def _strategy_score_3m(layer, regime, action):
+    d=layer["direction_score"]*(1 if action=="CE" else -1)
+    g=layer["groups"]
+    compat=1.0
+    if action in ("CE","PE"):
+        if regime.startswith("IMPULSE"):
+            compat=0.75+0.25*max(0.0,min(1.0,(abs(g.get("TREND",0))+abs(g.get("MOMENTUM",0)))/2))
+        elif regime.startswith("STAIRCASE"):
+            compat=0.75+0.25*max(0.0,min(1.0,abs(g.get("TREND",0))))
+        elif regime=="GRIND":
+            compat=0.75+0.25*max(0.0,min(1.0,abs(g.get("LOCATION",0))))
+    return float(np.clip(0.5+0.5*d*compat,0.0,1.0))
+
+
+# Preserve the original DecisionEngine verbatim; add a bounded, auditable gate around it.
+_ORIGINAL_DECIDE_3M = DecisionEngine.decide
+
+def _decision_with_scanners_3m(self, feats):
+    layer=evaluate_scanner_layer_3m(feats)
+    feats["scanner_layer_score"]=layer["direction_score"]
+    feats["scanner_evidence_score"]=layer["evidence_score"]
+    feats["scanner_historical_confidence"]=layer["historical_confidence"]
+    feats["scanner_groups_json"]=json.dumps(layer["groups"],sort_keys=True)
+    feats["scanner_evidence_json"]=json.dumps(layer["scanners"],sort_keys=True)
+    d=_ORIGINAL_DECIDE_3M(self,feats)
+    if d.action in ("CE","PE"):
+        sscore=_strategy_score_3m(layer,d.regime,d.action)
+        d.confidence=float(np.clip(d.confidence*(0.90+0.10*sscore),0.0,0.95))
+        aligned=(layer["direction_score"]>=0.30) if d.action=="CE" else (layer["direction_score"]<=-0.30)
+        # Never manufacture a trade. Scanner disagreement can only reduce/skip the original decision.
+        if layer["evidence_score"]<0.28 or not aligned or sscore<0.56:
+            d.action="SKIP"
+            d.reason += " | Scanner gate: insufficient independent mathematical evidence"
         else:
-            st.warning("No valid Top-5 candidates available yet.")
+            d.reason += f" | Scanner strategy={sscore:.2f} evidence={layer['evidence_score']:.2f}"
+        feats["scanner_strategy_score"]=sscore
+    else:
+        feats["scanner_strategy_score"]=0.5
+    return d
 
-        generated = data.get("generated_at", "-")
-        st.caption(f"Generated: {generated} â€¢ Universe: {data.get('universe_count', 0)} â€¢ History OK: {data.get('history_count', 0)} â€¢ Top-50 checkpoint: {data.get('checkpoint50_count', 0)}")
-    st.markdown('</div>', unsafe_allow_html=True)
+DecisionEngine.decide=_decision_with_scanners_3m
 
+
+def _learn_scanner_outcome_3m(merged):
+    action=str(merged.get("decision_action","")).upper()
+    if action not in ("CE","PE"): return
+    outcome=str(merged.get("triple_barrier_outcome","")).upper()
+    if outcome not in ("TARGET_FIRST","STOP_FIRST","TIMEOUT","AMBIGUOUS"): return
+    win=1 if outcome=="TARGET_FIRST" else 0
+    try: scans=json.loads(merged.get("scanner_evidence_json","[]"))
+    except Exception: scans=[]
+    for x in scans:
+        key=str(x.get("id",""));
+        if not key: continue
+        _append_scanner_learning_3m({"key":key,"n":1,"wins":win,"action":action,"regime":merged.get("decision_regime"),"timestamp":merged.get("timestamp")})
+    try:
+        groups=json.loads(merged.get("scanner_groups_json","{}"))
+        for g,score in groups.items():
+            _append_scanner_learning_3m({"key":"GROUP:"+str(g),"n":1,"wins":win,"score":score,"action":action,"regime":merged.get("decision_regime"),"timestamp":merged.get("timestamp")})
+    except Exception: pass
+
+# Patch only the delayed-label persistence hook; original label generation is untouched.
+_ORIGINAL_PROCESS_LABELS_3M = Nifty3MinEngine._process_delayed_labels
+
+def _process_labels_with_scanner_learning(self):
+    max_tb_bars = CONFIG["time_barrier_min"] // CONFIG["bar_minutes"]
+    completed_records = []
+    with self.lock:
+        candles_list = list(self.candles_3m)
+        while self._unlabeled_decisions:
+            target_time, entry_px, atr_val, direction, f_row = self._unlabeled_decisions[0]
+            future_candles = [c for c in candles_list if to_ist(c.timestamp) > to_ist(target_time)]
+            if len(future_candles) >= max_tb_bars:
+                self._unlabeled_decisions.popleft()
+                try:
+                    labels = self.label_engine.generate(
+                        entry_price=entry_px, atr=atr_val,
+                        future_after_entry=future_candles, direction=direction,
+                        signal_timestamp=f_row["timestamp"], entry_timestamp=target_time
+                    )
+                    merged = {**f_row, **labels}
+                    _learn_scanner_outcome_3m(merged)
+                    completed_records.append(merged)
+                except Exception:
+                    pass
+            else:
+                break
+    if completed_records:
+        self.dataset_manager.write_parquet(pd.DataFrame(completed_records), name="labeled_features_3min")
+
+Nifty3MinEngine._process_delayed_labels=_process_labels_with_scanner_learning
 
 def main():
     if st is None:
         print("Streamlit not installed.")
         return
 
-    st.set_page_config(page_title="NIFTY 3M | Micro Engine v6.7", page_icon="âš¡", layout="wide", initial_sidebar_state="expanded")
+    st.set_page_config(page_title="NIFTY 3M | Micro Engine v7.0", page_icon="âš¡", layout="wide", initial_sidebar_state="expanded")
     inject_custom_css()
 
     adapter: KotakNeoAdapter = get_global_adapter()
@@ -2475,7 +2760,7 @@ def main():
         st.markdown("---")
         if st.button("Run Unit Tests", key="btn_tests"):
             try:
-                st.success("Engine Verification Passed (v6.7)" if run_unit_tests() else "Test Failed")
+                st.success("Engine Verification Passed (v7.0)" if run_unit_tests() else "Test Failed")
             except Exception as exc:
                 st.error(str(exc))
 
@@ -2505,8 +2790,8 @@ def main():
             ticks_count = len(adapter.tick_buffer)
 
     t1, t2, t3, t4 = st.columns(4)
-    t1.metric("NIFTY SPOT", f"\u20b9{spot_val}")
-    t2.metric("NIFTY FUT", f"\u20b9{fut_val}")
+    t1.metric("NIFTY SPOT", f"â‚¹{spot_val}")
+    t2.metric("NIFTY FUT", f"â‚¹{fut_val}")
     t3.metric("FUT OPEN INTEREST", f"{int(fut_oi):,}" if isinstance(fut_oi, (int, float)) and np.isfinite(fut_oi) else str(fut_oi))
     t4.metric("TICKS INGESTED", f"{ticks_count:,}")
 
@@ -2555,7 +2840,7 @@ def main():
             col_p4.markdown(f"**Status:** <span style='color:red; font-weight:bold;'>KILL-SWITCH LOCKED (Max Daily Loss Reached)</span>", unsafe_allow_html=True)
         elif active_pos:
             dir_str = "CE (LONG)" if active_pos.direction == 1 else "PE (SHORT)"
-            col_p4.markdown(f"**Active Position:** `{dir_str}`<br>Entry Opt: `\u20b9{active_pos.entry_option_price}` | Target Opt: `+{active_pos.option_target}` pt", unsafe_allow_html=True)
+            col_p4.markdown(f"**Active Position:** `{dir_str}`<br>Entry Opt: `â‚¹{active_pos.entry_option_price}` | Target Opt: `+{active_pos.option_target}` pt", unsafe_allow_html=True)
         elif desk.pending_order:
             p_dir = "CE" if desk.pending_order["direction"] == 1 else "PE"
             col_p4.markdown(f"**Order Staged:** `{p_dir}` (Filling Next Open)", unsafe_allow_html=True)
@@ -2566,7 +2851,7 @@ def main():
             st.markdown("---")
             col_tbl_head, col_tbl_dl = st.columns([3, 1])
             with col_tbl_head:
-                st.caption("Recent Closed Option Paper Trades (Option-Centric Journal v6.7)")
+                st.caption("Recent Closed Option Paper Trades (Option-Centric Journal v7.0)")
             
             trades_raw = [asdict(t) for t in desk.closed_trades]
             df_full_journal = pd.DataFrame(trades_raw)
@@ -2576,7 +2861,7 @@ def main():
                 st.download_button(
                     label="ðŸ“¥ Download Journal (.csv)",
                     data=csv_data,
-                    file_name=f"nifty_option_journal_v67_{now_ist().strftime('%Y%m%d')}.csv",
+                    file_name=f"nifty_option_journal_v70_{now_ist().strftime('%Y%m%d')}.csv",
                     mime="text/csv"
                 )
             
@@ -2585,8 +2870,8 @@ def main():
                 recent_trades_data.append({
                     "Exit Time": t.exit_time.strftime("%H:%M:%S") if t.exit_time else "-",
                     "Type": "CE (LONG)" if t.direction == 1 else "PE (SHORT)",
-                    "Entry Opt (\u20b9)": f"{t.entry_option_price:.2f}",
-                    "Exit Opt (\u20b9)": f"{t.exit_option_price:.2f}" if t.exit_option_price else "-",
+                    "Entry Opt (â‚¹)": f"{t.entry_option_price:.2f}",
+                    "Exit Opt (â‚¹)": f"{t.exit_option_price:.2f}" if t.exit_option_price else "-",
                     "Option PnL (pt)": t.pnl_pts,
                     "Bars Held": t.bars_held,
                     "Exit Reason": t.exit_reason
@@ -2665,7 +2950,7 @@ def main():
 
                     hw_list.append({
                         "Symbol": sym,
-                        "LTP": f"\u20b9{ltp:.2f}" if is_valid_number(ltp) else "-",
+                        "LTP": f"â‚¹{ltp:.2f}" if is_valid_number(ltp) else "-",
                         "Change %": f"{ret_pct:+.2f}%" if is_valid_number(ret_pct) else "-",
                         "Base Wt": f"{base_w*100:.1f}%",
                         "Live Impact": f"{effective_impact:+.3f}"
@@ -2675,9 +2960,6 @@ def main():
             st.dataframe(df_hw, height=210, hide_index=True)
         else:
             st.caption("Heavyweights mapping pending discovery... Click Discover Instruments in Sidebar.")
-
-    # Independent stock alpha display; no data is written back into the NIFTY decision path.
-    render_next_day_alpha()
 
     if is_streaming:
         time.sleep(CONFIG["ui_refresh_sec"])
