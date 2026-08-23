@@ -275,10 +275,10 @@ class RegimeDetector:
         if config:
             self.config.update(config)
 
-    def _value(self, row: Mapping[str, Any], *names: str) -> Optional[float]:
-        return safe_float(get_any(row, *names))
+    def _value(self, row: Mapping[str, Any], *names: str, default: Optional[float] = None) -> Optional[float]:
+        return safe_float(get_any(row, *names), default)
 
-    def _trend(self, row: Mapping[str, Any]) -> Tuple[str, float]:
+    def _trend(self, row: Mapping[str, Any], history: Sequence[Mapping[str, Any]] = ()) -> Tuple[str, float]:
         explicit = self._value(
             row, "trend_strength", "adx_normalized", "trend_score_raw"
         )
@@ -293,6 +293,13 @@ class RegimeDetector:
             score = clamp((adx - 15.0) / 25.0)
         else:
             score = clamp(abs(slope) if slope is not None else 0.0)
+
+        if explicit is None and slope is None and len(history) >= 3:
+            closes = [self._value(r, "close", "spot_close", "future_close") for r in history[-20:]]
+            closes = [x for x in closes if x is not None]
+            if len(closes) >= 3 and closes[0] != 0:
+                slope = (closes[-1] - closes[0]) / abs(closes[0])
+                score = clamp(abs(slope) * 100.0)
 
         direction = 0.0
         for name in ("trend_direction", "slope_direction"):
@@ -312,7 +319,7 @@ class RegimeDetector:
             return "TREND_DOWN", score
         return "TREND_UNDIRECTIONAL", score
 
-    def _momentum(self, row: Mapping[str, Any]) -> Tuple[str, float]:
+    def _momentum(self, row: Mapping[str, Any], history: Sequence[Mapping[str, Any]] = ()) -> Tuple[str, float]:
         rsi = self._value(row, "rsi")
         momentum = self._value(row, "momentum", "momentum_score")
         macd = self._value(row, "macd_hist", "macd_histogram")
@@ -324,6 +331,14 @@ class RegimeDetector:
             vals.append(clamp(abs(rsi - 50.0) / 25.0))
         if macd is not None:
             vals.append(clamp(abs(macd)))
+
+        if not vals and len(history) >= 4:
+            closes = [self._value(r, "close", "spot_close", "future_close") for r in history[-5:]]
+            closes = [x for x in closes if x is not None]
+            if len(closes) >= 3 and closes[-2] != 0:
+                ret = (closes[-1] - closes[0]) / abs(closes[0])
+                vals.append(clamp(abs(ret) * 100.0))
+                momentum = ret
 
         score = mean_or(vals, 0.0)
 
@@ -362,7 +377,7 @@ class RegimeDetector:
             return "HIGH_VOL", rank
         return "MID_VOL", rank
 
-    def _location(self, row: Mapping[str, Any]) -> Tuple[str, float]:
+    def _location(self, row: Mapping[str, Any], history: Sequence[Mapping[str, Any]] = ()) -> Tuple[str, float]:
         stretch = self._value(
             row,
             "distance_from_vwap_atr",
@@ -376,6 +391,24 @@ class RegimeDetector:
             atr = self._value(row, "atr", "atr_14_close", "atr_14_prev")
             if close is not None and vwap is not None and atr and atr > 0:
                 stretch = (close - vwap) / atr
+
+        if stretch is None and history:
+            closes = [self._value(r, "close", "spot_close", "future_close") for r in history[-20:]]
+            closes = [x for x in closes if x is not None]
+            if closes:
+                ref = mean_or(closes, 0.0)
+                atr = self._value(row, "atr", "atr_14_close", "atr_14_prev")
+                if atr is None or atr <= 0:
+                    ranges = []
+                    for r in history[-14:]:
+                        h = self._value(r, "high")
+                        l = self._value(r, "low")
+                        if h is not None and l is not None:
+                            ranges.append(abs(h-l))
+                    atr = mean_or(ranges, 0.0)
+                close = self._value(row, "close", "spot_close", "future_close")
+                if close is not None and atr and atr > 0:
+                    stretch = (close - ref) / atr
 
         if stretch is None:
             return "UNKNOWN", 0.0
@@ -479,10 +512,10 @@ class RegimeDetector:
         )
         coverage = present / len(fields)
 
-        trend_state, trend_score = self._trend(row)
-        momentum_state, momentum_score = self._momentum(row)
+        trend_state, trend_score = self._trend(row, history)
+        momentum_state, momentum_score = self._momentum(row, history)
         vol_state, vol_score = self._volatility(row, history)
-        loc_state, stretch_score = self._location(row)
+        loc_state, stretch_score = self._location(row, history)
         breadth_state, breadth_score = self._breadth(row)
 
         structure_state = self._structure(row)
@@ -582,8 +615,8 @@ def parse_strategy_dna(row: Mapping[str, Any]) -> StrategyDNA:
         # Unique, deterministic ordering.
         groups[group] = sorted(set(values))
 
-    strategy_id = str(get_any(row, "strategy_id", "id", "strategy", default="UNKNOWN"))
-    dna_id = str(get_any(row, "dna_id", "strategy_dna_id", default=strategy_id))
+    strategy_id = str(get_any(row, "strategy_id", "atomic_strategy_id", "id", "strategy", default="UNKNOWN"))
+    dna_id = str(get_any(row, "dna_id", "strategy_dna_id", "strategy_dna_hash", default=strategy_id))
     name = str(get_any(row, "strategy_name", "name", default=strategy_id))
 
     return StrategyDNA(
@@ -631,8 +664,26 @@ def weighted_dna_similarity(dna: StrategyDNA, regime: RegimeFingerprint) -> Dict
     Synonyms are represented explicitly rather than fuzzy-matched so that
     accidental text similarity cannot create false compatibility.
     """
+    mechanism_tags = set()
+    if regime.trend_state in {"TREND_UP", "TREND_DOWN", "TREND_UNIDIRECTIONAL"}:
+        mechanism_tags.add("trend_following")
+    if regime.trend_state == "RANGE":
+        mechanism_tags.add("mean_reversion")
+    if regime.market_structure_state in {"BREAKOUT_UP", "BREAKOUT_DOWN"}:
+        mechanism_tags.update({"breakout", "range_expansion"})
+    if regime.market_structure_state == "COMPRESSION":
+        mechanism_tags.add("compression")
+    if regime.momentum_state in {"MOMENTUM_UP", "MOMENTUM_DOWN"}:
+        mechanism_tags.add("momentum")
+    if regime.location_state in {"ABOVE_VWAP_STRETCHED", "BELOW_VWAP_STRETCHED"}:
+        mechanism_tags.add("stretch")
+    if regime.volatility_state == "HIGH_VOL":
+        mechanism_tags.add("high_volatility")
+    if regime.volatility_state == "LOW_VOL":
+        mechanism_tags.add("low_volatility")
+
     regime_tags = {
-        "mechanism": set(),
+        "mechanism": mechanism_tags,
         "trend": {norm_token(regime.trend_state)},
         "momentum": {norm_token(regime.momentum_state)},
         "location": {norm_token(regime.location_state)},
@@ -645,14 +696,34 @@ def weighted_dna_similarity(dna: StrategyDNA, regime: RegimeFingerprint) -> Dict
         "session": {norm_token(regime.session_state)},
     }
 
+    mechanism = set(dna.mechanism)
+    trend = set(dna.trend)
+    momentum = set(dna.momentum)
+    location = set(dna.location)
+    volatility = set(dna.volatility)
+    structure = set(dna.structure)
+    # The frozen registry currently stores most atomic descriptors under
+    # mechanism_tags. These deterministic mappings let the mapper compare
+    # that real registry against the regime taxonomy without inventing
+    # strategy rules.
+    for tag in mechanism:
+        if "trend" in tag:
+            trend.add(tag)
+        if "momentum" in tag:
+            momentum.add(tag)
+        if "breakout" in tag or "compression" in tag or "structure" in tag:
+            structure.add(tag)
+        if "volatility" in tag or tag in {"high_volatility", "low_volatility"}:
+            volatility.add(tag)
+
     dna_groups = {
-        "mechanism": dna.mechanism,
-        "trend": dna.trend,
-        "momentum": dna.momentum,
-        "location": dna.location,
-        "volatility": dna.volatility,
+        "mechanism": sorted(mechanism),
+        "trend": sorted(trend),
+        "momentum": sorted(momentum),
+        "location": sorted(location),
+        "volatility": sorted(volatility),
         "volume": dna.volume,
-        "structure": dna.structure,
+        "structure": sorted(structure),
         "option": dna.option,
         "timeframe": dna.timeframe,
         "instrument": dna.instrument,
