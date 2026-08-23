@@ -4774,6 +4774,10 @@ V7_AUDIT_FILE = ROOT / "audit_summary.json"
 V7_MTF_CACHE_DIR = ROOT / "mtf_cache"
 V7_MTF_CACHE_DIR.mkdir(parents=True, exist_ok=True)
 V7_LOCK_FILE = SHARED_RAW_CACHE_DIR / ".shared_raw.lock"
+V7_SCANNER_LEARNING_FILE = ROOT / "scanner_learning.jsonl"
+V7_SCANNER_PRIOR_ALPHA = 10.0
+V7_SCANNER_PRIOR_BETA = 10.0
+V7_SCANNER_HIGH_CONF_N = 100.0
 
 # Extra raw fields only. These are still raw quote values; no calculated field
 # from either engine is allowed across the isolation boundary.
@@ -5193,8 +5197,196 @@ def _v7_audit() -> Dict[str, Any]:
     return result
 
 
+
+# ============================================================================
+# ORTHOGONAL MATHEMATICAL SCANNER LIBRARY + COLD-START LEARNING
+# ============================================================================
+# Existing V7 scoring/MTF/VIX/R:R/sector gates remain the backbone. This layer
+# adds independent, hypothesis-driven evidence. It starts with a conservative
+# prior and learns only from next-day outcomes generated from this engine's own
+# raw data. It never reads NIFTY 3-Min calculated state.
+
+def _nd8_clip(x):
+    try: return float(np.clip(float(x), -1.0, 1.0))
+    except Exception: return 0.0
+
+def _nd8_sig(x, scale=1.0):
+    try: return float(np.tanh(float(x)/max(scale,1e-9)))
+    except Exception: return 0.0
+
+def _nd8_scan_from_row(row: Dict[str, Any]) -> List[Tuple[str,str,float]]:
+    def v(k, default=50.0): return safe_float(row.get(k,default),default)
+    T=_nd8_clip((v("TrendScore")-50)/50); M=_nd8_clip((v("MomentumScore")-50)/50)
+    R=_nd8_clip((v("RelativeStrengthScore")-50)/50); S=_nd8_clip((v("SectorScore")-50)/50)
+    V=_nd8_clip((v("VolumeScore")-50)/50); VV=_nd8_clip((v("VolatilityScore")-50)/50)
+    C=_nd8_clip((v("CatalystScoreFinal")-50)/50); A=_nd8_clip(2*(v("mtf_score",50)/100)-1)
+    Q=_nd8_clip(2*(v("rr",0)/max(V7_RR_TARGET_MULT,1e-9))-1)
+    d=1 if str(row.get("Direction","LONG")).upper()=="LONG" else -1
+    # Scores are directional by construction; SHORT uses the negative of the
+    # same evidence orientation, so the decision layer remains symmetric.
+    return [
+      ("TREND_RIDER","TREND",_nd8_clip(.45*T+.35*A+.20*S)),
+      ("TREND_ACCELERATION","TREND",_nd8_clip(.55*T+.25*M+.20*A)),
+      ("TREND_PERSISTENCE","TREND",_nd8_clip(.50*T+.30*A+.20*R)),
+      ("TREND_SECTOR_ALIGNMENT","TREND",_nd8_clip(.50*T+.30*S+.20*R)),
+      ("MOMENTUM_SURGE","MOMENTUM",_nd8_clip(.55*M+.25*V+.20*A)),
+      ("MOMENTUM_CONFIRMATION","MOMENTUM",_nd8_clip(.45*M+.35*R+.20*T)),
+      ("MOMENTUM_VOLUME_EXPANSION","MOMENTUM",_nd8_clip(.55*M+.45*V)),
+      ("MOMENTUM_EXHAUSTION","MOMENTUM",_nd8_clip(-.60*M-.25*T+.15*VV)),
+      ("RELATIVE_STRENGTH_LEADER","RELATIVE_STRENGTH",_nd8_clip(.65*R+.20*S+.15*T)),
+      ("RELATIVE_STRENGTH_BREAK","RELATIVE_STRENGTH",_nd8_clip(.45*R+.35*M+.20*V)),
+      ("RELATIVE_STRENGTH_DIVERGENCE","RELATIVE_STRENGTH",_nd8_clip(.60*R-.40*T)),
+      ("SECTOR_LEADERSHIP","SECTOR",_nd8_clip(.65*S+.20*R+.15*T)),
+      ("SECTOR_MOMENTUM","SECTOR",_nd8_clip(.55*S+.45*M)),
+      ("SECTOR_CONFIRMATION","SECTOR",_nd8_clip(.50*S+.30*A+.20*R)),
+      ("VOLUME_PARTICIPATION","FLOW",_nd8_clip(.65*V+.35*M)),
+      ("VOLUME_BREAKOUT","FLOW",_nd8_clip(.50*V+.30*M+.20*T)),
+      ("ACCUMULATION_PROXY","FLOW",_nd8_clip(.35*T+.30*V+.20*R+.15*S)),
+      ("DISTRIBUTION_PROXY","FLOW",_nd8_clip(-.35*T-.30*V-.20*R-.15*S)),
+      ("VOLATILITY_EXPANSION","VOLATILITY",_nd8_clip(.55*VV+.30*M+.15*V)),
+      ("VOLATILITY_COMPRESSION","VOLATILITY",_nd8_clip(-.55*VV+.30*T-.15*V)),
+      ("VOLATILITY_TREND_ALIGNMENT","VOLATILITY",_nd8_clip(.50*VV+.30*T+.20*M)),
+      ("MTF_ALIGNMENT","LOCATION",_nd8_clip(.70*A+.20*T+.10*S)),
+      ("MTF_PULLBACK_CONTINUATION","LOCATION",_nd8_clip(.45*A+.35*T-.20*M)),
+      ("STRUCTURAL_BREAKOUT","BREAKOUT",_nd8_clip(.40*T+.25*M+.20*V+.15*A)),
+      ("BREAKOUT_BLITZ","BREAKOUT",_nd8_clip(.35*T+.30*M+.20*V+.15*R)),
+      ("FAILED_BREAKOUT","BREAKOUT",_nd8_clip(-.45*T-.30*M+.15*VV-.10*V)),
+      ("BREAKOUT_SECTOR_CONFIRM","BREAKOUT",_nd8_clip(.35*T+.25*M+.25*S+.15*V)),
+      ("BREAKOUT_RELATIVE_STRENGTH","BREAKOUT",_nd8_clip(.40*T+.35*R+.25*M)),
+      ("CATALYST_ALIGNMENT","CATALYST",_nd8_clip(.55*C+.25*T+.20*S)),
+      ("CATALYST_MOMENTUM","CATALYST",_nd8_clip(.50*C+.30*M+.20*V)),
+      ("CATALYST_CONTRADICTION","CATALYST",_nd8_clip(-.55*C+.30*T+.15*R)),
+      ("RISK_REWARD_QUALITY","RISK",_nd8_clip(.70*Q+.20*T+.10*M)),
+      ("STRUCTURAL_RISK_CONFIRM","RISK",_nd8_clip(.55*Q+.25*A+.20*S)),
+      ("TREND_MOMENTUM_COMBO","STRATEGY",_nd8_clip(.45*T+.35*M+.20*A)),
+      ("BREAKOUT_MOMENTUM_COMBO","STRATEGY",_nd8_clip(.35*T+.30*M+.20*V+.15*A)),
+      ("MEAN_REVERSION_SETUP","STRATEGY",_nd8_clip(-.55*T-.25*M+.20*VV)),
+      ("REVERSAL_RISK","STRATEGY",_nd8_clip(-.50*T-.25*A-.25*M)),
+      ("TREND_INVERTER","STRATEGY",_nd8_clip(-.50*T-.30*M+.20*VV)),
+      ("DECAY_ENVIRONMENT","STRATEGY",_nd8_clip(-.35*M-.25*VV+.25*Q-.15*V)),
+      ("INSTITUTIONAL_ALIGNMENT","STRATEGY",_nd8_clip(.25*T+.20*M+.20*R+.20*S+.15*V)),
+      ("QUALITY_CONFLUENCE","STRATEGY",_nd8_clip(.20*T+.15*M+.15*R+.15*S+.15*V+.10*A+.10*Q)),
+      ("TREND_WITH_RISK_FILTER","STRATEGY",_nd8_clip(.45*T+.25*M+.30*Q)),
+      ("SECTOR_RELATIVE_COMBO","STRATEGY",_nd8_clip(.45*S+.35*R+.20*M)),
+      ("PARTICIPATION_BREAKOUT","STRATEGY",_nd8_clip(.45*V+.30*M+.25*T)),
+      ("DEFENSIVE_SHORT_SETUP","STRATEGY",_nd8_clip(-.45*T-.30*M-.25*R)),
+      ("HIGH_CONVICTION_ALIGNMENT","STRATEGY",_nd8_clip(.40*T+.20*M+.15*R+.10*S+.15*Q)),
+      ("CROWDING_EXHAUSTION","STRATEGY",_nd8_clip(.45*T-.35*M+.20*VV)),
+      ("RANGE_TO_TREND_TRANSITION","STRATEGY",_nd8_clip(.35*T+.25*M+.20*V+.20*VV)),
+      ("RISK_ADJUSTED_LEADERSHIP","STRATEGY",_nd8_clip(.35*R+.30*T+.20*S+.15*Q)),
+    ]
+
+def _nd8_load_learning() -> Dict[str, Dict[str,float]]:
+    out=defaultdict(lambda:{"n":0.0,"wins":0.0})
+    try:
+        if V7_SCANNER_LEARNING_FILE.exists():
+            for line in V7_SCANNER_LEARNING_FILE.read_text(encoding="utf-8").splitlines():
+                if not line.strip(): continue
+                r=json.loads(line); key=str(r.get("scanner_id",""))
+                if key: out[key]["n"] += 1; out[key]["wins"] += int(bool(r.get("win",False)))
+    except Exception as exc: LOGGER.warning("scanner learning read failed: %s",exc)
+    return out
+
+def _nd8_append_learning(record: Dict[str,Any]) -> None:
+    V7_SCANNER_LEARNING_FILE.parent.mkdir(parents=True,exist_ok=True)
+    with V7_SCANNER_LEARNING_FILE.open("a",encoding="utf-8") as fh:
+        fh.write(json.dumps(record,ensure_ascii=False,default=str)+"\n"); fh.flush(); os.fsync(fh.fileno())
+
+def _nd8_evaluate_scanners(row: Dict[str,Any]) -> Dict[str,Any]:
+    stats=_nd8_load_learning(); scans=_nd8_scan_from_row(row); groups=defaultdict(list); evidence=[]
+    for sid,g,score in scans:
+        st=stats.get(sid,{"n":0.0,"wins":0.0}); n=st["n"]; w=st["wins"]
+        p=(V7_SCANNER_PRIOR_ALPHA+w)/(V7_SCANNER_PRIOR_ALPHA+V7_SCANNER_PRIOR_BETA+n)
+        conf=1-math.exp(-n/V7_SCANNER_HIGH_CONF_N)
+        groups[g].append(score)
+        evidence.append({"id":sid,"group":g,"score":round(score,5),"estimate":round(p,5),"confidence":round(conf,5),"n":int(n)})
+    gs={g:float(np.mean(v)) for g,v in groups.items()}
+    weights={"TREND":.16,"MOMENTUM":.14,"RELATIVE_STRENGTH":.12,"SECTOR":.10,"FLOW":.10,"VOLATILITY":.08,"LOCATION":.08,"BREAKOUT":.08,"CATALYST":.05,"RISK":.05,"STRATEGY":.04}
+    raw=sum(gs.get(g,0.0)*w for g,w in weights.items()); conf=float(np.mean([x["confidence"] for x in evidence])) if evidence else 0.0
+    # Directional orientation is always LONG-positive / SHORT-negative.
+    direction=raw*(.90+.10*conf)
+    strategy=float(np.clip(.5+.5*direction,0,1))
+    pos=sum(1 for x in evidence if x["score"]>=.45); neg=sum(1 for x in evidence if x["score"]<=-.45)
+    if abs(direction)>=.45 and strategy>=.725: family="TREND_CONTINUATION" if gs.get("TREND",0)*direction>0 and gs.get("MOMENTUM",0)*direction>0 else "CONFLUENCE"
+    elif abs(direction)>=.30: family="BREAKOUT_OR_MOMENTUM" if gs.get("BREAKOUT",0)*direction>0 else "SELECTIVE_SETUP"
+    else: family="NO_EDGE"
+    return {"score":direction,"strategy_score":strategy,"confidence":conf,"positive":pos,"negative":neg,"groups":gs,"evidence":evidence,"family":family}
+
+def _nd8_apply_scanners_df(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None or df.empty: return df
+    x=df.copy(); records=[]
+    for _,row in x.iterrows(): records.append(_nd8_evaluate_scanners(row.to_dict()))
+    x["ScannerScore"]=[r["score"] for r in records]
+    x["ScannerStrategyScore"]=[r["strategy_score"] for r in records]
+    x["ScannerConfidence"]=[r["confidence"] for r in records]
+    x["ScannerEvidenceCount"]=[r["positive"] for r in records]
+    x["ScannerContradictionCount"]=[r["negative"] for r in records]
+    x["ScannerFamily"]=[r["family"] for r in records]
+    x["ScannerGroupsJSON"]=[json.dumps(r["groups"],sort_keys=True) for r in records]
+    x["ScannerEvidenceJSON"]=[json.dumps(r["evidence"],sort_keys=True) for r in records]
+    # Additive 10% contribution. V7Score remains the primary backbone.
+    x["V7Score"]=(0.90*pd.to_numeric(x["V7Score"],errors="coerce").fillna(0)+10.0*x["ScannerStrategyScore"]).clip(0,100)
+    return x
+
+
+def _nd8_record_predictions(candidates: List[Dict[str,Any]]) -> None:
+    # Prediction ledger is separate from outcome learning; it is resolved next run
+    # from the following session's raw OHLC. No future information is used here.
+    for c in candidates:
+        try:
+            rec={"type":"PENDING_NEXT_DAY","prediction_date":str(c.get("data_as_of",now_ist().date())),"symbol":c.get("symbol"),"direction":c.get("direction"),"scanner_evidence":json.loads(c.get("scanner_evidence_json","[]")),"scanner_family":c.get("scanner_family","NO_EDGE"),"entry_reference":c.get("ltp"),"target":c.get("risk_profile",{}).get("target_2"),"stop":c.get("risk_profile",{}).get("suggested_stop")}
+            _nd8_append_learning({"scanner_id":"__PENDING__","win":False,"pending":True,"record":rec,"timestamp":now_ist().isoformat()})
+        except Exception: pass
+
+
+def _nd8_resolve_pending() -> None:
+    """Resolve yesterday's pending scanner predictions using only raw next-day data."""
+    if not V7_SCANNER_LEARNING_FILE.exists(): return
+    rows=[]
+    try:
+        for line in V7_SCANNER_LEARNING_FILE.read_text(encoding="utf-8").splitlines():
+            if line.strip(): rows.append(json.loads(line))
+    except Exception: return
+    pending=[r for r in rows if r.get("pending") and not r.get("resolved")]
+    if not pending: return
+    resolved_keys=set()
+    for r in pending:
+        rec=r.get("record",{}); sym=str(rec.get("symbol","")).strip(); pred=str(rec.get("prediction_date",""))
+        if not sym or not pred: continue
+        try:
+            df=fetch_yahoo_chart(f"{sym}.NS",days=15,interval="1d")
+            if df is None or df.empty or "DateTime" not in df.columns: continue
+            d=df.copy(); d["DateTime"]=pd.to_datetime(d["DateTime"],errors="coerce"); d=d.dropna(subset=["DateTime"])
+            day=pd.Timestamp(pred).date(); after=d[d["DateTime"].dt.date>day]
+            if after.empty: continue
+            nxt=after.iloc[0]; entry=safe_float(rec.get("entry_reference")); direction=str(rec.get("direction","LONG")).upper();
+            if not np.isfinite(entry) or entry<=0: continue
+            target=safe_float(rec.get("target"),np.nan); stop=safe_float(rec.get("stop"),np.nan)
+            high=safe_float(nxt.get("High")); low=safe_float(nxt.get("Low")); close=safe_float(nxt.get("Close"))
+            if direction=="LONG":
+                hit_t=np.isfinite(target) and high>=target; hit_s=np.isfinite(stop) and low<=stop; pnl=close-entry
+            else:
+                hit_t=np.isfinite(target) and low<=target; hit_s=np.isfinite(stop) and high>=stop; pnl=entry-close
+            outcome="TARGET_FIRST" if hit_t and not hit_s else ("STOP_FIRST" if hit_s and not hit_t else ("AMBIGUOUS" if hit_t and hit_s else "TIMEOUT"))
+            win=outcome=="TARGET_FIRST" or (outcome=="TIMEOUT" and pnl>0)
+            for x in rec.get("scanner_evidence",[]):
+                sid=str(x.get("id",""));
+                if sid: _nd8_append_learning({"scanner_id":sid,"win":bool(win),"outcome":outcome,"symbol":sym,"prediction_date":pred,"resolved_date":str(nxt["DateTime"]),"pending":False})
+            r["resolved"]=True; r["resolved_outcome"]=outcome; resolved_keys.add(id(r))
+        except Exception: continue
+    # Rewrite pending records only when at least one was resolved; preserve append-only
+    # learning records and avoid duplicate resolution.
+    if resolved_keys:
+        try:
+            tmp=V7_SCANNER_LEARNING_FILE.with_suffix(".tmp")
+            with tmp.open("w",encoding="utf-8") as fh:
+                for r in rows: fh.write(json.dumps(r,ensure_ascii=False,default=str)+"\n")
+            tmp.replace(V7_SCANNER_LEARNING_FILE)
+        except Exception: pass
+
 def _v7_build_day_ahead_watchlist() -> Dict[str, Any]:
     """V7 orchestration: original 500 scan -> 30 bet basket -> expensive MTF -> final 5."""
+    _nd8_resolve_pending()
     timestamp = now_ist()
     universe = load_nifty500_universe()
     symbols = universe["Symbol"].astype(str).str.upper().str.strip().drop_duplicates().tolist()
@@ -5211,6 +5403,7 @@ def _v7_build_day_ahead_watchlist() -> Dict[str, Any]:
     frame=add_sector_features(pd.DataFrame(rows)); scored=score_candidates(frame)
     basket=_v7_preselect_30(scored)
     enriched=_v7_enrich_basket(basket)
+    enriched=_nd8_apply_scanners_df(enriched)
     vix=_v7_vix_context()
     if not enriched.empty:
         enriched["MacroVIXRegime"] = vix.get("regime","UNAVAILABLE")
@@ -5235,12 +5428,13 @@ def _v7_build_day_ahead_watchlist() -> Dict[str, Any]:
             "mtf_score":round(safe_float(d.get("mtf_score"),50),2),"support":safe_float(d.get("support"),np.nan),"resistance":safe_float(d.get("resistance"),np.nan),
             "invalidation":safe_float(d.get("invalidation"),np.nan),"target":safe_float(d.get("target"),np.nan),"rr":round(safe_float(d.get("rr"),np.nan),3),
             "invalidation_atr":round(safe_float(d.get("invalidation_atr"),np.nan),3),"pattern_conflicts":int(d.get("pattern_conflicts",0)),"pattern_supports":int(d.get("pattern_supports",0)),
-            "risk_profile":d["risk_profile"],"thesis":"THESIS_PENDING_MORNING_CONFIRMATION","invalidation_rule":"Structural S/R or ATR fallback; hard R:R gate applies."
+            "risk_profile":d["risk_profile"],"scanner_score":round(safe_float(d.get("ScannerScore"),0),5),"scanner_strategy_score":round(safe_float(d.get("ScannerStrategyScore"),0.5),5),"scanner_confidence":round(safe_float(d.get("ScannerConfidence"),0),5),"scanner_evidence_count":int(d.get("ScannerEvidenceCount",0)),"scanner_contradiction_count":int(d.get("ScannerContradictionCount",0)),"scanner_family":str(d.get("ScannerFamily","NO_EDGE")),"scanner_groups_json":str(d.get("ScannerGroupsJSON","{}")),"scanner_evidence_json":str(d.get("ScannerEvidenceJSON","[]")),"thesis":"THESIS_PENDING_MORNING_CONFIRMATION","invalidation_rule":"Structural S/R or ATR fallback; hard R:R gate applies."
         })
     basket_records=[]
     for _,row in enriched.iterrows():
-        basket_records.append({"symbol":str(row["Symbol"]),"sector_bucket":str(row.get("SectorBucket",_v7_sector_bucket(row.get("Industry")))),"direction":str(row.get("Direction")),"day_ahead_score":round(safe_float(row.get("DayAheadScore"),0),2),"v7_score":round(safe_float(row.get("V7Score"),0),2),"mtf_score":round(safe_float(row.get("mtf_score"),50),2),"rr":round(safe_float(row.get("rr"),np.nan),3),"hard_rr_pass":bool(row.get("hard_rr_pass",False))})
+        basket_records.append({"symbol":str(row["Symbol"]),"sector_bucket":str(row.get("SectorBucket",_v7_sector_bucket(row.get("Industry")))),"direction":str(row.get("Direction")),"day_ahead_score":round(safe_float(row.get("DayAheadScore"),0),2),"v7_score":round(safe_float(row.get("V7Score"),0),2),"mtf_score":round(safe_float(row.get("mtf_score"),50),2),"rr":round(safe_float(row.get("rr"),np.nan),3),"hard_rr_pass":bool(row.get("hard_rr_pass",False)),"scanner_score":round(safe_float(row.get("ScannerScore"),0),5),"scanner_strategy_score":round(safe_float(row.get("ScannerStrategyScore"),0.5),5),"scanner_confidence":round(safe_float(row.get("ScannerConfidence"),0),5),"scanner_family":str(row.get("ScannerFamily","NO_EDGE"))})
     result={"engine":"NEXT_DAY_ALPHA_ENGINE","version":V7_VERSION,"generated_at":timestamp.isoformat(),"data_as_of":timestamp.strftime("%Y-%m-%d"),"architecture":{"nifty_3min_engine_modified":False,"shared_raw_data_allowed":True,"shared_calculated_features":False,"shared_scores":False,"shared_regime_decisions":False,"shared_decisions":False,"shared_labels":False,"shared_predictions":False,"shared_raw_fields_only":True,"next_day_can_write_to_nifty_engine":False,"next_day_can_read_nifty_calculations":False},"macro_regime":vix,"day_ahead":{"universe_size":len(symbols),"usable_symbols":len(frame),"scored_symbols":len(scored),"bet_basket_size":len(basket_records),"bet_basket_30":basket_records,"top5_count":len(candidates),"top5":candidates},"morning_confirmation":{"status":"PENDING","final":[]},"probability_note":"Quality scores are not win probabilities. VIX is not a directional predictor. Historical calibration is required before any probability claim.","quality_controls":{"hard_rr_gate":V7_MIN_RR,"max_invalidation_atr":V7_MAX_INVALIDATION_DISTANCE_ATR,"mtf_timeframes":["W","D","4H","1H","15M"],"sector_basket_max_per_sector":V7_MAX_STOCKS_PER_SECTOR,"no_trade_allowed":True}}
+    _nd8_record_predictions(candidates)
     _atomic_write_text(CACHE_JSON,json.dumps(result,ensure_ascii=False,indent=2,default=str))
     return result
 
@@ -5274,6 +5468,17 @@ def _v7_run_morning_confirmation() -> Dict[str, Any]:
     confirmed=[]
     for item in confirmations:
         score=safe_float(item.get("confirmation_score"),0)
+        scanner_score=safe_float(item.get("scanner_score"),0)
+        scanner_family=str(item.get("scanner_family","NO_EDGE"))
+        direction=str(item.get("direction","LONG")).upper()
+        scanner_dir_ok=(scanner_score >= 0.12) if direction=="LONG" else (scanner_score <= -0.12)
+        scanner_strategy=safe_float(item.get("scanner_strategy_score"),0.5)
+        if scanner_dir_ok:
+            score=min(99.0, score + 4.0*scanner_strategy)
+        else:
+            score=max(0.0, score - 8.0)
+        item["scanner_gate"]="PASS" if scanner_dir_ok and scanner_strategy>=0.55 else "CAUTION"
+        item["scanner_family"]=scanner_family
         sector_ok=item.get("sector_live_alignment") is True
         # In neutral sectors the original confirmation may still stand; opposite live sectors are hard rejection.
         if item.get("sector_live_regime") in ("BULLISH","BEARISH") and not sector_ok:
