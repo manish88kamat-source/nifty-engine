@@ -5863,7 +5863,7 @@ def run_streamlit_dashboard() -> None:
 
     st.set_page_config(page_title="Next-Day Stock Alpha Engine", layout="wide")
     st.title("NEXT-DAY STOCK ALPHA ENGINE")
-    st.caption("Standalone â€¢ Raw-data sharing only â€¢ Kotak Neo live â€¢ Trusted catalyst layer")
+    st.caption("Standalone | Raw-data sharing only | Kotak Neo live | Trusted catalyst layer")
 
     result = load_latest()
     day = result.get("day_ahead", {})
@@ -5882,7 +5882,7 @@ def run_streamlit_dashboard() -> None:
     else:
         st.warning("NO QUALIFIED CANDIDATE")
 
-    st.subheader("09:15â€“09:20 CONFIRMATION")
+    st.subheader("09:15-09:20 CONFIRMATION")
     confirmations = morning.get("confirmations", [])
     if confirmations:
         st.dataframe(pd.DataFrame(confirmations), use_container_width=True, hide_index=True)
@@ -5891,7 +5891,7 @@ def run_streamlit_dashboard() -> None:
         st.success("FINAL TRADE CANDIDATES")
         st.dataframe(pd.DataFrame(final), use_container_width=True, hide_index=True)
     else:
-        st.info("NO TRADE â€” engine never forces two trades.")
+        st.info("NO TRADE - engine never forces two trades.")
 
     st.caption("A score is a quality score, not a guaranteed win probability. Historical calibration is required before any probability claim.")
 
