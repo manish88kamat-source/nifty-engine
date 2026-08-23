@@ -1,5 +1,5 @@
 """
-GSR-1.2.1 â€” Global Strategy Research Engine
+GSR-1.2.1 â€” Global Strategy Research Engine (Surgical Patch)
 ============================================
 
 Research-only, leakage-safe strategy research core.
@@ -49,6 +49,7 @@ import statistics
 from collections import defaultdict, deque
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 from pathlib import Path
 from typing import Any, Callable, Deque, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
@@ -66,10 +67,11 @@ except ImportError as exc:
     ) from exc
 
 
-ENGINE_VERSION = "GSR-1.2.1-RESEARCH"
+ENGINE_VERSION = "GSR-1.2.1-RESEARCH-SURGICAL-PATCH"
 SCHEMA_VERSION = "GSR_STATE_1.2.1"
 DATA_SCHEMA_VERSION = "GSR_OBS_1.2.1"
 DEFAULT_DATA_DIR = Path(os.getenv("GSR_DATA_DIR", "./gsr_data"))
+DEFAULT_TIMEZONE = os.getenv("GSR_TIMEZONE", "Asia/Kolkata")
 
 FORBIDDEN_EXTERNAL_OPINION_FIELDS = {
     "alpha", "alpha_score", "confidence", "prediction", "signal",
@@ -135,21 +137,21 @@ def stable_hash(payload: Any) -> str:
     return hashlib.sha256(raw).hexdigest()
 
 
-def parse_timestamp(ts: str) -> datetime:
+def parse_timestamp(ts: str, default_timezone: str = DEFAULT_TIMEZONE) -> datetime:
     value = str(ts).strip()
     if value.endswith("Z"):
         value = value[:-1] + "+00:00"
     dt = datetime.fromisoformat(value)
     if dt.tzinfo is None:
-        # Naive timestamps are interpreted consistently, but callers should
-        # preferably supply timezone-aware timestamps.
-        dt = dt.replace(tzinfo=timezone.utc)
+        dt = dt.replace(tzinfo=ZoneInfo(default_timezone))
     return dt
 
 
 def session_key(timestamp: str, session_start: str = "09:15",
-                session_end: str = "15:30") -> str:
-    dt = parse_timestamp(timestamp)
+                session_end: str = "15:30",
+                timezone_name: str = DEFAULT_TIMEZONE) -> str:
+    tz = ZoneInfo(timezone_name)
+    dt = parse_timestamp(timestamp, timezone_name).astimezone(tz)
     hhmm = dt.strftime("%H:%M")
     if hhmm < session_start or hhmm > session_end:
         return f"{dt.date().isoformat()}|OUT_OF_SESSION"
@@ -204,6 +206,8 @@ class GSRConfig:
     regime_min_history: int = 20
     session_start: str = "09:15"
     session_end: str = "15:30"
+    timezone_name: str = DEFAULT_TIMEZONE
+    bar_minutes: int = 3
 
     # Execution realism.
     transaction_cost_points: float = 0.0
@@ -251,6 +255,8 @@ class GSRConfig:
             regime_min_history=int(env("GSR_REGIME_MIN_HISTORY", "20")),
             session_start=env("GSR_SESSION_START", "09:15"),
             session_end=env("GSR_SESSION_END", "15:30"),
+            timezone_name=env("GSR_TIMEZONE", DEFAULT_TIMEZONE),
+            bar_minutes=int(env("GSR_BAR_MINUTES", "3")),
             transaction_cost_points=float(env("GSR_COST_POINTS", "0")),
             base_slippage_points=float(env("GSR_BASE_SLIPPAGE", "0")),
             impact_coefficient=float(env("GSR_IMPACT_COEFF", "0.10")),
@@ -447,15 +453,16 @@ class SessionVWAP:
     5000-bar history can never contaminate the current day's VWAP.
     """
 
-    def __init__(self, session_start: str, session_end: str) -> None:
+    def __init__(self, session_start: str, session_end: str, timezone_name: str = DEFAULT_TIMEZONE) -> None:
         self.session_start = session_start
         self.session_end = session_end
+        self.timezone_name = timezone_name
         self._pv: Dict[Tuple[str, str], float] = defaultdict(float)
         self._vol: Dict[Tuple[str, str], float] = defaultdict(float)
 
     def update(self, snap: MarketSnapshot) -> Optional[float]:
         key = (snap.symbol, session_key(
-            snap.timestamp, self.session_start, self.session_end
+            snap.timestamp, self.session_start, self.session_end, self.timezone_name
         ))
         volume = max(float(snap.volume or 0.0), 0.0)
         if volume <= 0.0:
@@ -476,7 +483,7 @@ class MarketFeatureEngine:
             lambda: deque(maxlen=config.max_bars_per_symbol)
         )
         self.session_vwap = SessionVWAP(
-            config.session_start, config.session_end
+            config.session_start, config.session_end, config.timezone_name
         )
 
     def add(self, snap: MarketSnapshot) -> Dict[str, Any]:
@@ -587,6 +594,7 @@ class MarketFeatureEngine:
                 snap.timestamp,
                 self.config.session_start,
                 self.config.session_end,
+                self.config.timezone_name,
             ),
         }
 
@@ -611,7 +619,7 @@ class ProbabilisticRegimeEngine:
 
     def __init__(self, config: GSRConfig) -> None:
         self.config = config
-        self.prev_probs: Dict[str, List[float]] = {}
+        self.prev_probs: Dict[Tuple[str, str], List[float]] = {}
 
     def _softmax(self, scores: Sequence[float]) -> List[float]:
         temperature = max(self.config.regime_temperature, 1e-6)
@@ -621,7 +629,7 @@ class ProbabilisticRegimeEngine:
         total = sum(exps)
         return [x / total for x in exps]
 
-    def classify(self, symbol: str, features: Mapping[str, Any]) -> Dict[str, Any]:
+    def classify(self, symbol: str, features: Mapping[str, Any], session_id: Optional[str] = None) -> Dict[str, Any]:
         close = fnum(features.get("close"), None)
         sma20 = fnum(features.get("sma20"), None)
         sma50 = fnum(features.get("sma50"), None)
@@ -691,7 +699,8 @@ class ProbabilisticRegimeEngine:
         raw = [up_score, down_score, range_score, high_vol_score, unknown_score]
         probs = self._softmax(raw)
 
-        previous = self.prev_probs.get(symbol)
+        state_key = (symbol, session_id or str(features.get("session_key", "UNKNOWN")))
+        previous = self.prev_probs.get(state_key)
         if previous:
             # Conservative persistence: state probabilities cannot jump
             # entirely on one noisy bar.
@@ -701,7 +710,7 @@ class ProbabilisticRegimeEngine:
             ]
             total = sum(probs)
             probs = [p / total for p in probs]
-        self.prev_probs[symbol] = probs
+        self.prev_probs[state_key] = probs
 
         best_idx = max(range(len(probs)), key=lambda i: probs[i])
         best = self.STATES[best_idx]
@@ -861,12 +870,13 @@ class ExecutionCostModel:
             * self.config.volatility_slippage_weight
         )
 
-        liquidity = max(
-            float(snap.volume or 0.0),
-            float(snap.oi or 0.0),
-            self.config.min_liquidity_units,
-        )
-        participation = size / liquidity
+        # OI is not executable liquidity and must never be substituted for
+        # traded volume.  Use current-bar volume when available; otherwise
+        # degrade the estimate instead of manufacturing precision.
+        volume = max(float(snap.volume or 0.0), 0.0)
+        liquidity = max(volume, self.config.min_liquidity_units)
+        participation = size / liquidity if volume > 0.0 else 0.0
+        liquidity_source = "BAR_VOLUME" if volume > 0.0 else "UNAVAILABLE"
         impact = (
             self.config.impact_coefficient
             * (max(0.0, participation) ** self.config.impact_exponent)
@@ -889,11 +899,11 @@ class ExecutionCostModel:
             "market_impact_points": round(impact, 8),
             "participation_rate": round(participation, 8),
             "liquidity_proxy": round(liquidity, 8),
+            "liquidity_source": liquidity_source,
             "model": "DYNAMIC_SPREAD_VOLATILITY_IMPACT_1.2.1",
             "quality": (
                 "FULL"
-                if spread_points is not None and
-                (snap.volume is not None or snap.oi is not None)
+                if spread_points is not None and snap.volume is not None and snap.volume > 0
                 else "DEGRADED"
             ),
         }
@@ -930,6 +940,8 @@ class IntrabarRealism:
         direction: str,
         policy: str = "CONSERVATIVE",
         lower_bars: Optional[Sequence[Mapping[str, Any]]] = None,
+        parent_start: Optional[str] = None,
+        parent_end: Optional[str] = None,
     ) -> Dict[str, Any]:
         high = float(bar["high"])
         low = float(bar["low"])
@@ -948,19 +960,34 @@ class IntrabarRealism:
         if stop_hit and target_hit:
             if lower_bars:
                 ordered = list(lower_bars)
+                if not ordered:
+                    raise ValueError("lower_bars cannot be empty when supplied")
                 prev = None
+                pstart = parse_timestamp(parent_start) if parent_start else None
+                pend = parse_timestamp(parent_end) if parent_end else None
                 for child in ordered:
                     child_ts = parse_timestamp(str(child["timestamp"]))
-                    if prev is not None and child_ts < prev:
-                        raise ValueError("Lower-timeframe bars are not chronological")
+                    if prev is not None and child_ts <= prev:
+                        raise ValueError("Lower-timeframe bars must be strictly chronological")
+                    if pstart is not None and child_ts < pstart:
+                        raise ValueError("Lower-timeframe bar starts before parent interval")
+                    if pend is not None and child_ts >= pend:
+                        raise ValueError("Lower-timeframe bar starts outside parent interval")
                     prev = child_ts
 
                 for child in ordered:
                     sh = self._touches(child, stop)
                     th = self._touches(child, target)
                     if sh and th:
-                        # Still ambiguous at the child resolution.
-                        continue
+                        # The first child bar that touches both levels is itself
+                        # path-ambiguous. Do not skip it and later claim certainty.
+                        return {
+                            "outcome": "AMBIGUOUS",
+                            "ambiguous": True,
+                            "probability_of_target": 0.5,
+                            "penalty_factor": self.ambiguity_penalty,
+                            "resolution": "LOWER_TIMEFRAME_STILL_AMBIGUOUS",
+                        }
                     if sh:
                         return {
                             "outcome": "STOP_FIRST",
@@ -1044,16 +1071,35 @@ class ValidationEngine:
     ) -> Dict[str, List[Mapping[str, Any]]]:
         ordered = sorted(rows, key=lambda x: parse_timestamp(str(x["timestamp"])))
         cut = int(len(ordered) * clamp(train_fraction, 0.01, 0.99))
-        train_end = max(0, cut - self.config.purge_bars)
-        test_start = min(
-            len(ordered),
-            cut + self.config.embargo_bars,
-        )
+        cut = max(1, min(len(ordered) - 1, cut)) if len(ordered) > 1 else len(ordered)
+        embargo_end = min(len(ordered), cut + self.config.embargo_bars)
+        oos = ordered[embargo_end:]
+        oos_start = parse_timestamp(str(oos[0]["timestamp"])) if oos else None
+
+        # Purge is event-aware when rows expose an event/label end timestamp.
+        # This prevents a long-horizon training label from overlapping OOS.
+        train_candidates = ordered[:cut]
+        event_aware_train = []
+        purged_event = []
+        for row in train_candidates:
+            end_raw = (row.get("event_end_time") or row.get("label_end_time")
+                       or row.get("exit_time"))
+            if end_raw and oos_start is not None and parse_timestamp(str(end_raw)) >= oos_start:
+                purged_event.append(row)
+            else:
+                event_aware_train.append(row)
+
+        # Retain the configured bar-based purge as a minimum boundary gap.
+        fixed_train_end = max(0, cut - self.config.purge_bars)
+        fixed_purged = event_aware_train[fixed_train_end:] if fixed_train_end < len(event_aware_train) else []
+        train = event_aware_train[:fixed_train_end]
+        purged = fixed_purged + purged_event
         return {
-            "train": ordered[:train_end],
-            "purged": ordered[train_end:cut],
-            "embargo": ordered[cut:test_start],
-            "oos": ordered[test_start:],
+            "train": train,
+            "purged": purged,
+            "embargo": ordered[cut:embargo_end],
+            "oos": oos,
+            "purge_mode": "EVENT_AWARE_PLUS_FIXED_BAR_GAP",
         }
 
     def record_trade_observation(
@@ -1154,36 +1200,37 @@ class PortfolioResearch:
         self.store = store
 
     @staticmethod
-    def _returns_by_strategy(
+    def _returns_by_period(
         records: Sequence[Mapping[str, Any]],
-    ) -> Dict[str, List[float]]:
-        out: Dict[str, List[float]] = defaultdict(list)
-        ordered = sorted(
-            records,
-            key=lambda x: (
-                str(x.get("strategy_id")),
-                parse_timestamp(str(x.get("entry_time", x.get("recorded_at")))),
-            ),
-        )
-        for row in ordered:
+    ) -> Dict[str, Dict[str, float]]:
+        """Aggregate realized PnL by trading session/date before correlation.
+
+        Correlation must compare synchronous portfolio return observations.
+        Pairing the Nth trade of strategy A with the Nth trade of strategy B
+        is invalid when trades occur at different times.
+        """
+        out: Dict[str, Dict[str, float]] = defaultdict(lambda: defaultdict(float))
+        for row in records:
             value = fnum(row.get("net_pnl_points"), None)
-            if value is not None:
-                out[str(row["strategy_id"])].append(value)
-        return out
+            if value is None or not row.get("strategy_id"):
+                continue
+            ts = str(row.get("entry_time", row.get("recorded_at")))
+            period = session_key(ts) .split("|", 1)[0]
+            out[str(row["strategy_id"])][period] += value
+        return {k: dict(v) for k, v in out.items()}
 
     def correlation_matrix(self) -> Dict[str, Any]:
         records = list(self.store.read_all())
-        by = self._returns_by_strategy(records)
+        by = self._returns_by_period(records)
         ids = sorted(by)
-        matrix: Dict[str, Dict[str, Optional[float]]] = {
-            a: {} for a in ids
-        }
+        matrix: Dict[str, Dict[str, Optional[float]]] = {a: {} for a in ids}
 
-        def corr(a: Sequence[float], b: Sequence[float]) -> Optional[float]:
-            n = min(len(a), len(b), self.config.correlation_window)
-            if n < 3:
+        def corr(a: Mapping[str, float], b: Mapping[str, float]) -> Optional[float]:
+            periods = sorted(set(a) & set(b))[-self.config.correlation_window:]
+            if len(periods) < 3:
                 return None
-            aa, bb = list(a)[-n:], list(b)[-n:]
+            aa = [a[p] for p in periods]
+            bb = [b[p] for p in periods]
             ma, mb = statistics.fmean(aa), statistics.fmean(bb)
             da = math.sqrt(sum((x - ma) ** 2 for x in aa))
             db = math.sqrt(sum((x - mb) ** 2 for x in bb))
@@ -1204,9 +1251,11 @@ class PortfolioResearch:
 
     def inverse_volatility_weights(self) -> Dict[str, Any]:
         records = list(self.store.read_all())
-        by = self._returns_by_strategy(records)
+        by = self._returns_by_period(records)
         raw: Dict[str, float] = {}
-        for strategy_id, values in by.items():
+        for strategy_id, series in by.items():
+            periods = sorted(series)[-self.config.correlation_window:]
+            values = [series[p] for p in periods]
             tail = values[-self.config.correlation_window:]
             vol = stdev_or(tail, None)
             if vol is not None and vol > 1e-12:
@@ -1249,7 +1298,9 @@ class DecayMonitor:
         ]
 
         short = pnls[-self.config.decay_window:]
-        baseline = pnls[-self.config.decay_baseline_window:]
+        baseline_end = max(0, len(pnls) - self.config.decay_window)
+        baseline_start = max(0, baseline_end - self.config.decay_baseline_window)
+        baseline = pnls[baseline_start:baseline_end]
 
         if len(short) < 10 or len(baseline) < 20:
             return {
@@ -1418,7 +1469,7 @@ class GSREngine:
         self._last_timestamp[snap.symbol] = snap.timestamp
 
         features = self.feature_engine.add(snap)
-        regime = self.regime_engine.classify(snap.symbol, features)
+        regime = self.regime_engine.classify(snap.symbol, features, features.get("session_key"))
 
         market_record = {
             "schema_version": DATA_SCHEMA_VERSION,
@@ -1643,6 +1694,8 @@ class GSREngine:
             "data_dir": str(self.config.data_dir),
             "isolation_ok": True,
             "execution_enabled": False,
+            "timezone": self.config.timezone_name,
+            "bar_minutes": self.config.bar_minutes,
             "features": {
                 "session_local_vwap": True,
                 "dynamic_impact_slippage": True,
@@ -1658,6 +1711,87 @@ class GSREngine:
 
 def load_engine() -> GSREngine:
     return GSREngine(GSRConfig.from_env())
+
+
+def regression_tests() -> Dict[str, Any]:
+    """Deterministic source-behavior tests for the seven surgical fixes."""
+    import tempfile
+
+    results: Dict[str, bool] = {}
+    with tempfile.TemporaryDirectory(prefix="gsr_regression_") as tmp:
+        cfg = GSRConfig(data_dir=Path(tmp), max_bars_per_symbol=300,
+                        regime_min_history=5, purge_bars=2, embargo_bars=2,
+                        decay_window=10, decay_baseline_window=20,
+                        timezone_name="Asia/Kolkata")
+        engine = GSREngine(cfg)
+
+        # 1) timezone/session key: UTC timestamp maps to IST session.
+        results["timezone_session_key"] = (
+            session_key("2026-01-02T03:45:00+00:00", timezone_name="Asia/Kolkata")
+            == "2026-01-02|09:15-15:30"
+        )
+
+        # 2) session-local VWAP reset.
+        a = engine.ingest_snapshot({"timestamp":"2026-01-01T09:15:00+05:30","symbol":"T","open":100,"high":101,"low":99,"close":100,"volume":100})
+        b = engine.ingest_snapshot({"timestamp":"2026-01-02T09:15:00+05:30","symbol":"T","open":200,"high":201,"low":199,"close":200,"volume":100})
+        results["session_vwap_reset"] = abs(b["features"]["session_vwap"] - 200.0) < 1e-9
+
+        # 3) regime persistence must reset at a new session.
+        p = engine.regime_engine.prev_probs
+        results["regime_session_scoped"] = all(isinstance(k, tuple) and len(k) == 2 for k in p)
+
+        # 4) OI alone cannot masquerade as executable liquidity.
+        snap = MarketSnapshot.from_mapping({"timestamp":"2026-01-02T09:18:00+05:30","symbol":"T","open":200,"high":201,"low":199,"close":200,"oi":100000})
+        c = engine.cost_model.estimate(snap, {"atr":1.0,"atr_pct":0.005}, order_size=100)
+        results["liquidity_not_oi"] = c["liquidity_source"] == "UNAVAILABLE" and c["participation_rate"] == 0.0
+
+        # 5) lower-timeframe bars must belong to parent; child ambiguity is not skipped.
+        amb = engine.intrabar.evaluate({"high":110,"low":90},100,95,105,"LONG",
+            lower_bars=[{"timestamp":"2026-01-02T09:15:00+05:30","high":106,"low":94}],
+            parent_start="2026-01-02T09:15:00+05:30", parent_end="2026-01-02T09:18:00+05:30")
+        results["intrabar_child_ambiguity"] = amb["outcome"] == "AMBIGUOUS" and amb["ambiguous"]
+        try:
+            engine.intrabar.evaluate({"high":110,"low":90},100,95,105,"LONG",
+                lower_bars=[{"timestamp":"2026-01-02T09:19:00+05:30","high":106,"low":94}],
+                parent_start="2026-01-02T09:15:00+05:30", parent_end="2026-01-02T09:18:00+05:30")
+            results["intrabar_parent_bounds"] = False
+        except ValueError:
+            results["intrabar_parent_bounds"] = True
+
+        # 6) event-aware purge + embargo.
+        rows = [{"timestamp":f"2026-01-01T09:{15+i:02d}:00+05:30","event_end_time":f"2026-01-01T09:{15+i:02d}:00+05:30"} for i in range(10)]
+        rows[6]["event_end_time"] = "2026-01-01T09:30:00+05:30"
+        split = engine.validation_engine.chronological_split(rows, train_fraction=0.7)
+        results["purge_embargo"] = (len(split["embargo"]) == 2 and
+                                     split["purge_mode"] == "EVENT_AWARE_PLUS_FIXED_BAR_GAP")
+
+        # 7) portfolio correlation must use synchronized dates, not trade ordinal.
+        for i, d in enumerate(["2026-01-01","2026-01-02","2026-01-03"]):
+            engine.validation_store.append({"strategy_id":"A","entry_time":d+"T09:15:00+05:30","net_pnl_points":float(i+1)})
+        for i, d in enumerate(["2026-01-01","2026-01-02","2026-01-03"]):
+            engine.validation_store.append({"strategy_id":"B","entry_time":d+"T10:15:00+05:30","net_pnl_points":float(2*(i+1))})
+        corr = engine.portfolio.correlation_matrix()["correlation_matrix"]["A"]["B"]
+        results["portfolio_synchronous_correlation"] = corr is not None and corr > 0.99
+
+        # 8) decay baseline must exclude the current short window.
+        for i in range(30):
+            hour = 9 + (15 + i) // 60
+            minute = (15 + i) % 60
+            engine.validation_store.append({"strategy_id":"DECAY","exit_time":f"2026-02-01T{hour:02d}:{minute:02d}:00+05:30","net_pnl_points":1.0 if i < 20 else -1.0})
+        report = engine.decay_monitor.evaluate("DECAY")
+        results["decay_baseline_excludes_short"] = (
+            report["sample_short"] == 10 and report["sample_baseline"] == 20 and
+            abs(report["baseline_mean"] - 1.0) < 1e-9
+        )
+
+        # 9) external opinion isolation remains strict.
+        try:
+            engine.ingest_snapshot({"timestamp":"2026-01-03T09:15:00+05:30","symbol":"X","open":1,"high":2,"low":1,"close":1.5,"confidence":0.9})
+            results["external_isolation"] = False
+        except ValueError:
+            results["external_isolation"] = True
+
+    return {"ok": all(results.values()), "tests": results}
 
 
 def smoke_test() -> Dict[str, Any]:
@@ -1764,6 +1898,7 @@ def main() -> None:
     sub.add_parser("similarity")
     sub.add_parser("health")
     sub.add_parser("smoke-test")
+    sub.add_parser("regression-test")
     sub.add_parser("portfolio")
 
     decay = sub.add_parser("decay")
@@ -1793,6 +1928,10 @@ def main() -> None:
     elif args.command == "smoke-test":
         print(json.dumps(
             smoke_test(), indent=2, ensure_ascii=False
+        ))
+    elif args.command == "regression-test":
+        print(json.dumps(
+            regression_tests(), indent=2, ensure_ascii=False
         ))
     elif args.command == "portfolio":
         print(json.dumps(
