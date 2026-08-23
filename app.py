@@ -19,7 +19,7 @@ import hashlib
 import struct
 import base64
 import threading
-from collections import deque
+from collections import deque, defaultdict
 from dataclasses import dataclass, field, asdict
 from datetime import datetime, timedelta, date, timezone
 from pathlib import Path
@@ -872,6 +872,8 @@ class FeatureEngine:
     def __init__(self, maxlen=150):
         self.vwap_pv = self.vwap_vol = 0.0
         self.tr_history = deque(maxlen=maxlen)
+        self.volume_history = deque(maxlen=maxlen)
+        self.iv_history = deque(maxlen=maxlen)
         self.history = deque(maxlen=maxlen)
         self.stretch_history = deque(maxlen=maxlen)
         self.spread_history = deque(maxlen=maxlen)
@@ -890,6 +892,8 @@ class FeatureEngine:
     def reset_session(self):
         self.vwap_pv = self.vwap_vol = 0.0
         self.tr_history.clear()
+        self.volume_history.clear()
+        self.iv_history.clear()
         self.history.clear()
         self.stretch_history.clear()
         self.spread_history.clear()
@@ -923,6 +927,18 @@ class FeatureEngine:
     def compute(self, candle: Candle3Min, prev: deque):
         typical = (candle.fut_h + candle.fut_l + candle.fut_c) / 3.0
         volume = safe_float(candle.fut_volume, 0.0)
+        # Causal rolling volume z-score: compare the current bar only against
+        # previously completed bars, then append the current bar.
+        _vol_prev = [float(x) for x in self.volume_history if is_valid_number(x)]
+        if len(_vol_prev) >= 10 and is_valid_number(volume):
+            _vol_mean = float(np.mean(_vol_prev))
+            _vol_std = float(np.std(_vol_prev, ddof=0))
+            volume_zscore = (volume - _vol_mean) / max(_vol_std, 1e-9)
+            volume_zscore = float(np.clip(volume_zscore, -8.0, 8.0))
+        else:
+            volume_zscore = 0.0
+        if is_valid_number(volume):
+            self.volume_history.append(volume)
         self.vwap_pv += typical * max(volume, 0.0)
         self.vwap_vol += max(volume, 0.0)
         fut_vwap = self.vwap_pv / self.vwap_vol if self.vwap_vol > 0 else typical
@@ -1010,6 +1026,19 @@ class FeatureEngine:
         )
 
         pcr_features = self.opt.compute(candle.option_chain, candle.timestamp, candle.spot_c)
+        # ATM IV is only used when the live option feed actually supplies IV.
+        # Never manufacture IV from a constant default for scanner learning.
+        atm_iv_obs = safe_float(candle.option_chain.get("atm_iv"), np.nan) if candle.option_chain else np.nan
+        if not is_valid_number(atm_iv_obs) and candle.option_chain:
+            atm_iv_obs = safe_float(candle.option_chain.get("implied_volatility"), np.nan)
+        if is_valid_number(atm_iv_obs):
+            prev_iv = next((float(x) for x in reversed(self.iv_history) if is_valid_number(x)), np.nan)
+            iv_change = float(atm_iv_obs - prev_iv) if is_valid_number(prev_iv) else 0.0
+            self.iv_history.append(atm_iv_obs)
+        else:
+            iv_change = 0.0
+        pcr_features["atm_iv"] = atm_iv_obs
+        pcr_features["iv_change"] = iv_change
         ha_res = self.ha.update(candle.fut_o, candle.fut_h, candle.fut_l, candle.fut_c)
         st_res = self.st.update(candle.fut_h, candle.fut_l, candle.fut_c, atr=atr if is_valid_number(atr) else None)
         hm_res = self.hm.update(candle.fut_c)
@@ -1068,6 +1097,10 @@ class FeatureEngine:
             "minutes_from_open": (ts_ist.hour * 60 + ts_ist.minute) - 555,
             "day_of_week": ts_ist.weekday(),
             **hw_res,
+            "dispersion_10": safe_float(hw_res.get("dispersion_index"), 0.0),
+            "volume_zscore": volume_zscore,
+            "atm_iv": atm_iv_obs,
+            "iv_change": iv_change,
             **or_res,
             **sess_res,
             **pcr_features,
@@ -2210,6 +2243,17 @@ class KotakNeoAdapter:
             else:
                 pe_oi_change = 0.0
 
+            # Preserve a real observed ATM IV when the broker feed exposes it.
+            atm_iv_values = []
+            for tok in self.pcr_tokens:
+                info = self.pcr_records.get(str(tok), {})
+                if info.get("strike") == atm:
+                    t = self.latest.get(str(tok), {})
+                    iv_val = safe_float(t.get("iv") or t.get("implied_volatility") or t.get("impliedVolatility"), np.nan)
+                    if is_valid_number(iv_val) and iv_val > 0:
+                        atm_iv_values.append(iv_val)
+            observed_atm_iv = float(np.mean(atm_iv_values)) if atm_iv_values else np.nan
+
             pcr_chain = {
                 "pcr_oi": total_pe_oi / max(total_ce_oi, 1.0) if total_ce_oi > 0 else np.nan,
                 "pcr_volume": total_pe_vol / max(total_ce_vol, 1.0) if total_ce_vol > 0 else np.nan,
@@ -2217,6 +2261,7 @@ class KotakNeoAdapter:
                 "ce_oi_atm": atm_ce_oi, "pe_oi_atm": atm_pe_oi, "atm_strike": atm,
                 "total_ce_oi": total_ce_oi, "total_pe_oi": total_pe_oi,
                 "active_expiry": self.active_pcr_expiry,
+                "atm_iv": observed_atm_iv,
                 "ce_contracts_seen": sum(1 for t in self.pcr_tokens if self.pcr_records.get(t, {}).get("option_type") == "CE"),
                 "pe_contracts_seen": sum(1 for t in self.pcr_tokens if self.pcr_records.get(t, {}).get("option_type") == "PE"),
             }
@@ -2662,7 +2707,7 @@ def _learn_scanner_outcome_3m(merged):
     except Exception: pass
 
 # Patch only the delayed-label persistence hook; original label generation is untouched.
-_ORIGINAL_PROCESS_LABELS_3M = Nifty3MinEngine._process_delayed_labels
+_ORIGINAL_PROCESS_LABELS_3M = KotakNeoAdapter._process_delayed_labels
 
 def _process_labels_with_scanner_learning(self):
     max_tb_bars = CONFIG["time_barrier_min"] // CONFIG["bar_minutes"]
@@ -2690,7 +2735,7 @@ def _process_labels_with_scanner_learning(self):
     if completed_records:
         self.dataset_manager.write_parquet(pd.DataFrame(completed_records), name="labeled_features_3min")
 
-Nifty3MinEngine._process_delayed_labels=_process_labels_with_scanner_learning
+KotakNeoAdapter._process_delayed_labels=_process_labels_with_scanner_learning
 
 def main():
     if st is None:
