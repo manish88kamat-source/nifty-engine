@@ -129,6 +129,8 @@ import threading
 import time
 import logging
 import random
+import sys
+from collections import defaultdict
 from functools import wraps
 from logging.handlers import RotatingFileHandler
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -368,7 +370,7 @@ def validate_config() -> Dict[str, Any]:
             if NEXT_DAY_REQUIRE_KOTAK:
                 errors.append(message)
             else:
-                warnings.append(message + " (live Kotak disabled by fallback policy)")
+                warnings.append(message + " (live Kotak unavailable; Yahoo/shared-raw fallback remains enabled)")
     report = {"ok": not errors, "errors": errors, "warnings": warnings}
     if errors:
         for msg in errors:
@@ -3791,17 +3793,44 @@ class KotakRawAdapter:
 
 
 _KOTAK_SINGLETON = None
+_KOTAK_LOGIN_ATTEMPTED = False
 
 
 def get_kotak_adapter() -> Optional[KotakRawAdapter]:
-    global _KOTAK_SINGLETON
-    if _KOTAK_SINGLETON is None:
-        _KOTAK_SINGLETON = KotakRawAdapter()
-        try:
-            _KOTAK_SINGLETON.login()
-        except Exception as exc:
-            LOGGER.exception("[NEXT-DAY KOTAK] login unavailable")
-            _KOTAK_SINGLETON = None
+    """Return the process-wide Kotak adapter without repeated failed logins.
+
+    Missing credentials are a normal fallback-mode condition.  The old
+    implementation retried a failed login every time a quote/circuit check was
+    requested, which could create dozens of identical log entries and needless
+    network/API attempts during one run.
+    """
+    global _KOTAK_SINGLETON, _KOTAK_LOGIN_ATTEMPTED
+
+    if _KOTAK_LOGIN_ATTEMPTED:
+        return _KOTAK_SINGLETON
+
+    _KOTAK_LOGIN_ATTEMPTED = True
+
+    required = ("KOTAK_CONSUMER_KEY", "KOTAK_MOBILE", "KOTAK_UCC", "KOTAK_TOTP", "KOTAK_MPIN")
+    missing = [key for key in required if not os.getenv(key, "").strip()]
+    if missing:
+        LOGGER.info(
+            "[NEXT-DAY KOTAK] unavailable in fallback mode; missing credentials: %s",
+            ", ".join(missing),
+        )
+        return None
+
+    try:
+        adapter = KotakRawAdapter()
+        if adapter.login():
+            _KOTAK_SINGLETON = adapter
+            LOGGER.info("[NEXT-DAY KOTAK] live adapter connected")
+        else:
+            LOGGER.warning("[NEXT-DAY KOTAK] login returned unsuccessful status; fallback remains active")
+    except Exception:
+        LOGGER.exception("[NEXT-DAY KOTAK] login unavailable; fallback remains active")
+        _KOTAK_SINGLETON = None
+
     return _KOTAK_SINGLETON
 
 
@@ -5277,20 +5306,45 @@ def _nd8_scan_from_row(row: Dict[str, Any]) -> List[Tuple[str,str,float]]:
     ]
 
 def _nd8_load_learning() -> Dict[str, Dict[str,float]]:
+    """Load only resolved scanner outcomes; malformed rows fail closed.
+
+    Control/ledger records such as ``__PENDING__`` are deliberately excluded
+    from scanner statistics so they cannot distort the cold-start prior.
+    """
     out=defaultdict(lambda:{"n":0.0,"wins":0.0})
+    if not V7_SCANNER_LEARNING_FILE.exists():
+        return out
+
     try:
-        if V7_SCANNER_LEARNING_FILE.exists():
-            for line in V7_SCANNER_LEARNING_FILE.read_text(encoding="utf-8").splitlines():
-                if not line.strip(): continue
-                r=json.loads(line); key=str(r.get("scanner_id",""))
-                if key: out[key]["n"] += 1; out[key]["wins"] += int(bool(r.get("win",False)))
-    except Exception as exc: LOGGER.warning("scanner learning read failed: %s",exc)
+        with V7_SCANNER_LEARNING_FILE.open("r", encoding="utf-8") as fh:
+            for line_no, line in enumerate(fh, start=1):
+                if not line.strip():
+                    continue
+                try:
+                    r=json.loads(line)
+                except Exception as exc:
+                    LOGGER.warning("scanner learning malformed row %d: %s", line_no, exc)
+                    continue
+                key=str(r.get("scanner_id","")).strip()
+                if not key or key == "__PENDING__" or r.get("pending"):
+                    continue
+                # Only resolved outcome rows contribute to learning.
+                if "win" not in r:
+                    continue
+                out[key]["n"] += 1.0
+                out[key]["wins"] += int(bool(r.get("win",False)))
+    except Exception as exc:
+        LOGGER.warning("scanner learning read failed: %s",exc)
     return out
 
 def _nd8_append_learning(record: Dict[str,Any]) -> None:
     V7_SCANNER_LEARNING_FILE.parent.mkdir(parents=True,exist_ok=True)
-    with V7_SCANNER_LEARNING_FILE.open("a",encoding="utf-8") as fh:
-        fh.write(json.dumps(record,ensure_ascii=False,default=str)+"\n"); fh.flush(); os.fsync(fh.fileno())
+    lock_path = V7_SCANNER_LEARNING_FILE.with_suffix(".lock")
+    with _v7_process_lock(lock_path):
+        with V7_SCANNER_LEARNING_FILE.open("a",encoding="utf-8") as fh:
+            fh.write(json.dumps(record,ensure_ascii=False,default=str)+"\n")
+            fh.flush()
+            os.fsync(fh.fileno())
 
 def _nd8_evaluate_scanners(row: Dict[str,Any]) -> Dict[str,Any]:
     stats=_nd8_load_learning(); scans=_nd8_scan_from_row(row); groups=defaultdict(list); evidence=[]
@@ -5315,7 +5369,32 @@ def _nd8_evaluate_scanners(row: Dict[str,Any]) -> Dict[str,Any]:
 def _nd8_apply_scanners_df(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty: return df
     x=df.copy(); records=[]
-    for _,row in x.iterrows(): records.append(_nd8_evaluate_scanners(row.to_dict()))
+    # Load the immutable snapshot once per scan.  The previous implementation
+    # reread the JSONL learning file for every stock, multiplying disk I/O.
+    stats = _nd8_load_learning()
+    for _,row in x.iterrows():
+        scans=_nd8_scan_from_row(row.to_dict())
+        groups=defaultdict(list); evidence=[]
+        for sid,g,score in scans:
+            st=stats.get(sid,{"n":0.0,"wins":0.0}); n=st["n"]; w=st["wins"]
+            p=(V7_SCANNER_PRIOR_ALPHA+w)/(V7_SCANNER_PRIOR_ALPHA+V7_SCANNER_PRIOR_BETA+n)
+            conf=1-math.exp(-n/V7_SCANNER_HIGH_CONF_N)
+            groups[g].append(score)
+            evidence.append({"id":sid,"group":g,"score":round(score,5),"estimate":round(p,5),"confidence":round(conf,5),"n":int(n)})
+        gs={g:float(np.mean(v)) for g,v in groups.items()}
+        weights={"TREND":.16,"MOMENTUM":.14,"RELATIVE_STRENGTH":.12,"SECTOR":.10,"FLOW":.10,"VOLATILITY":.08,"LOCATION":.08,"BREAKOUT":.08,"CATALYST":.05,"RISK":.05,"STRATEGY":.04}
+        raw=sum(gs.get(g,0.0)*w for g,w in weights.items())
+        conf=float(np.mean([x["confidence"] for x in evidence])) if evidence else 0.0
+        direction=raw*(.90+.10*conf)
+        strategy=float(np.clip(.5+.5*direction,0,1))
+        pos=sum(1 for x in evidence if x["score"]>=.45); neg=sum(1 for x in evidence if x["score"]<=-.45)
+        if abs(direction)>=.45 and strategy>=.725:
+            family="TREND_CONTINUATION" if gs.get("TREND",0)*direction>0 and gs.get("MOMENTUM",0)*direction>0 else "CONFLUENCE"
+        elif abs(direction)>=.30:
+            family="BREAKOUT_OR_MOMENTUM" if gs.get("BREAKOUT",0)*direction>0 else "SELECTIVE_SETUP"
+        else:
+            family="NO_EDGE"
+        records.append({"score":direction,"strategy_score":strategy,"confidence":conf,"positive":pos,"negative":neg,"groups":gs,"evidence":evidence,"family":family})
     x["ScannerScore"]=[r["score"] for r in records]
     x["ScannerStrategyScore"]=[r["strategy_score"] for r in records]
     x["ScannerConfidence"]=[r["confidence"] for r in records]
@@ -5386,12 +5465,20 @@ def _nd8_resolve_pending() -> None:
 
 def _v7_build_day_ahead_watchlist() -> Dict[str, Any]:
     """V7 orchestration: original 500 scan -> 30 bet basket -> expensive MTF -> final 5."""
+    started = time.monotonic()
+    LOGGER.info("[DAY-AHEAD] START")
     _nd8_resolve_pending()
     timestamp = now_ist()
     universe = load_nifty500_universe()
-    symbols = universe["Symbol"].astype(str).str.upper().str.strip().drop_duplicates().tolist()
+    if universe is None or universe.empty or "Symbol" not in universe.columns:
+        raise RuntimeError("NIFTY-500 universe unavailable or invalid")
+    symbols = universe["Symbol"].astype(str).str.upper().str.strip().replace("", np.nan).dropna().drop_duplicates().tolist()
+    LOGGER.info("[DAY-AHEAD] universe loaded: %d symbols", len(symbols))
     benchmark = fetch_yahoo_chart(NIFTY_TICKER, days=320, interval="1d")
+    if benchmark is None or benchmark.empty:
+        LOGGER.warning("[DAY-AHEAD] NIFTY benchmark unavailable; relative-strength fields may be neutral")
     histories = fetch_history(symbols, days=320)
+    LOGGER.info("[DAY-AHEAD] historical data loaded: %d/%d symbols", len(histories), len(symbols))
     rows=[]
     for _, item in universe.iterrows():
         symbol=str(item["Symbol"]).upper().strip(); df=histories.get(symbol)
@@ -5400,14 +5487,20 @@ def _v7_build_day_ahead_watchlist() -> Dict[str, Any]:
         features=build_features(symbol,df,benchmark,industry)
         if features is not None: rows.append(features)
     if not rows: raise RuntimeError("No usable stock data available")
+    LOGGER.info("[DAY-AHEAD] feature rows usable: %d", len(rows))
     frame=add_sector_features(pd.DataFrame(rows)); scored=score_candidates(frame)
+    LOGGER.info("[DAY-AHEAD] scored symbols: %d; >= minimum: %d", len(scored), int((pd.to_numeric(scored.get("DayAheadScore", pd.Series(dtype=float)), errors="coerce") >= DAY_AHEAD_MIN_SCORE).sum()))
     basket=_v7_preselect_30(scored)
+    LOGGER.info("[DAY-AHEAD] preselected basket: %d", len(basket))
     enriched=_v7_enrich_basket(basket)
+    LOGGER.info("[DAY-AHEAD] MTF enrichment complete: %d", len(enriched))
     enriched=_nd8_apply_scanners_df(enriched)
+    LOGGER.info("[DAY-AHEAD] scanner layer complete: %d", len(enriched))
     vix=_v7_vix_context()
     if not enriched.empty:
         enriched["MacroVIXRegime"] = vix.get("regime","UNAVAILABLE")
     top5=_v7_select_final5(enriched)
+    LOGGER.info("[DAY-AHEAD] TOP-5 selected: %d", len(top5))
     kotak_snapshot=capture_kotak_day_ahead_snapshot([str(x).upper() for x in top5["Symbol"].tolist()] if not top5.empty else [])
     candidates=[]
     for rank,(_,row) in enumerate(top5.iterrows(),start=1):
@@ -5436,6 +5529,7 @@ def _v7_build_day_ahead_watchlist() -> Dict[str, Any]:
     result={"engine":"NEXT_DAY_ALPHA_ENGINE","version":V7_VERSION,"generated_at":timestamp.isoformat(),"data_as_of":timestamp.strftime("%Y-%m-%d"),"architecture":{"nifty_3min_engine_modified":False,"shared_raw_data_allowed":True,"shared_calculated_features":False,"shared_scores":False,"shared_regime_decisions":False,"shared_decisions":False,"shared_labels":False,"shared_predictions":False,"shared_raw_fields_only":True,"next_day_can_write_to_nifty_engine":False,"next_day_can_read_nifty_calculations":False},"macro_regime":vix,"day_ahead":{"universe_size":len(symbols),"usable_symbols":len(frame),"scored_symbols":len(scored),"bet_basket_size":len(basket_records),"bet_basket_30":basket_records,"top5_count":len(candidates),"top5":candidates},"morning_confirmation":{"status":"PENDING","final":[]},"probability_note":"Quality scores are not win probabilities. VIX is not a directional predictor. Historical calibration is required before any probability claim.","quality_controls":{"hard_rr_gate":V7_MIN_RR,"max_invalidation_atr":V7_MAX_INVALIDATION_DISTANCE_ATR,"mtf_timeframes":["W","D","4H","1H","15M"],"sector_basket_max_per_sector":V7_MAX_STOCKS_PER_SECTOR,"no_trade_allowed":True}}
     _nd8_record_predictions(candidates)
     _atomic_write_text(CACHE_JSON,json.dumps(result,ensure_ascii=False,indent=2,default=str))
+    LOGGER.info("[DAY-AHEAD] COMPLETE: top5=%d elapsed=%.2fs", len(candidates), time.monotonic()-started)
     return result
 
 
@@ -5964,6 +6058,7 @@ def main() -> None:
     # This is intentionally performed at application boot so configuration
     # errors cannot surface for the first time during market hours.
     validate_config()
+    LOGGER.info("[ENGINE] CLI start: argv=%s", " ".join(sys.argv[1:]))
 
     engine = (
         NextDayAlphaEngine()
@@ -5978,27 +6073,25 @@ def main() -> None:
         return
 
     if args.day_ahead:
-
-        result = (
-            engine.run_day_ahead()
-        )
-
-        print_day_ahead(
-            result
-        )
-
+        try:
+            result = engine.run_day_ahead()
+            print_day_ahead(result)
+        except Exception as exc:
+            LOGGER.exception("[DAY-AHEAD] FAILED")
+            print(f"DAY-AHEAD FAILED: {type(exc).__name__}: {exc}")
+            print(f"Check log: {LOG_FILE}")
+            raise SystemExit(1)
         return
 
     if args.morning:
-
-        result = (
-            engine.run_morning()
-        )
-
-        print_morning(
-            result
-        )
-
+        try:
+            result = engine.run_morning()
+            print_morning(result)
+        except Exception as exc:
+            LOGGER.exception("[MORNING] FAILED")
+            print(f"MORNING CONFIRMATION FAILED: {type(exc).__name__}: {exc}")
+            print(f"Check log: {LOG_FILE}")
+            raise SystemExit(1)
         return
 
     if args.show:
@@ -6042,7 +6135,13 @@ def main() -> None:
         return
 
     # Default: run appropriate operation.
-    result = engine.run_if_due()
+    try:
+        result = engine.run_if_due()
+    except Exception as exc:
+        LOGGER.exception("[ENGINE] scheduled run failed")
+        print(f"ENGINE FAILED: {type(exc).__name__}: {exc}")
+        print(f"Check log: {LOG_FILE}")
+        raise SystemExit(1)
 
     if result:
 
