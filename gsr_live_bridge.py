@@ -1,5 +1,5 @@
 """
-GSR-1.1.0 â€” Live Shadow Bridge
+GSR-1.1.0 Ã¢â‚¬â€ Live Shadow Bridge
 ===============================
 
 Purpose
@@ -904,6 +904,15 @@ class GSRLiveBridge:
         It is separated from live mode so a historical file cannot silently be
         treated as live feed data.
         """
+        # Historical replay is an explicit mode boundary.  A live-shadow
+        # bridge must never be allowed to consume a historical iterable through
+        # this method, even if the caller accidentally invokes replay().
+        if self.config.mode != "HISTORICAL_REPLAY":
+            raise RuntimeError(
+                "replay() is reserved for HISTORICAL_REPLAY. "
+                "Live shadow mode must use run()/poll_once() with a live source."
+            )
+
         results = {
             "mode": "HISTORICAL_REPLAY",
             "received": 0,
