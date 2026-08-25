@@ -68,7 +68,7 @@ def to_ist(dt: datetime) -> datetime:
 # =========================================================
 
 CONFIG = {
-    "app_version": "v7.0_bucket_adaptive_dynamic_ride",
+    "app_version": "v7.3_real_option_bid_ask_timeseries_pnl",
     "feature_version": "v6.0_bucket_smc_volume_profile",
     "label_version": "TB_v3.0_clean",
     "schema_version": "5.0",
@@ -106,7 +106,6 @@ CONFIG = {
     "feed_silence_sec": 60,
     "base_delta": 0.52,
     "base_slippage_pts": 0.35,
-    "option_exit_spread_penalty": 0.65,
     "max_daily_loss_pts": 120.0,
     "risk_free_rate": 0.065,
     "default_atm_iv": 0.135,
@@ -362,6 +361,25 @@ def extract_quote_field(record: Dict[str, Any], keys: Tuple[str, ...]) -> float:
                 if is_valid_number(val) and val > 0:
                     return val
     return np.nan
+
+def extract_option_quote(record: Dict[str, Any]) -> Dict[str, float]:
+    """Extract executable option quote fields without fabricating prices.
+
+    For a long CE/PE paper trade, entry is executed against ASK and exit
+    against BID. LTP is retained as an observed fallback when one side of
+    the book is unavailable.
+    """
+    if not isinstance(record, dict):
+        return {"ltp": np.nan, "bid": np.nan, "ask": np.nan}
+
+    def pick(keys):
+        return extract_quote_field(record, tuple(keys))
+
+    ltp = pick(("ltp", "lp", "last_price", "last_traded_price", "c", "close", "lastPrice"))
+    bid = pick(("bp", "bid_price", "best_bid", "bidPrice", "bPrice", "buyPrice"))
+    ask = pick(("ap", "ask_price", "best_ask", "askPrice", "aPrice", "sellPrice"))
+    return {"ltp": ltp, "bid": bid, "ask": ask}
+
 
 def record_list(response):
     if isinstance(response, list):
@@ -1579,7 +1597,15 @@ class PaperPosition:
     direction: int
     entry_future_price: float
     entry_option_price: float
+    entry_option_bid: Optional[float]
+    entry_option_ask: Optional[float]
+    entry_quote_timestamp: Optional[datetime]
+    option_token: str
+    option_symbol: str
+    option_strike: float
+    option_expiry: Optional[datetime]
     option_target: float
+    base_option_target: float
     option_stop: float
     effective_delta: float
     size: float
@@ -1590,9 +1616,16 @@ class PaperPosition:
     exit_future_price: Optional[float] = None
     exit_option_price: Optional[float] = None
     pnl_pts: float = 0.0
+    gross_pnl_pts: float = 0.0
+    execution_cost_pts: float = 0.0
+    exit_option_bid: Optional[float] = None
+    exit_option_ask: Optional[float] = None
+    exit_option_ltp: Optional[float] = None
+    pricing_source: str = ""
     exit_reason: str = ""
     peak_pnl_pts: float = 0.0
     locked_floor_pts: float = 0.0
+    last_option_price: Optional[float] = None
 
 
 class PaperTradingDesk:
@@ -1642,52 +1675,127 @@ class PaperTradingDesk:
                 "regime": decision.regime,
             }
 
-    def on_bar_open_fill(self, candle: Candle3Min, atr: float):
+    def on_bar_open_fill(self, candle: Candle3Min, atr: float, option_market: Optional[Dict[str, Any]] = None):
         self.check_and_reset_new_day(candle.timestamp)
-        if self.pending_order and to_ist(candle.timestamp) >= to_ist(self.pending_order["target_fill_time"]):
-            if self.check_total_risk_limit():
-                self.pending_order = None
-                return
-
-            order = self.pending_order
-            direction = order["direction"]
-            
-            vol_factor = max(0.5, min(2.0, (atr / 15.0))) if is_valid_number(atr) and atr > 0 else 1.0
-            slippage = CONFIG["base_slippage_pts"] * vol_factor * direction
-            fill_price = candle.fut_o + slippage
-
-            dynamic_atm_baseline = round(max(80.0, (fill_price * CONFIG["default_atm_iv"] * math.sqrt(1.0 / 252.0)) * 2.2), 2)
-
-            self.active_position = PaperPosition(
-                entry_time=candle.timestamp,
-                direction=direction,
-                entry_future_price=round(fill_price, 2),
-                entry_option_price=dynamic_atm_baseline,
-                option_target=order["option_target"],
-                option_stop=order["option_stop"],
-                effective_delta=order["effective_delta"],
-                size=order["size"],
-                regime=order["regime"],
-                peak_pnl_pts=0.0, locked_floor_pts=0.0,
-            )
+        if not (self.pending_order and to_ist(candle.timestamp) >= to_ist(self.pending_order["target_fill_time"])):
+            return
+        if self.check_total_risk_limit():
             self.pending_order = None
+            return
 
-    def on_bar_update_and_exit_eval(self, candle: Candle3Min, decision: Optional[TradeDecision]=None, feats: Optional[Dict[str,Any]]=None, is_session_end: bool=False):
+        order = self.pending_order
+        quote = option_market or {}
+        entry_ask = safe_float(quote.get("first_ask"), np.nan)
+        entry_ltp = safe_float(quote.get("first_ltp"), np.nan)
+        entry_bid = safe_float(quote.get("first_bid"), np.nan)
+        entry_quote_timestamp = quote.get("first_timestamp")
+
+        # No synthetic option premium is allowed anymore. A trade can only be
+        # opened when Kotak Neo has supplied an observed option quote.
+        # Exact executable entry for a LONG CE/PE is the observed ASK.
+        # LTP-only entry is deliberately rejected because it is not an
+        # executable fill price and would contaminate exact P&L.
+        entry_price = entry_ask
+        if not is_valid_number(entry_price) or entry_price <= 0:
+            self.pending_order = None
+            return
+
+        direction = order["direction"]
+        vol_factor = max(0.5, min(2.0, (atr / 15.0))) if is_valid_number(atr) and atr > 0 else 1.0
+        slippage = CONFIG["base_slippage_pts"] * vol_factor * direction
+        fill_price = candle.fut_o + slippage
+
+        self.active_position = PaperPosition(
+            entry_time=candle.timestamp,
+            direction=direction,
+            entry_future_price=round(fill_price, 2),
+            entry_option_price=round(entry_price, 2),
+            entry_option_bid=round(entry_bid, 2) if is_valid_number(entry_bid) else None,
+            entry_option_ask=round(entry_ask, 2) if is_valid_number(entry_ask) else None,
+            entry_quote_timestamp=entry_quote_timestamp,
+            option_token=str(quote.get("token", "")),
+            option_symbol=str(quote.get("symbol", "")),
+            option_strike=safe_float(quote.get("strike"), np.nan),
+            option_expiry=quote.get("expiry"),
+            option_target=order["option_target"],
+            base_option_target=order["option_target"],
+            option_stop=order["option_stop"],
+            effective_delta=order["effective_delta"],
+            size=order["size"],
+            regime=order["regime"],
+            peak_pnl_pts=0.0, locked_floor_pts=0.0,
+        )
+        self.pending_order = None
+
+    def on_bar_update_and_exit_eval(self, candle: Candle3Min, option_market: Optional[Dict[str, Any]] = None, decision: Optional[TradeDecision]=None, feats: Optional[Dict[str,Any]]=None, is_session_end: bool=False):
         if self.active_position is None:
             self.unrealized_pnl_pts=0.0; self.check_total_risk_limit(); return
-        pos=self.active_position; pos.bars_held+=1
-        if pos.direction==1:
-            high_move=candle.fut_h-pos.entry_future_price; low_move=pos.entry_future_price-candle.fut_l; close_move=candle.fut_c-pos.entry_future_price
-        else:
-            high_move=pos.entry_future_price-candle.fut_l; low_move=candle.fut_h-pos.entry_future_price; close_move=pos.entry_future_price-candle.fut_c
-        option_high=high_move*pos.effective_delta; option_low=-(low_move*pos.effective_delta); option_close=close_move*pos.effective_delta
-        self.unrealized_pnl_pts=round(option_close*pos.size,2)
-        pos.peak_pnl_pts=max(pos.peak_pnl_pts,self.unrealized_pnl_pts)
-        hit_stop=option_low<=-pos.option_stop
+
+        pos=self.active_position
+        pos.bars_held += 1
+        quote = option_market or {}
+        bid = safe_float(quote.get("bid"), np.nan)
+        ask = safe_float(quote.get("ask"), np.nan)
+        ltp = safe_float(quote.get("ltp"), np.nan)
+        bid_low = safe_float(quote.get("bid_low"), np.nan)
+        ask_high = safe_float(quote.get("ask_high"), np.nan)
+        ltp_low = safe_float(quote.get("ltp_low"), np.nan)
+        ltp_high = safe_float(quote.get("ltp_high"), np.nan)
+
+        # Persist the actual selected option's quote time-series separately from
+        # the trade journal. This preserves LTP/BID/ASK evidence for every 3-min
+        # bar used while the position was open.
+        try:
+            quote_row = {
+                "timestamp": candle.timestamp,
+                "trade_entry_time": pos.entry_time,
+                "option_token": pos.option_token,
+                "option_symbol": pos.option_symbol,
+                "option_strike": pos.option_strike,
+                "option_expiry": pos.option_expiry,
+                "ltp": ltp if is_valid_number(ltp) else np.nan,
+                "bid": bid if is_valid_number(bid) else np.nan,
+                "ask": ask if is_valid_number(ask) else np.nan,
+                "ltp_low": ltp_low if is_valid_number(ltp_low) else np.nan,
+                "ltp_high": ltp_high if is_valid_number(ltp_high) else np.nan,
+                "bid_low": bid_low if is_valid_number(bid_low) else np.nan,
+                "ask_high": ask_high if is_valid_number(ask_high) else np.nan,
+                "bars_held": pos.bars_held,
+            }
+            self.dataset_manager.write_parquet(pd.DataFrame([quote_row]), name="paper_option_quotes_log")
+        except Exception:
+            pass
+
+        # Long option position: executable mark/exit is the observed BID.
+        # LTP is retained only as a diagnostic mark; it is never used to close
+        # a trade when exact executable pricing is required.
+        mark_exit = bid if is_valid_number(bid) and bid > 0 else np.nan
+        if not is_valid_number(mark_exit) or mark_exit <= 0:
+            self.unrealized_pnl_pts = 0.0
+            return
+
+        gross_mark_pnl = mark_exit - pos.entry_option_price
+        self.unrealized_pnl_pts = round(gross_mark_pnl * pos.size, 2)
+
+        # Peak excursion uses observed option prices when available.
+        # A long option can only be liquidated at BID. ASK-high is not
+        # realizable P&L and therefore must never inflate MFE/peak P&L.
+        bid_high = safe_float(quote.get("bid_high"), np.nan)
+        peak_price = bid_high if is_valid_number(bid_high) else (ltp_high if is_valid_number(ltp_high) else mark_exit)
+        peak_pnl = (peak_price - pos.entry_option_price) * pos.size
+        pos.peak_pnl_pts = max(pos.peak_pnl_pts, round(peak_pnl, 2))
+
+        # For a long option, a stop is executable only if the BID reaches the
+        # stop threshold. This avoids treating an LTP/underlying move as a fill.
+        stop_price = pos.entry_option_price - pos.option_stop
+        stop_trigger_bid, stop_trigger_ts = self._first_bid_at_or_below(pos.option_token, stop_price)
+        stop_reference = bid_low if is_valid_number(bid_low) else ltp_low
+        hit_stop = is_valid_number(stop_trigger_bid) or (is_valid_number(stop_reference) and stop_reference <= stop_price)
+
         self.check_total_risk_limit()
         timeout=pos.bars_held >= (CONFIG["time_barrier_min"]//CONFIG["bar_minutes"])
-        exit_reason=None; exit_pnl=option_close
-        # Dynamic ride: target is no longer a mandatory exit when momentum remains aligned.
+        exit_reason=None
+
         if is_session_end: exit_reason="SESSION END AUTO-EXIT"
         elif self.risk_locked: exit_reason="KILL-SWITCH MAX LOSS BREACH"
         elif hit_stop: exit_reason="STOP LOSS HIT"
@@ -1697,7 +1805,6 @@ class PaperTradingDesk:
             except Exception: bs={}
             aligned=sum(1 for x in bs.values() if x*(1 if pos.direction==1 else -1)>=0.25)
             opposite=sum(1 for x in bs.values() if x*(1 if pos.direction==1 else -1)<=-0.25)
-            # Reversal only when the opposite side independently qualifies at >=3/7.
             opp_side="PE" if current_side=="CE" else "CE"
             opp_aligned=sum(1 for x in bs.values() if x*(-1 if pos.direction==1 else 1)>=0.25)
             if opp_aligned>=4 and opposite>=3:
@@ -1705,20 +1812,56 @@ class PaperTradingDesk:
             elif aligned<=1: exit_reason="MOMENTUM COLLAPSE (ALIGNMENT <=1)"
             elif aligned==2: exit_reason="MOMENTUM DECAY / PROFIT LOCK (ALIGNMENT 2/7)"
             elif aligned>=3:
-                # Extend target virtually by removing fixed target exit. Stronger alignment keeps riding.
-                if aligned>=5: pos.option_target=max(pos.option_target, pos.option_target*1.55); pos.exit_reason="RIDE EXTENDED 5/7"
-                elif aligned==4: pos.option_target=max(pos.option_target, pos.option_target*1.30); pos.exit_reason="RIDE EXTENDED 4/7"
+                if aligned>=5:
+                    pos.option_target=max(pos.option_target, round(pos.base_option_target*1.55, 2))
+                    pos.exit_reason="RIDE EXTENDED 5/7"
+                elif aligned==4:
+                    pos.option_target=max(pos.option_target, round(pos.base_option_target*1.30, 2))
+                    pos.exit_reason="RIDE EXTENDED 4/7"
                 if timeout: exit_reason="TIME BARRIER EXIT"
             if exit_reason is None and timeout: exit_reason="TIME BARRIER EXIT"
         elif timeout: exit_reason="TIME BARRIER EXIT"
+
+        pos.last_option_price = round(mark_exit, 2)
         if exit_reason:
-            if exit_reason.startswith("STOP"): exit_pnl=-pos.option_stop
-            pos.exit_time=candle.timestamp; pos.exit_future_price=round(candle.fut_c,2); pos.exit_option_price=round(max(5.0,pos.entry_option_price+exit_pnl),2)
-            penalty=min(1.40,CONFIG.get("option_exit_spread_penalty",0.65)*max(1.0,abs(exit_pnl)/10.0))
-            pos.pnl_pts=round((exit_pnl-penalty)*pos.size,2); pos.status="CLOSED"; pos.exit_reason=exit_reason+f" (Spread Penalty: -{penalty:.2f}pt)"
-            self.realized_pnl_pts=round(self.realized_pnl_pts+pos.pnl_pts,2); self.closed_trades.append(pos)
-            rec=asdict(pos); rec["timestamp"]=pos.exit_time; self.dataset_manager.write_parquet(pd.DataFrame([rec]),name="paper_trades_log")
-            self.active_position=None; self.unrealized_pnl_pts=0.0
+            # The actual observed BID is the executable sell price. For a stop,
+            # the stop condition determines WHY we exit; the observed bid
+            # determines HOW MUCH was actually made/lost.
+            if hit_stop and is_valid_number(stop_trigger_bid):
+                # The first observed executable BID crossing the stop is the
+                # historical stop-fill proxy. It is strictly better than using
+                # the candle close after the stop had already been crossed.
+                exit_price = max(0.0, stop_trigger_bid)
+                exit_observed_ts = stop_trigger_ts
+            else:
+                exit_price = max(0.0, mark_exit)
+                exit_observed_ts = quote.get("last_timestamp")
+
+            pos.exit_time = exit_observed_ts if isinstance(exit_observed_ts, datetime) else candle.timestamp
+            pos.exit_future_price=round(candle.fut_c,2)
+            pos.exit_option_price=round(exit_price,2)
+            pos.exit_option_bid=round(bid,2) if is_valid_number(bid) else None
+            pos.exit_option_ask=round(ask,2) if is_valid_number(ask) else None
+            pos.exit_option_ltp=round(ltp,2) if is_valid_number(ltp) else None
+            gross_pnl_pts=pos.exit_option_price-pos.entry_option_price
+            pos.gross_pnl_pts=round(gross_pnl_pts,2)
+            # Bid/ask execution already contains the observed spread. Do NOT
+            # subtract an artificial second spread penalty. Broker fees/taxes
+            # are not known here, so execution_cost_pts remains zero.
+            pos.execution_cost_pts=0.0
+            net_pnl_pts=gross_pnl_pts*pos.size
+            pos.pnl_pts=round(net_pnl_pts,2)
+            pos.pricing_source="KOTAK_NEO_BID_ASK"
+            pos.status="CLOSED"
+            pos.exit_reason=exit_reason+f" (Gross: {gross_pnl_pts:+.2f}pt | Execution Cost: 0.00pt | Net: {pos.pnl_pts:+.2f}pt)"
+            self.realized_pnl_pts=round(self.realized_pnl_pts+pos.pnl_pts,2)
+            self.closed_trades.append(pos)
+            rec=asdict(pos)
+            rec["timestamp"]=pos.exit_time
+            self.dataset_manager.write_parquet(pd.DataFrame([rec]),name="paper_trades_log")
+            self.active_position=None
+            self.unrealized_pnl_pts=0.0
+
 
 
 # =========================================================
@@ -1770,6 +1913,124 @@ class KotakNeoAdapter:
 
         self._watchdog_stop = threading.Event()
         self._watchdog_thread: Optional[threading.Thread] = None
+
+    def _option_quote_from_records(self, token: str, records: Optional[List[Dict[str, Any]]] = None, *, allow_latest: bool = False) -> Dict[str, Any]:
+        """Return the observed quote path for one exact option contract.
+
+        Historical/live paper execution must never use a later quote to price an
+        earlier fill.  Therefore callers can disable latest-quote fallback.
+        Records are ordered by their parsed observation timestamp.
+        """
+        token = str(token)
+        src = list(records if records is not None else self.current_bar_ticks)
+        rows = [r for r in src if isinstance(r, dict) and str(token_from_record(r)) == token]
+        if allow_latest:
+            latest = self.latest.get(token, {})
+            if isinstance(latest, dict) and latest and latest not in rows:
+                rows.append(latest)
+        if not rows:
+            return {}
+
+        def ts_key(r):
+            ts = r.get("_parsed_ts")
+            if isinstance(ts, datetime):
+                return ts.timestamp()
+            try:
+                return parse_tick_timestamp(r).timestamp()
+            except Exception:
+                return float("inf")
+
+        rows.sort(key=ts_key)
+        quotes=[]
+        for r in rows:
+            q=extract_option_quote(r)
+            if any(is_valid_number(q[k]) for k in q):
+                quotes.append((r, q))
+        if not quotes:
+            return {}
+
+        info=self.pcr_records.get(token, {})
+        ltp_vals=[q["ltp"] for _,q in quotes if is_valid_number(q["ltp"]) and q["ltp"]>0]
+        bid_vals=[q["bid"] for _,q in quotes if is_valid_number(q["bid"]) and q["bid"]>0]
+        ask_vals=[q["ask"] for _,q in quotes if is_valid_number(q["ask"]) and q["ask"]>0]
+        first_r, first_q = quotes[0]
+        last_r, last_q = quotes[-1]
+        return {
+            "token": token,
+            "symbol": info.get("symbol", ""),
+            "strike": info.get("strike", np.nan),
+            "expiry": info.get("expiry"),
+            "ltp": last_q["ltp"] if is_valid_number(last_q["ltp"]) else (ltp_vals[-1] if ltp_vals else np.nan),
+            "bid": last_q["bid"] if is_valid_number(last_q["bid"]) else (bid_vals[-1] if bid_vals else np.nan),
+            "ask": last_q["ask"] if is_valid_number(last_q["ask"]) else (ask_vals[-1] if ask_vals else np.nan),
+            "ltp_low": min(ltp_vals) if ltp_vals else np.nan,
+            "ltp_high": max(ltp_vals) if ltp_vals else np.nan,
+            "bid_low": min(bid_vals) if bid_vals else np.nan,
+            "bid_high": max(bid_vals) if bid_vals else np.nan,
+            "ask_low": min(ask_vals) if ask_vals else np.nan,
+            "ask_high": max(ask_vals) if ask_vals else np.nan,
+            "first_ltp": first_q["ltp"],
+            "first_bid": first_q["bid"],
+            "first_ask": first_q["ask"],
+            "first_timestamp": first_r.get("_parsed_ts"),
+            "last_timestamp": last_r.get("_parsed_ts"),
+        }
+
+    def _first_bid_at_or_below(self, token: str, threshold: float) -> Tuple[float, Optional[datetime]]:
+        """Return the first observed executable BID that crosses a stop.
+
+        This preserves chronology instead of using only a candle minimum, which
+        would lose the actual executable price and could manufacture P&L.
+        """
+        if not is_valid_number(threshold):
+            return np.nan, None
+        rows=[r for r in self.current_bar_ticks
+              if isinstance(r, dict) and str(token_from_record(r)) == str(token)]
+        def ts_key(r):
+            ts=r.get("_parsed_ts")
+            if isinstance(ts, datetime):
+                return ts.timestamp()
+            try:
+                return parse_tick_timestamp(r).timestamp()
+            except Exception:
+                return float("inf")
+        rows.sort(key=ts_key)
+        for r in rows:
+            q=extract_option_quote(r)
+            bid=safe_float(q.get("bid"), np.nan)
+            if is_valid_number(bid) and bid > 0 and bid <= threshold:
+                ts=r.get("_parsed_ts")
+                return bid, ts if isinstance(ts, datetime) else None
+        return np.nan, None
+
+    def _select_entry_option(self, direction: int, spot_price: float) -> Dict[str, Any]:
+        """Select the nearest active-expiry ATM option using the FIRST observed
+        quote in the entry bar.  No later quote and no LTP-only fill is allowed."""
+        wanted = "CE" if direction == 1 else "PE"
+        candidates=[]
+        for tok, info in self.pcr_records.items():
+            if info.get("option_type") != wanted:
+                continue
+            strike=safe_float(info.get("strike"), np.nan)
+            if not is_valid_number(strike) or not is_valid_number(spot_price):
+                continue
+            quote=self._option_quote_from_records(tok, records=self.current_bar_ticks, allow_latest=False)
+            entry_ask=safe_float(quote.get("first_ask"), np.nan)
+            if not is_valid_number(entry_ask) or entry_ask <= 0:
+                continue
+            candidates.append((abs(strike-float(spot_price)), tok, quote))
+        if not candidates:
+            return {}
+        candidates.sort(key=lambda x: (x[0], str(x[1])))
+        return candidates[0][2]
+
+    def _active_option_market(self) -> Dict[str, Any]:
+        pos=self.paper_desk.active_position
+        if pos is None or not getattr(pos, "option_token", ""):
+            return {}
+        # Exit marks must come from the current completed bar only.  A stale
+        # latest quote is not an executable historical exit.
+        return self._option_quote_from_records(pos.option_token, records=self.current_bar_ticks, allow_latest=False)
 
     def _extract_oi(self, record: dict) -> float:
         if not isinstance(record, dict):
@@ -1992,9 +2253,13 @@ class KotakNeoAdapter:
                     if not tok:
                         continue
                     oi = self._extract_oi(r)
+                    if tok not in self.latest:
+                        self.latest[tok] = {}
+                    # Preserve the complete broker quote, not just OI.
+                    # This makes the option contract usable for actual entry/exit
+                    # pricing during the same bar.
+                    self.latest[tok].update(r)
                     if is_valid_number(oi):
-                        if tok not in self.latest:
-                            self.latest[tok] = {}
                         self.latest[tok]["oi"] = oi
                         self.latest[tok]["open_interest"] = oi
                         self.latest[tok]["open_int"] = oi
@@ -2275,13 +2540,20 @@ class KotakNeoAdapter:
             feats = self.feature_engine.compute(candle, self.candles_3m)
             atr_v = safe_float(feats.get("atr_14_prev"), 15.0)
 
-            self.paper_desk.on_bar_open_fill(candle, atr_v)
+            # Fill an already-staged signal using the actual Kotak Neo option
+            # quote for the nearest active-expiry ATM contract.
+            pending = self.paper_desk.pending_order
+            entry_option_market = {}
+            if pending:
+                entry_option_market = self._select_entry_option(int(pending.get("direction", 0)), spot_o)
+            self.paper_desk.on_bar_open_fill(candle, atr_v, option_market=entry_option_market)
 
             self.candles_3m.append(candle)
 
             decision = self.decision_engine.decide(feats)
             self.last_decision = decision
-            self.paper_desk.on_bar_update_and_exit_eval(candle, decision=decision, feats=feats, is_session_end=is_session_end)
+            active_option_market = self._active_option_market()
+            self.paper_desk.on_bar_update_and_exit_eval(candle, option_market=active_option_market, decision=decision, feats=feats, is_session_end=is_session_end)
             
             if not is_session_end:
                 next_t = bar_time + timedelta(minutes=CONFIG["bar_minutes"])
