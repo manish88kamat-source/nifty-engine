@@ -1,0 +1,15 @@
+{
+  "document": "GSR Entry Evidence Cross Validation Gate",
+  "generated_read_only": true,
+  "strategy_id": "GSR_AT_001",
+  "checks": {
+    "source_file_present": true,
+    "entry_file_present": true,
+    "strategy_id_match": true,
+    "source_identity_complete": false,
+    "entry_rule_captured": false,
+    "entry_verified": false
+  },
+  "validation_status": "PENDING",
+  "rulespec_allowed": false
+}

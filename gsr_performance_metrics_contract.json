@@ -1,0 +1,40 @@
+{
+  "document": "GSR Performance Metrics Contract",
+  "generated_read_only": true,
+  "status": "PENDING_IMPLEMENTATION",
+  "purpose": "Measure replayed strategy performance without modifying strategy rules.",
+  "policy": {
+    "descriptive_only": true,
+    "optimization_before_validation": false,
+    "regime_attribution_required": true,
+    "strategy_rules_immutable": true
+  },
+  "metrics": [
+    "total_return",
+    "net_pnl",
+    "win_rate",
+    "profit_factor",
+    "expectancy",
+    "average_trade",
+    "max_drawdown",
+    "risk_reward_ratio",
+    "trade_count",
+    "holding_period_statistics"
+  ],
+  "grouping": [
+    "strategy_id",
+    "symbol",
+    "time_period",
+    "composite_regime_state"
+  ],
+  "outputs": [
+    "performance_summary",
+    "regime_performance_table"
+  ],
+  "validation": [
+    "trade_count_check",
+    "pnl_consistency_check",
+    "metric_calculation_check"
+  ],
+  "rulespec_status": "LOCKED"
+}

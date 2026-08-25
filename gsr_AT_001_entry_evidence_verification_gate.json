@@ -1,0 +1,19 @@
+{
+  "document": "GSR_AT_001 Entry Evidence Verification Gate",
+  "generated_read_only": true,
+  "strategy_id": "GSR_AT_001",
+  "checks": {
+    "document_present": false,
+    "author_present": false,
+    "version_present": false,
+    "reference_location_present": false,
+    "raw_source_text_present": false,
+    "captured_rule_present": false,
+    "source_reference_verified": false,
+    "text_verified": false,
+    "human_verified": false
+  },
+  "entry_verified": false,
+  "entry_capture_allowed": false,
+  "rulespec_status": "LOCKED"
+}

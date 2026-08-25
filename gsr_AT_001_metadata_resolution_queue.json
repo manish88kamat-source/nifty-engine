@@ -1,0 +1,100 @@
+{
+  "document": "GSR_AT_001 Metadata Resolution Queue",
+  "generated_read_only": true,
+  "strategy_id": "GSR_AT_001",
+  "open_tasks": [
+    {
+      "strategy_id": "GSR_AT_001",
+      "field": "source_title",
+      "resolution_status": "OPEN",
+      "source_value": null,
+      "source_reference": null,
+      "evidence_attached": false,
+      "verification_status": "PENDING",
+      "fill_policy": {
+        "source_only": true,
+        "inference_allowed": false
+      }
+    },
+    {
+      "strategy_id": "GSR_AT_001",
+      "field": "author",
+      "resolution_status": "OPEN",
+      "source_value": null,
+      "source_reference": null,
+      "evidence_attached": false,
+      "verification_status": "PENDING",
+      "fill_policy": {
+        "source_only": true,
+        "inference_allowed": false
+      }
+    },
+    {
+      "strategy_id": "GSR_AT_001",
+      "field": "edition_or_version",
+      "resolution_status": "OPEN",
+      "source_value": null,
+      "source_reference": null,
+      "evidence_attached": false,
+      "verification_status": "PENDING",
+      "fill_policy": {
+        "source_only": true,
+        "inference_allowed": false
+      }
+    },
+    {
+      "strategy_id": "GSR_AT_001",
+      "field": "publication_date",
+      "resolution_status": "OPEN",
+      "source_value": null,
+      "source_reference": null,
+      "evidence_attached": false,
+      "verification_status": "PENDING",
+      "fill_policy": {
+        "source_only": true,
+        "inference_allowed": false
+      }
+    },
+    {
+      "strategy_id": "GSR_AT_001",
+      "field": "reference_location",
+      "resolution_status": "OPEN",
+      "source_value": null,
+      "source_reference": null,
+      "evidence_attached": false,
+      "verification_status": "PENDING",
+      "fill_policy": {
+        "source_only": true,
+        "inference_allowed": false
+      }
+    },
+    {
+      "strategy_id": "GSR_AT_001",
+      "field": "source_type",
+      "resolution_status": "OPEN",
+      "source_value": null,
+      "source_reference": null,
+      "evidence_attached": false,
+      "verification_status": "PENDING",
+      "fill_policy": {
+        "source_only": true,
+        "inference_allowed": false
+      }
+    },
+    {
+      "strategy_id": "GSR_AT_001",
+      "field": "authority_level",
+      "resolution_status": "OPEN",
+      "source_value": null,
+      "source_reference": null,
+      "evidence_attached": false,
+      "verification_status": "PENDING",
+      "fill_policy": {
+        "source_only": true,
+        "inference_allowed": false
+      }
+    }
+  ],
+  "entry_capture_allowed": false,
+  "rulespec_status": "LOCKED"
+}

@@ -1,0 +1,32 @@
+{
+  "document": "GSR Regime Classification Schema",
+  "generated_read_only": true,
+  "status": "PENDING_IMPLEMENTATION",
+  "purpose": "Convert historical market observations into frozen regime labels before strategy replay.",
+  "policy": {
+    "lookahead_bias_allowed": false,
+    "strategy_performance_used_for_labels": false,
+    "labels_frozen_before_replay": true
+  },
+  "inputs": [
+    "OHLCV",
+    "ATR",
+    "EMA20",
+    "EMA50",
+    "EMA200",
+    "ADX",
+    "RSI",
+    "ROC",
+    "range_percentile",
+    "volatility_percentile"
+  ],
+  "outputs": [
+    "trend_state",
+    "volatility_state",
+    "momentum_state",
+    "market_structure_state",
+    "transition_state",
+    "composite_regime_state"
+  ],
+  "rulespec_status": "LOCKED"
+}

@@ -1,0 +1,34 @@
+{
+  "document": "GSR_AT_001 Registry Entry Preparation",
+  "generated_read_only": true,
+  "strategy_id": "GSR_AT_001",
+  "strategy_name": "Turtle S1 Long Breakout",
+  "preparation_phase": "REGISTRY_ENTRY_PREPARATION",
+  "strategy_identity": {
+    "id": "GSR_AT_001",
+    "name": "Turtle S1 Long Breakout"
+  },
+  "evidence_reference": {
+    "source_metadata": "gsr_AT_001_source_metadata_capture_session.json",
+    "source_authority": "gsr_AT_001_source_authority_verification_record.json",
+    "entry": "gsr_AT_001_entry_source_evidence_record.json",
+    "exit": "gsr_AT_001_exit_source_evidence_record.json",
+    "risk": "gsr_AT_001_risk_source_evidence_record.json",
+    "position_sizing": "gsr_AT_001_position_sizing_evidence_record.json",
+    "execution": "gsr_AT_001_execution_source_evidence_record.json"
+  },
+  "dna_reference": {
+    "dna_mapping": "gsr_AT_001_dna_component_mapping.json",
+    "dna_complete": false
+  },
+  "validation_reference": {
+    "validation_object": "gsr_AT_001_strategy_validation_object.json",
+    "final_validation_gate": "gsr_AT_001_final_validation_gate.json",
+    "validation_pass": false
+  },
+  "registry_status": {
+    "entry_ready": false,
+    "registry_unlocked": false
+  },
+  "rulespec_status": "LOCKED"
+}

@@ -1,0 +1,88 @@
+{
+  "document": "GSR P1 Evidence Unlock Controller",
+  "generated_read_only": true,
+  "registry_modified": false,
+  "rulespec_created": false,
+  "strategies": [
+    {
+      "strategy_id": "GSR_AT_001",
+      "authority_gate_pass": false,
+      "current_stage": "ENTRY_EVIDENCE_LOCKED",
+      "entry_capture_allowed": false,
+      "rulespec_status": "LOCKED",
+      "next_action": "CAPTURE_AUTHORITATIVE_SOURCE_METADATA"
+    },
+    {
+      "strategy_id": "GSR_AT_002",
+      "authority_gate_pass": false,
+      "current_stage": "ENTRY_EVIDENCE_LOCKED",
+      "entry_capture_allowed": false,
+      "rulespec_status": "LOCKED",
+      "next_action": "CAPTURE_AUTHORITATIVE_SOURCE_METADATA"
+    },
+    {
+      "strategy_id": "GSR_AT_003",
+      "authority_gate_pass": false,
+      "current_stage": "ENTRY_EVIDENCE_LOCKED",
+      "entry_capture_allowed": false,
+      "rulespec_status": "LOCKED",
+      "next_action": "CAPTURE_AUTHORITATIVE_SOURCE_METADATA"
+    },
+    {
+      "strategy_id": "GSR_AT_004",
+      "authority_gate_pass": false,
+      "current_stage": "ENTRY_EVIDENCE_LOCKED",
+      "entry_capture_allowed": false,
+      "rulespec_status": "LOCKED",
+      "next_action": "CAPTURE_AUTHORITATIVE_SOURCE_METADATA"
+    },
+    {
+      "strategy_id": "GSR_AT_005",
+      "authority_gate_pass": false,
+      "current_stage": "ENTRY_EVIDENCE_LOCKED",
+      "entry_capture_allowed": false,
+      "rulespec_status": "LOCKED",
+      "next_action": "CAPTURE_AUTHORITATIVE_SOURCE_METADATA"
+    },
+    {
+      "strategy_id": "GSR_AT_006",
+      "authority_gate_pass": false,
+      "current_stage": "ENTRY_EVIDENCE_LOCKED",
+      "entry_capture_allowed": false,
+      "rulespec_status": "LOCKED",
+      "next_action": "CAPTURE_AUTHORITATIVE_SOURCE_METADATA"
+    },
+    {
+      "strategy_id": "GSR_AT_010",
+      "authority_gate_pass": false,
+      "current_stage": "ENTRY_EVIDENCE_LOCKED",
+      "entry_capture_allowed": false,
+      "rulespec_status": "LOCKED",
+      "next_action": "CAPTURE_AUTHORITATIVE_SOURCE_METADATA"
+    },
+    {
+      "strategy_id": "GSR_AT_011",
+      "authority_gate_pass": false,
+      "current_stage": "ENTRY_EVIDENCE_LOCKED",
+      "entry_capture_allowed": false,
+      "rulespec_status": "LOCKED",
+      "next_action": "CAPTURE_AUTHORITATIVE_SOURCE_METADATA"
+    },
+    {
+      "strategy_id": "GSR_AT_013",
+      "authority_gate_pass": false,
+      "current_stage": "ENTRY_EVIDENCE_LOCKED",
+      "entry_capture_allowed": false,
+      "rulespec_status": "LOCKED",
+      "next_action": "CAPTURE_AUTHORITATIVE_SOURCE_METADATA"
+    },
+    {
+      "strategy_id": "GSR_AT_018",
+      "authority_gate_pass": false,
+      "current_stage": "ENTRY_EVIDENCE_LOCKED",
+      "entry_capture_allowed": false,
+      "rulespec_status": "LOCKED",
+      "next_action": "CAPTURE_AUTHORITATIVE_SOURCE_METADATA"
+    }
+  ]
+}

@@ -1,0 +1,47 @@
+{
+  "document": "GSR Source Evidence Checklist",
+  "generated_read_only": true,
+  "strategy_id": "GSR_AT_001",
+  "strategy_name": "Turtle S1 Long Breakout",
+  "capture_items": {
+    "entry_rule": [
+      "Exact breakout definition",
+      "Lookback period",
+      "Price reference",
+      "Long/Short direction condition",
+      "Confirmation requirement"
+    ],
+    "exit_rule": [
+      "Exit signal definition",
+      "Exit timeframe",
+      "Opposite signal handling"
+    ],
+    "initial_stop_rule": [
+      "Stop methodology",
+      "Stop distance",
+      "Volatility reference"
+    ],
+    "position_sizing_rule": [
+      "Risk unit definition",
+      "Allocation calculation",
+      "Maximum exposure"
+    ],
+    "pyramiding_rule": [
+      "Add unit trigger",
+      "Add distance",
+      "Maximum units"
+    ],
+    "execution_rule": [
+      "Entry execution assumption",
+      "Order type",
+      "Market assumption"
+    ],
+    "cost_model": [
+      "Commission assumption",
+      "Slippage assumption",
+      "Transaction cost model"
+    ]
+  },
+  "completion_status": "PENDING_SOURCE",
+  "rulespec_allowed": false
+}

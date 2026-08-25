@@ -1,0 +1,52 @@
+{
+  "document": "GSR_AT_001 Metadata Completion Gate",
+  "generated_read_only": true,
+  "strategy_id": "GSR_AT_001",
+  "checks": [
+    {
+      "field": "source_title",
+      "value_captured": false,
+      "evidence_attached": false,
+      "verified": false
+    },
+    {
+      "field": "author",
+      "value_captured": false,
+      "evidence_attached": false,
+      "verified": false
+    },
+    {
+      "field": "edition_or_version",
+      "value_captured": false,
+      "evidence_attached": false,
+      "verified": false
+    },
+    {
+      "field": "publication_date",
+      "value_captured": false,
+      "evidence_attached": false,
+      "verified": false
+    },
+    {
+      "field": "reference_location",
+      "value_captured": false,
+      "evidence_attached": false,
+      "verified": false
+    },
+    {
+      "field": "source_type",
+      "value_captured": false,
+      "evidence_attached": false,
+      "verified": false
+    },
+    {
+      "field": "authority_level",
+      "value_captured": false,
+      "evidence_attached": false,
+      "verified": false
+    }
+  ],
+  "metadata_complete": false,
+  "entry_capture_allowed": false,
+  "rulespec_status": "LOCKED"
+}

@@ -1,0 +1,77 @@
+{
+  "document": "GSR P1 Evidence Package Validation",
+  "generated_read_only": true,
+  "strategy_count": 10,
+  "packages": [
+    {
+      "strategy_id": "GSR_AT_001",
+      "files_complete": true,
+      "missing_files": [],
+      "capture_status": "READY_FOR_EVIDENCE_FILL",
+      "rulespec_allowed": false
+    },
+    {
+      "strategy_id": "GSR_AT_002",
+      "files_complete": true,
+      "missing_files": [],
+      "capture_status": "READY_FOR_EVIDENCE_FILL",
+      "rulespec_allowed": false
+    },
+    {
+      "strategy_id": "GSR_AT_003",
+      "files_complete": true,
+      "missing_files": [],
+      "capture_status": "READY_FOR_EVIDENCE_FILL",
+      "rulespec_allowed": false
+    },
+    {
+      "strategy_id": "GSR_AT_004",
+      "files_complete": true,
+      "missing_files": [],
+      "capture_status": "READY_FOR_EVIDENCE_FILL",
+      "rulespec_allowed": false
+    },
+    {
+      "strategy_id": "GSR_AT_005",
+      "files_complete": true,
+      "missing_files": [],
+      "capture_status": "READY_FOR_EVIDENCE_FILL",
+      "rulespec_allowed": false
+    },
+    {
+      "strategy_id": "GSR_AT_006",
+      "files_complete": true,
+      "missing_files": [],
+      "capture_status": "READY_FOR_EVIDENCE_FILL",
+      "rulespec_allowed": false
+    },
+    {
+      "strategy_id": "GSR_AT_010",
+      "files_complete": true,
+      "missing_files": [],
+      "capture_status": "READY_FOR_EVIDENCE_FILL",
+      "rulespec_allowed": false
+    },
+    {
+      "strategy_id": "GSR_AT_011",
+      "files_complete": true,
+      "missing_files": [],
+      "capture_status": "READY_FOR_EVIDENCE_FILL",
+      "rulespec_allowed": false
+    },
+    {
+      "strategy_id": "GSR_AT_013",
+      "files_complete": true,
+      "missing_files": [],
+      "capture_status": "READY_FOR_EVIDENCE_FILL",
+      "rulespec_allowed": false
+    },
+    {
+      "strategy_id": "GSR_AT_018",
+      "files_complete": true,
+      "missing_files": [],
+      "capture_status": "READY_FOR_EVIDENCE_FILL",
+      "rulespec_allowed": false
+    }
+  ]
+}

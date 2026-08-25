@@ -1,0 +1,14 @@
+{
+  "document": "GSR_AT_001 Strategy Registry Integration Preparation",
+  "generated_read_only": true,
+  "strategy_id": "GSR_AT_001",
+  "strategy_name": "Turtle S1 Long Breakout",
+  "integration_phase": "STRATEGY_REGISTRY_INTEGRATION",
+  "registry_object": "gsr_AT_001_registry_object.json",
+  "final_registry_lock": "gsr_AT_001_final_registry_lock.json",
+  "current_registry_status": "PENDING_VALIDATION",
+  "registry_unlocked": false,
+  "integration_allowed": false,
+  "reason": "FINAL_VALIDATION_NOT_PASSED",
+  "rulespec_status": "LOCKED"
+}

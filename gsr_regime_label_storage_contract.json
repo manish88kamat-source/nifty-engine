@@ -1,0 +1,36 @@
+{
+  "document": "GSR Regime Label Storage Contract",
+  "generated_read_only": true,
+  "status": "PENDING_IMPLEMENTATION",
+  "purpose": "Define immutable storage rules for generated regime labels.",
+  "policy": {
+    "labels_immutable": true,
+    "strategy_results_cannot_modify_labels": true,
+    "regime_version_required": true,
+    "timestamp_alignment_required": true
+  },
+  "storage_layers": {
+    "feature_snapshot_reference": "linked",
+    "regime_labels": "immutable",
+    "strategy_results": "separate"
+  },
+  "required_fields": [
+    "timestamp",
+    "symbol",
+    "regime_version",
+    "trend_state",
+    "volatility_state",
+    "momentum_state",
+    "market_structure_state",
+    "transition_state",
+    "composite_regime_state",
+    "generation_hash"
+  ],
+  "validation": [
+    "duplicate_label_check",
+    "version_consistency_check",
+    "timestamp_sequence_check",
+    "source_feature_traceability"
+  ],
+  "rulespec_status": "LOCKED"
+}

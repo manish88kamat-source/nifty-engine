@@ -1,0 +1,130 @@
+{
+  "document": "GSR Regime Discovery Specification",
+  "generated_read_only": true,
+  "architecture_status": "INITIALIZED",
+  "purpose": "Independently classify historical market states for regime-wise Strategy-DNA performance analysis. This layer does not modify or infer source strategy rules.",
+  "policy": {
+    "strategy_rule_inference_allowed": false,
+    "strategy_rule_modification_allowed": false,
+    "regime_labels_from_strategy_performance": false,
+    "post_discovery_rule_optimization_allowed": false,
+    "regime_definition_must_be_frozen_before_replay": true
+  },
+  "regime_dimensions": {
+    "trend": {
+      "status": "DEFINED",
+      "method": "EMA_structure + ADX + directional_slope",
+      "states": [
+        "STRONG_UPTREND",
+        "UPTREND",
+        "NEUTRAL",
+        "DOWNTREND",
+        "STRONG_DOWNTREND"
+      ],
+      "definition": {
+        "strong_uptrend": "price above EMA20 above EMA50 above EMA200 AND ADX >= 25 AND EMA20 slope > 0",
+        "uptrend": "price above EMA50 AND EMA20 >= EMA50 AND ADX >= 18",
+        "neutral": "conditions for uptrend/downtrend not satisfied",
+        "downtrend": "price below EMA50 AND EMA20 <= EMA50 AND ADX >= 18",
+        "strong_downtrend": "price below EMA20 below EMA50 below EMA200 AND ADX >= 25 AND EMA20 slope < 0"
+      },
+      "frozen": true,
+      "performance_derived": false
+    },
+    "volatility": {
+      "status": "DEFINED",
+      "method": "ATR_percentile + realized_volatility",
+      "states": [
+        "LOW_VOLATILITY",
+        "NORMAL_VOLATILITY",
+        "HIGH_VOLATILITY",
+        "EXTREME_VOLATILITY"
+      ],
+      "definition": {
+        "low_volatility": "ATR_percentile <= 20",
+        "normal_volatility": "ATR_percentile > 20 AND ATR_percentile < 80",
+        "high_volatility": "ATR_percentile >= 80 AND ATR_percentile < 95",
+        "extreme_volatility": "ATR_percentile >= 95"
+      },
+      "frozen": true,
+      "performance_derived": false
+    },
+    "momentum": {
+      "status": "DEFINED",
+      "method": "RSI + ROC + momentum_slope",
+      "states": [
+        "STRONG_POSITIVE_MOMENTUM",
+        "POSITIVE_MOMENTUM",
+        "NEUTRAL_MOMENTUM",
+        "NEGATIVE_MOMENTUM",
+        "STRONG_NEGATIVE_MOMENTUM"
+      ],
+      "definition": {
+        "strong_positive": "RSI >= 60 AND ROC > 2% AND momentum_slope > 0",
+        "positive": "RSI > 50 AND ROC > 0",
+        "neutral": "RSI between 45 and 55 AND abs(ROC) <= 1%",
+        "negative": "RSI < 50 AND ROC < 0",
+        "strong_negative": "RSI <= 40 AND ROC < -2% AND momentum_slope < 0"
+      },
+      "frozen": true,
+      "performance_derived": false
+    },
+    "market_structure": {
+      "status": "DEFINED",
+      "method": "ADX + price_structure + range_compression",
+      "states": [
+        "DIRECTIONAL_STRUCTURE",
+        "EXPANSION_STRUCTURE",
+        "BALANCED_STRUCTURE",
+        "COMPRESSED_STRUCTURE",
+        "DISORDERED_STRUCTURE"
+      ],
+      "definition": {
+        "directional_structure": "ADX >= 25 AND persistent HH_HL or LL_LH sequence",
+        "expansion_structure": "range_percentile >= 80 AND ATR_percentile >= 80",
+        "balanced_structure": "ADX < 20 AND range_percentile between 30 and 70",
+        "compressed_structure": "range_percentile <= 20 AND ATR_percentile <= 20",
+        "disordered_structure": "structure signals conflict OR no other state qualifies"
+      },
+      "frozen": true,
+      "performance_derived": false
+    },
+    "transition": {
+      "status": "DEFINED",
+      "method": "volatility_change + trend_state_change + momentum_shift",
+      "states": [
+        "EMERGING_TREND",
+        "TREND_CONTINUATION",
+        "TREND_EXHAUSTION",
+        "RANGE_TO_EXPANSION",
+        "EXPANSION_TO_RANGE"
+      ],
+      "definition": {
+        "emerging_trend": "trend_state changes from neutral with rising ADX and directional momentum",
+        "trend_continuation": "existing trend state persists with stable momentum and volatility",
+        "trend_exhaustion": "trend persists but momentum weakens and volatility behavior changes",
+        "range_to_expansion": "compressed structure breaks with volatility expansion",
+        "expansion_to_range": "volatility contracts after expansion and directional strength declines"
+      },
+      "frozen": true,
+      "performance_derived": false
+    }
+  },
+  "research_flow": [
+    "FREEZE_REGIME_DEFINITIONS",
+    "CLASSIFY_HISTORICAL_DATA",
+    "REPLAY_REGISTERED_STRATEGIES",
+    "BUILD_REGIME_STRATEGY_MATRIX",
+    "DISCOVER_DNA_COMBINATIONS",
+    "OUT_OF_SAMPLE_VALIDATE",
+    "WALK_FORWARD_VALIDATE"
+  ],
+  "output_targets": [
+    "regime_strategy_performance_matrix",
+    "strategy_dna_compatibility_matrix",
+    "candidate_combinations",
+    "validated_combinations"
+  ],
+  "status": "DEFINITION_PENDING",
+  "rulespec_status": "LOCKED"
+}

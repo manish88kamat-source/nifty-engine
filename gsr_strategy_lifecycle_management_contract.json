@@ -1,0 +1,42 @@
+{
+  "document": "GSR Strategy Lifecycle Management Contract",
+  "generated_read_only": true,
+  "status": "PENDING_IMPLEMENTATION",
+  "purpose": "Manage lifecycle states of Strategy DNA candidates based on validated research evidence.",
+  "policy": {
+    "history_preserved_after_retirement": true,
+    "retirement_requires_validation": true,
+    "source_dna_immutable": true,
+    "automatic_rule_deletion_forbidden": true
+  },
+  "inputs": [
+    "strategy_dna_history",
+    "validation_history",
+    "regime_performance_history",
+    "research_registry"
+  ],
+  "lifecycle_states": [
+    "DISCOVERED",
+    "VALIDATING",
+    "ACTIVE_RESEARCH",
+    "UNDER_REVIEW",
+    "RETIRED"
+  ],
+  "decision_dimensions": [
+    "performance_stability",
+    "regime_compatibility",
+    "validation_consistency",
+    "research_relevance"
+  ],
+  "outputs": [
+    "strategy_lifecycle_record",
+    "retirement_report",
+    "status_history"
+  ],
+  "validation": [
+    "evidence_check",
+    "version_check",
+    "decision_traceability_check"
+  ],
+  "rulespec_status": "LOCKED"
+}

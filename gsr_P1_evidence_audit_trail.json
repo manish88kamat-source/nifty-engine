@@ -1,0 +1,176 @@
+{
+  "document": "GSR P1 Evidence Audit Trail",
+  "generated_read_only": true,
+  "strategies": [
+    {
+      "strategy_id": "GSR_AT_001",
+      "state_history": [
+        {
+          "state": "WAITING_FOR_SOURCE",
+          "status": "BLOCKED"
+        }
+      ],
+      "current_state": "WAITING_FOR_SOURCE",
+      "block_reason": "WAITING_FOR_COMPLETE_SOURCE_EVIDENCE",
+      "rulespec_status": "LOCKED",
+      "audit_policy": {
+        "registry_modified": false,
+        "inference_used": false,
+        "manual_override": false
+      }
+    },
+    {
+      "strategy_id": "GSR_AT_002",
+      "state_history": [
+        {
+          "state": "WAITING_FOR_SOURCE",
+          "status": "BLOCKED"
+        }
+      ],
+      "current_state": "WAITING_FOR_SOURCE",
+      "block_reason": "WAITING_FOR_COMPLETE_SOURCE_EVIDENCE",
+      "rulespec_status": "LOCKED",
+      "audit_policy": {
+        "registry_modified": false,
+        "inference_used": false,
+        "manual_override": false
+      }
+    },
+    {
+      "strategy_id": "GSR_AT_003",
+      "state_history": [
+        {
+          "state": "WAITING_FOR_SOURCE",
+          "status": "BLOCKED"
+        }
+      ],
+      "current_state": "WAITING_FOR_SOURCE",
+      "block_reason": "WAITING_FOR_COMPLETE_SOURCE_EVIDENCE",
+      "rulespec_status": "LOCKED",
+      "audit_policy": {
+        "registry_modified": false,
+        "inference_used": false,
+        "manual_override": false
+      }
+    },
+    {
+      "strategy_id": "GSR_AT_004",
+      "state_history": [
+        {
+          "state": "WAITING_FOR_SOURCE",
+          "status": "BLOCKED"
+        }
+      ],
+      "current_state": "WAITING_FOR_SOURCE",
+      "block_reason": "WAITING_FOR_COMPLETE_SOURCE_EVIDENCE",
+      "rulespec_status": "LOCKED",
+      "audit_policy": {
+        "registry_modified": false,
+        "inference_used": false,
+        "manual_override": false
+      }
+    },
+    {
+      "strategy_id": "GSR_AT_005",
+      "state_history": [
+        {
+          "state": "WAITING_FOR_SOURCE",
+          "status": "BLOCKED"
+        }
+      ],
+      "current_state": "WAITING_FOR_SOURCE",
+      "block_reason": "WAITING_FOR_COMPLETE_SOURCE_EVIDENCE",
+      "rulespec_status": "LOCKED",
+      "audit_policy": {
+        "registry_modified": false,
+        "inference_used": false,
+        "manual_override": false
+      }
+    },
+    {
+      "strategy_id": "GSR_AT_006",
+      "state_history": [
+        {
+          "state": "WAITING_FOR_SOURCE",
+          "status": "BLOCKED"
+        }
+      ],
+      "current_state": "WAITING_FOR_SOURCE",
+      "block_reason": "WAITING_FOR_COMPLETE_SOURCE_EVIDENCE",
+      "rulespec_status": "LOCKED",
+      "audit_policy": {
+        "registry_modified": false,
+        "inference_used": false,
+        "manual_override": false
+      }
+    },
+    {
+      "strategy_id": "GSR_AT_010",
+      "state_history": [
+        {
+          "state": "WAITING_FOR_SOURCE",
+          "status": "BLOCKED"
+        }
+      ],
+      "current_state": "WAITING_FOR_SOURCE",
+      "block_reason": "WAITING_FOR_COMPLETE_SOURCE_EVIDENCE",
+      "rulespec_status": "LOCKED",
+      "audit_policy": {
+        "registry_modified": false,
+        "inference_used": false,
+        "manual_override": false
+      }
+    },
+    {
+      "strategy_id": "GSR_AT_011",
+      "state_history": [
+        {
+          "state": "WAITING_FOR_SOURCE",
+          "status": "BLOCKED"
+        }
+      ],
+      "current_state": "WAITING_FOR_SOURCE",
+      "block_reason": "WAITING_FOR_COMPLETE_SOURCE_EVIDENCE",
+      "rulespec_status": "LOCKED",
+      "audit_policy": {
+        "registry_modified": false,
+        "inference_used": false,
+        "manual_override": false
+      }
+    },
+    {
+      "strategy_id": "GSR_AT_013",
+      "state_history": [
+        {
+          "state": "WAITING_FOR_SOURCE",
+          "status": "BLOCKED"
+        }
+      ],
+      "current_state": "WAITING_FOR_SOURCE",
+      "block_reason": "WAITING_FOR_COMPLETE_SOURCE_EVIDENCE",
+      "rulespec_status": "LOCKED",
+      "audit_policy": {
+        "registry_modified": false,
+        "inference_used": false,
+        "manual_override": false
+      }
+    },
+    {
+      "strategy_id": "GSR_AT_018",
+      "state_history": [
+        {
+          "state": "WAITING_FOR_SOURCE",
+          "status": "BLOCKED"
+        }
+      ],
+      "current_state": "WAITING_FOR_SOURCE",
+      "block_reason": "WAITING_FOR_COMPLETE_SOURCE_EVIDENCE",
+      "rulespec_status": "LOCKED",
+      "audit_policy": {
+        "registry_modified": false,
+        "inference_used": false,
+        "manual_override": false
+      }
+    }
+  ]
+}

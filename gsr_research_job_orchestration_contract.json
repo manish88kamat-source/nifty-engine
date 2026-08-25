@@ -1,0 +1,37 @@
+{
+  "document": "GSR Research Job Orchestration Contract",
+  "generated_read_only": true,
+  "status": "PENDING_IMPLEMENTATION",
+  "purpose": "Coordinate and execute reproducible GSR research workflows with dependency and failure control.",
+  "policy": {
+    "job_history_immutable": true,
+    "dependency_validation_required": true,
+    "version_binding_required": true,
+    "failed_jobs_logged": true,
+    "manual_execution_override_logged": true
+  },
+  "inputs": [
+    "experiment_definition",
+    "version_registry",
+    "research_dependencies"
+  ],
+  "workflow": [
+    "job_creation",
+    "dependency_validation",
+    "environment_check",
+    "execution_start",
+    "result_capture",
+    "audit_update"
+  ],
+  "outputs": [
+    "job_record",
+    "execution_result",
+    "failure_report"
+  ],
+  "validation": [
+    "dependency_check",
+    "version_compatibility_check",
+    "execution_integrity_check"
+  ],
+  "rulespec_status": "LOCKED"
+}

@@ -1,0 +1,32 @@
+{
+  "document": "GSR_AT_001 Position Sizing Source Capture Session",
+  "generated_read_only": false,
+  "strategy_id": "GSR_AT_001",
+  "strategy_name": "Turtle S1 Long Breakout",
+  "capture_phase": "POSITION_SIZING_SOURCE_CAPTURE",
+  "capture_policy": {
+    "source_only": true,
+    "inference_allowed": false,
+    "rule_normalization_allowed": false,
+    "manual_override_allowed": false
+  },
+  "source_reference": {
+    "document": null,
+    "author": null,
+    "version": null,
+    "page_or_location": null
+  },
+  "position_sizing_source_evidence": {
+    "raw_source_text": null,
+    "captured_position_rule": null,
+    "sizing_parameters": null,
+    "allocation_conditions": null
+  },
+  "verification": {
+    "source_verified": false,
+    "text_verified": false,
+    "human_verified": false
+  },
+  "position_sizing_capture_status": "AWAITING_SOURCE_POSITION_RULE",
+  "rulespec_status": "LOCKED"
+}

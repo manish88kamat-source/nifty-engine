@@ -1,0 +1,36 @@
+{
+  "document": "GSR Market Behavior Discovery Contract",
+  "generated_read_only": true,
+  "status": "PENDING_IMPLEMENTATION",
+  "purpose": "Discover recurring market behavior patterns from historical regime and strategy research records.",
+  "policy": {
+    "historical_data_only": true,
+    "future_prediction_claim_forbidden": true,
+    "strategy_rule_generation_forbidden": true,
+    "pattern_discovery_only": true
+  },
+  "inputs": [
+    "regime_history",
+    "market_structure_history",
+    "strategy_regime_matrix",
+    "research_knowledge_base"
+  ],
+  "analysis_dimensions": [
+    "regime_frequency",
+    "transition_patterns",
+    "behavior_clusters",
+    "recurring_market_states",
+    "strategy_behavior_relationships"
+  ],
+  "outputs": [
+    "market_behavior_patterns",
+    "regime_behavior_archive",
+    "research_insights"
+  ],
+  "validation": [
+    "historical_support_check",
+    "pattern_recurrence_check",
+    "source_traceability_check"
+  ],
+  "rulespec_status": "LOCKED"
+}

@@ -1,0 +1,35 @@
+{
+  "document": "GSR Transition Classifier Contract",
+  "generated_read_only": true,
+  "status": "PENDING_IMPLEMENTATION",
+  "policy": {
+    "no_future_data": true,
+    "performance_feedback_used": false,
+    "deterministic_output": true
+  },
+  "inputs": [
+    "previous_trend_state",
+    "current_trend_state",
+    "ATR_change",
+    "volatility_state_change",
+    "momentum_state_change",
+    "structure_state_change"
+  ],
+  "states": [
+    "EMERGING_TREND",
+    "TREND_CONTINUATION",
+    "TREND_EXHAUSTION",
+    "RANGE_TO_EXPANSION",
+    "EXPANSION_TO_RANGE"
+  ],
+  "logic_priority": [
+    "RANGE_TO_EXPANSION",
+    "EMERGING_TREND",
+    "TREND_EXHAUSTION",
+    "EXPANSION_TO_RANGE",
+    "TREND_CONTINUATION"
+  ],
+  "conflict_resolution": "Transition requires confirmed state change; ambiguous transitions return TREND_CONTINUATION only when previous state persists otherwise neutral transition",
+  "output": "transition_state",
+  "rulespec_status": "LOCKED"
+}

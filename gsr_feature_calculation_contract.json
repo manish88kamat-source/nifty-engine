@@ -1,0 +1,29 @@
+{
+  "document": "GSR Feature Calculation Contract",
+  "generated_read_only": true,
+  "status": "PENDING_IMPLEMENTATION",
+  "purpose": "Define deterministic calculation rules for feature snapshot generation.",
+  "policy": {
+    "same_input_same_output": true,
+    "future_data_forbidden": true,
+    "calculation_version_locked": true,
+    "strategy_logic_excluded": true
+  },
+  "calculations": {
+    "EMA20": "exponential_moving_average_period_20",
+    "EMA50": "exponential_moving_average_period_50",
+    "EMA200": "exponential_moving_average_period_200",
+    "EMA20_slope": "current_EMA20_vs_previous_EMA20",
+    "ADX": "average_directional_index_period_14",
+    "ATR": "average_true_range_period_14",
+    "ATR_percentile": "rolling_percentile_of_ATR",
+    "realized_volatility": "rolling_return_volatility",
+    "range_percentile": "rolling_range_percentile",
+    "RSI": "relative_strength_index_period_14",
+    "ROC": "rate_of_change",
+    "momentum_slope": "momentum_change_over_window",
+    "structure": "price_sequence_and_range_logic"
+  },
+  "output": "gsr_feature_snapshot_schema",
+  "rulespec_status": "LOCKED"
+}

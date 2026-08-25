@@ -1,0 +1,229 @@
+{
+  "document": "GSR P1 Source Evidence Capture Interface",
+  "generated_read_only": true,
+  "registry_modified": false,
+  "rulespec_created": false,
+  "inference_allowed": false,
+  "strategies": [
+    {
+      "strategy_id": "GSR_AT_001",
+      "capture_state": "WAITING_FOR_SOURCE",
+      "allowed_input": {
+        "source_title": null,
+        "author": null,
+        "version": null,
+        "date": null,
+        "reference_location": null,
+        "raw_source_excerpt": null
+      },
+      "verification": {
+        "source_identity_verified": false,
+        "reference_verified": false,
+        "human_verified": false
+      },
+      "transition_request": {
+        "requested_state": null,
+        "approved": false
+      },
+      "rulespec_status": "LOCKED"
+    },
+    {
+      "strategy_id": "GSR_AT_002",
+      "capture_state": "WAITING_FOR_SOURCE",
+      "allowed_input": {
+        "source_title": null,
+        "author": null,
+        "version": null,
+        "date": null,
+        "reference_location": null,
+        "raw_source_excerpt": null
+      },
+      "verification": {
+        "source_identity_verified": false,
+        "reference_verified": false,
+        "human_verified": false
+      },
+      "transition_request": {
+        "requested_state": null,
+        "approved": false
+      },
+      "rulespec_status": "LOCKED"
+    },
+    {
+      "strategy_id": "GSR_AT_003",
+      "capture_state": "WAITING_FOR_SOURCE",
+      "allowed_input": {
+        "source_title": null,
+        "author": null,
+        "version": null,
+        "date": null,
+        "reference_location": null,
+        "raw_source_excerpt": null
+      },
+      "verification": {
+        "source_identity_verified": false,
+        "reference_verified": false,
+        "human_verified": false
+      },
+      "transition_request": {
+        "requested_state": null,
+        "approved": false
+      },
+      "rulespec_status": "LOCKED"
+    },
+    {
+      "strategy_id": "GSR_AT_004",
+      "capture_state": "WAITING_FOR_SOURCE",
+      "allowed_input": {
+        "source_title": null,
+        "author": null,
+        "version": null,
+        "date": null,
+        "reference_location": null,
+        "raw_source_excerpt": null
+      },
+      "verification": {
+        "source_identity_verified": false,
+        "reference_verified": false,
+        "human_verified": false
+      },
+      "transition_request": {
+        "requested_state": null,
+        "approved": false
+      },
+      "rulespec_status": "LOCKED"
+    },
+    {
+      "strategy_id": "GSR_AT_005",
+      "capture_state": "WAITING_FOR_SOURCE",
+      "allowed_input": {
+        "source_title": null,
+        "author": null,
+        "version": null,
+        "date": null,
+        "reference_location": null,
+        "raw_source_excerpt": null
+      },
+      "verification": {
+        "source_identity_verified": false,
+        "reference_verified": false,
+        "human_verified": false
+      },
+      "transition_request": {
+        "requested_state": null,
+        "approved": false
+      },
+      "rulespec_status": "LOCKED"
+    },
+    {
+      "strategy_id": "GSR_AT_006",
+      "capture_state": "WAITING_FOR_SOURCE",
+      "allowed_input": {
+        "source_title": null,
+        "author": null,
+        "version": null,
+        "date": null,
+        "reference_location": null,
+        "raw_source_excerpt": null
+      },
+      "verification": {
+        "source_identity_verified": false,
+        "reference_verified": false,
+        "human_verified": false
+      },
+      "transition_request": {
+        "requested_state": null,
+        "approved": false
+      },
+      "rulespec_status": "LOCKED"
+    },
+    {
+      "strategy_id": "GSR_AT_010",
+      "capture_state": "WAITING_FOR_SOURCE",
+      "allowed_input": {
+        "source_title": null,
+        "author": null,
+        "version": null,
+        "date": null,
+        "reference_location": null,
+        "raw_source_excerpt": null
+      },
+      "verification": {
+        "source_identity_verified": false,
+        "reference_verified": false,
+        "human_verified": false
+      },
+      "transition_request": {
+        "requested_state": null,
+        "approved": false
+      },
+      "rulespec_status": "LOCKED"
+    },
+    {
+      "strategy_id": "GSR_AT_011",
+      "capture_state": "WAITING_FOR_SOURCE",
+      "allowed_input": {
+        "source_title": null,
+        "author": null,
+        "version": null,
+        "date": null,
+        "reference_location": null,
+        "raw_source_excerpt": null
+      },
+      "verification": {
+        "source_identity_verified": false,
+        "reference_verified": false,
+        "human_verified": false
+      },
+      "transition_request": {
+        "requested_state": null,
+        "approved": false
+      },
+      "rulespec_status": "LOCKED"
+    },
+    {
+      "strategy_id": "GSR_AT_013",
+      "capture_state": "WAITING_FOR_SOURCE",
+      "allowed_input": {
+        "source_title": null,
+        "author": null,
+        "version": null,
+        "date": null,
+        "reference_location": null,
+        "raw_source_excerpt": null
+      },
+      "verification": {
+        "source_identity_verified": false,
+        "reference_verified": false,
+        "human_verified": false
+      },
+      "transition_request": {
+        "requested_state": null,
+        "approved": false
+      },
+      "rulespec_status": "LOCKED"
+    },
+    {
+      "strategy_id": "GSR_AT_018",
+      "capture_state": "WAITING_FOR_SOURCE",
+      "allowed_input": {
+        "source_title": null,
+        "author": null,
+        "version": null,
+        "date": null,
+        "reference_location": null,
+        "raw_source_excerpt": null
+      },
+      "verification": {
+        "source_identity_verified": false,
+        "reference_verified": false,
+        "human_verified": false
+      },
+      "transition_request": {
+        "requested_state": null,
+        "approved": false
+      },
+      "rulespec_status": "LOCKED"
+    }
+  ]
+}

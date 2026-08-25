@@ -1,0 +1,13 @@
+{
+  "document": "GSR_AT_001 Risk State Transition Controller",
+  "generated_read_only": true,
+  "strategy_id": "GSR_AT_001",
+  "previous_state": "RISK_RULE_VERIFICATION",
+  "transition_result": "BLOCKED",
+  "current_state": "RISK_RULE_VERIFICATION_PENDING",
+  "next_action": "CAPTURE_AND_VERIFY_RISK_SOURCE_EVIDENCE",
+  "risk_complete": false,
+  "risk_capture_allowed": false,
+  "manual_override": false,
+  "rulespec_status": "LOCKED"
+}

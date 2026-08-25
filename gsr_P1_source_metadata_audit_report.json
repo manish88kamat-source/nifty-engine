@@ -1,0 +1,138 @@
+{
+  "document": "GSR P1 Source Metadata Audit Report",
+  "generated_read_only": true,
+  "total_strategies": 10,
+  "rulespec_allowed": false,
+  "audit": [
+    {
+      "strategy_id": "GSR_AT_001",
+      "metadata_status": "PENDING_SOURCE",
+      "missing_fields": [
+        "source_title",
+        "author",
+        "version",
+        "reference_location",
+        "authority_level"
+      ],
+      "next_action": "CAPTURE_AUTHORITATIVE_SOURCE_METADATA",
+      "rulespec_status": "LOCKED"
+    },
+    {
+      "strategy_id": "GSR_AT_002",
+      "metadata_status": "PENDING_SOURCE",
+      "missing_fields": [
+        "source_title",
+        "author",
+        "version",
+        "reference_location",
+        "authority_level"
+      ],
+      "next_action": "CAPTURE_AUTHORITATIVE_SOURCE_METADATA",
+      "rulespec_status": "LOCKED"
+    },
+    {
+      "strategy_id": "GSR_AT_003",
+      "metadata_status": "PENDING_SOURCE",
+      "missing_fields": [
+        "source_title",
+        "author",
+        "version",
+        "reference_location",
+        "authority_level"
+      ],
+      "next_action": "CAPTURE_AUTHORITATIVE_SOURCE_METADATA",
+      "rulespec_status": "LOCKED"
+    },
+    {
+      "strategy_id": "GSR_AT_004",
+      "metadata_status": "PENDING_SOURCE",
+      "missing_fields": [
+        "source_title",
+        "author",
+        "version",
+        "reference_location",
+        "authority_level"
+      ],
+      "next_action": "CAPTURE_AUTHORITATIVE_SOURCE_METADATA",
+      "rulespec_status": "LOCKED"
+    },
+    {
+      "strategy_id": "GSR_AT_005",
+      "metadata_status": "PENDING_SOURCE",
+      "missing_fields": [
+        "source_title",
+        "author",
+        "version",
+        "reference_location",
+        "authority_level"
+      ],
+      "next_action": "CAPTURE_AUTHORITATIVE_SOURCE_METADATA",
+      "rulespec_status": "LOCKED"
+    },
+    {
+      "strategy_id": "GSR_AT_006",
+      "metadata_status": "PENDING_SOURCE",
+      "missing_fields": [
+        "source_title",
+        "author",
+        "version",
+        "reference_location",
+        "authority_level"
+      ],
+      "next_action": "CAPTURE_AUTHORITATIVE_SOURCE_METADATA",
+      "rulespec_status": "LOCKED"
+    },
+    {
+      "strategy_id": "GSR_AT_010",
+      "metadata_status": "PENDING_SOURCE",
+      "missing_fields": [
+        "source_title",
+        "author",
+        "version",
+        "reference_location",
+        "authority_level"
+      ],
+      "next_action": "CAPTURE_AUTHORITATIVE_SOURCE_METADATA",
+      "rulespec_status": "LOCKED"
+    },
+    {
+      "strategy_id": "GSR_AT_011",
+      "metadata_status": "PENDING_SOURCE",
+      "missing_fields": [
+        "source_title",
+        "author",
+        "version",
+        "reference_location",
+        "authority_level"
+      ],
+      "next_action": "CAPTURE_AUTHORITATIVE_SOURCE_METADATA",
+      "rulespec_status": "LOCKED"
+    },
+    {
+      "strategy_id": "GSR_AT_013",
+      "metadata_status": "PENDING_SOURCE",
+      "missing_fields": [
+        "source_title",
+        "author",
+        "version",
+        "reference_location",
+        "authority_level"
+      ],
+      "next_action": "CAPTURE_AUTHORITATIVE_SOURCE_METADATA",
+      "rulespec_status": "LOCKED"
+    },
+    {
+      "strategy_id": "GSR_AT_018",
+      "metadata_status": "PENDING_SOURCE",
+      "missing_fields": [
+        "source_title",
+        "author",
+        "version",
+        "reference_location",
+        "authority_level"
+      ],
+      "next_action": "CAPTURE_AUTHORITATIVE_SOURCE_METADATA",
+      "rulespec_status": "LOCKED"
+    }
+  ]
+}

@@ -1,0 +1,46 @@
+{
+  "document": "GSR Source Verification Matrix",
+  "generated_read_only": true,
+  "strategy_id": "GSR_AT_001",
+  "strategy_name": "Turtle S1 Long Breakout",
+  "verification_status": "PENDING",
+  "source_verification": {
+    "entry_rule": {
+      "status": "PENDING",
+      "source_reference": null,
+      "verified_rule": null
+    },
+    "exit_rule": {
+      "status": "PENDING",
+      "source_reference": null,
+      "verified_rule": null
+    },
+    "stop_rule": {
+      "status": "PENDING",
+      "source_reference": null,
+      "verified_rule": null
+    },
+    "position_sizing": {
+      "status": "PENDING",
+      "source_reference": null,
+      "verified_rule": null
+    },
+    "timeframe": {
+      "status": "PENDING",
+      "source_reference": null,
+      "verified_rule": null
+    },
+    "execution_model": {
+      "entry_execution": null,
+      "transaction_cost_model": null,
+      "slippage_model": null
+    }
+  },
+  "validation_gate": [
+    "source_confirmed",
+    "parameters_locked",
+    "rule_hash_generated",
+    "only_then_create_rulespec"
+  ],
+  "do_not_infer_missing_rules": true
+}

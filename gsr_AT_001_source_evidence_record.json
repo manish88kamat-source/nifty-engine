@@ -1,0 +1,74 @@
+{
+  "document": "GSR Source Evidence Record",
+  "generated_read_only": true,
+  "strategy_identity": {
+    "strategy_id": "GSR_AT_001",
+    "strategy_name": "Turtle S1 Long Breakout",
+    "family": "Trend Following",
+    "capture_status": "SOURCE_EVIDENCE_PENDING"
+  },
+  "source_metadata": {
+    "source_title": null,
+    "source_type": null,
+    "source_version": null,
+    "source_date": null,
+    "verified_by": null
+  },
+  "evidence_blocks": {
+    "entry_rule": {
+      "status": "NOT_CAPTURED",
+      "evidence_reference": null,
+      "captured_rule": null
+    },
+    "exit_rule": {
+      "status": "NOT_CAPTURED",
+      "evidence_reference": null,
+      "captured_rule": null
+    },
+    "stop_rule": {
+      "status": "NOT_CAPTURED",
+      "evidence_reference": null,
+      "captured_rule": null
+    },
+    "position_sizing": {
+      "status": "NOT_CAPTURED",
+      "evidence_reference": null,
+      "captured_rule": null
+    },
+    "portfolio_constraints": {
+      "status": "NOT_CAPTURED",
+      "evidence_reference": null,
+      "captured_rule": null
+    }
+  },
+  "execution_realism": {
+    "timeframe": {
+      "value": null,
+      "status": "UNKNOWN"
+    },
+    "entry_execution": {
+      "value": null,
+      "status": "UNKNOWN"
+    },
+    "transaction_cost_model": {
+      "value": null,
+      "status": "UNKNOWN"
+    },
+    "slippage_model": {
+      "value": null,
+      "status": "UNKNOWN"
+    }
+  },
+  "unknown_parameters": [
+    "source_confirmation_required",
+    "execution_costs",
+    "slippage"
+  ],
+  "validation_gate": {
+    "source_verified": false,
+    "rule_parameters_locked": false,
+    "rule_hash_generated": false,
+    "rulespec_creation_allowed": false
+  },
+  "do_not_infer_missing_rules": true
+}

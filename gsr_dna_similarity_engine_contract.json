@@ -1,0 +1,39 @@
+{
+  "document": "GSR Strategy DNA Similarity Engine Contract",
+  "generated_read_only": true,
+  "status": "PENDING_IMPLEMENTATION",
+  "purpose": "Identify similarity relationships between registered strategies based on extracted Strategy DNA components.",
+  "policy": {
+    "dna_source_evidence_only": true,
+    "strategy_rules_immutable": true,
+    "no_strategy_merging_without_validation": true,
+    "similarity_not_equal_to_performance": true
+  },
+  "inputs": [
+    "strategy_dna_components",
+    "strategy_registry"
+  ],
+  "similarity_dimensions": [
+    "entry_dna_similarity",
+    "exit_dna_similarity",
+    "risk_dna_similarity",
+    "position_sizing_similarity",
+    "execution_similarity",
+    "market_context_similarity"
+  ],
+  "methods": [
+    "component_overlap",
+    "feature_vector_similarity",
+    "taxonomy_similarity"
+  ],
+  "outputs": [
+    "strategy_similarity_matrix",
+    "strategy_clusters",
+    "common_dna_patterns"
+  ],
+  "validation": [
+    "minimum_component_overlap_check",
+    "source_traceability_check"
+  ],
+  "rulespec_status": "LOCKED"
+}

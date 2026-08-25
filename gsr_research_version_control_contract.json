@@ -1,0 +1,37 @@
+{
+  "document": "GSR Research Version Control Contract",
+  "generated_read_only": true,
+  "status": "PENDING_IMPLEMENTATION",
+  "purpose": "Manage version lineage of all GSR research components and prevent version mixing.",
+  "policy": {
+    "version_immutability_required": true,
+    "component_version_tracking_required": true,
+    "experiment_version_binding_required": true,
+    "old_results_preserved": true
+  },
+  "version_entities": [
+    "dataset_version",
+    "feature_version",
+    "regime_version",
+    "strategy_dna_version",
+    "execution_version",
+    "validation_version"
+  ],
+  "operations": [
+    "version_creation",
+    "version_registration",
+    "compatibility_check",
+    "version_freeze",
+    "historical_preservation"
+  ],
+  "outputs": [
+    "version_registry",
+    "compatibility_report"
+  ],
+  "validation": [
+    "version_collision_check",
+    "dependency_check",
+    "experiment_binding_check"
+  ],
+  "rulespec_status": "LOCKED"
+}

@@ -1,0 +1,249 @@
+{
+  "document": "GSR P1 Source Evidence Intake Execution Log",
+  "generated_read_only": true,
+  "registry_modified": false,
+  "rulespec_created": false,
+  "inference_allowed": false,
+  "sessions": [
+    {
+      "strategy_id": "GSR_AT_001",
+      "capture_session": {
+        "session_status": "NOT_STARTED",
+        "active_stage": "SOURCE_METADATA",
+        "started_at": null,
+        "completed_at": null
+      },
+      "events": [
+        {
+          "event": "QUEUE_CREATED",
+          "stage": "SOURCE_METADATA",
+          "status": "PENDING",
+          "timestamp": null
+        }
+      ],
+      "verification": {
+        "verified": false,
+        "verified_by": null,
+        "verification_time": null
+      },
+      "transition_status": "BLOCKED",
+      "rulespec_status": "LOCKED"
+    },
+    {
+      "strategy_id": "GSR_AT_002",
+      "capture_session": {
+        "session_status": "NOT_STARTED",
+        "active_stage": "SOURCE_METADATA",
+        "started_at": null,
+        "completed_at": null
+      },
+      "events": [
+        {
+          "event": "QUEUE_CREATED",
+          "stage": "SOURCE_METADATA",
+          "status": "PENDING",
+          "timestamp": null
+        }
+      ],
+      "verification": {
+        "verified": false,
+        "verified_by": null,
+        "verification_time": null
+      },
+      "transition_status": "BLOCKED",
+      "rulespec_status": "LOCKED"
+    },
+    {
+      "strategy_id": "GSR_AT_003",
+      "capture_session": {
+        "session_status": "NOT_STARTED",
+        "active_stage": "SOURCE_METADATA",
+        "started_at": null,
+        "completed_at": null
+      },
+      "events": [
+        {
+          "event": "QUEUE_CREATED",
+          "stage": "SOURCE_METADATA",
+          "status": "PENDING",
+          "timestamp": null
+        }
+      ],
+      "verification": {
+        "verified": false,
+        "verified_by": null,
+        "verification_time": null
+      },
+      "transition_status": "BLOCKED",
+      "rulespec_status": "LOCKED"
+    },
+    {
+      "strategy_id": "GSR_AT_004",
+      "capture_session": {
+        "session_status": "NOT_STARTED",
+        "active_stage": "SOURCE_METADATA",
+        "started_at": null,
+        "completed_at": null
+      },
+      "events": [
+        {
+          "event": "QUEUE_CREATED",
+          "stage": "SOURCE_METADATA",
+          "status": "PENDING",
+          "timestamp": null
+        }
+      ],
+      "verification": {
+        "verified": false,
+        "verified_by": null,
+        "verification_time": null
+      },
+      "transition_status": "BLOCKED",
+      "rulespec_status": "LOCKED"
+    },
+    {
+      "strategy_id": "GSR_AT_005",
+      "capture_session": {
+        "session_status": "NOT_STARTED",
+        "active_stage": "SOURCE_METADATA",
+        "started_at": null,
+        "completed_at": null
+      },
+      "events": [
+        {
+          "event": "QUEUE_CREATED",
+          "stage": "SOURCE_METADATA",
+          "status": "PENDING",
+          "timestamp": null
+        }
+      ],
+      "verification": {
+        "verified": false,
+        "verified_by": null,
+        "verification_time": null
+      },
+      "transition_status": "BLOCKED",
+      "rulespec_status": "LOCKED"
+    },
+    {
+      "strategy_id": "GSR_AT_006",
+      "capture_session": {
+        "session_status": "NOT_STARTED",
+        "active_stage": "SOURCE_METADATA",
+        "started_at": null,
+        "completed_at": null
+      },
+      "events": [
+        {
+          "event": "QUEUE_CREATED",
+          "stage": "SOURCE_METADATA",
+          "status": "PENDING",
+          "timestamp": null
+        }
+      ],
+      "verification": {
+        "verified": false,
+        "verified_by": null,
+        "verification_time": null
+      },
+      "transition_status": "BLOCKED",
+      "rulespec_status": "LOCKED"
+    },
+    {
+      "strategy_id": "GSR_AT_010",
+      "capture_session": {
+        "session_status": "NOT_STARTED",
+        "active_stage": "SOURCE_METADATA",
+        "started_at": null,
+        "completed_at": null
+      },
+      "events": [
+        {
+          "event": "QUEUE_CREATED",
+          "stage": "SOURCE_METADATA",
+          "status": "PENDING",
+          "timestamp": null
+        }
+      ],
+      "verification": {
+        "verified": false,
+        "verified_by": null,
+        "verification_time": null
+      },
+      "transition_status": "BLOCKED",
+      "rulespec_status": "LOCKED"
+    },
+    {
+      "strategy_id": "GSR_AT_011",
+      "capture_session": {
+        "session_status": "NOT_STARTED",
+        "active_stage": "SOURCE_METADATA",
+        "started_at": null,
+        "completed_at": null
+      },
+      "events": [
+        {
+          "event": "QUEUE_CREATED",
+          "stage": "SOURCE_METADATA",
+          "status": "PENDING",
+          "timestamp": null
+        }
+      ],
+      "verification": {
+        "verified": false,
+        "verified_by": null,
+        "verification_time": null
+      },
+      "transition_status": "BLOCKED",
+      "rulespec_status": "LOCKED"
+    },
+    {
+      "strategy_id": "GSR_AT_013",
+      "capture_session": {
+        "session_status": "NOT_STARTED",
+        "active_stage": "SOURCE_METADATA",
+        "started_at": null,
+        "completed_at": null
+      },
+      "events": [
+        {
+          "event": "QUEUE_CREATED",
+          "stage": "SOURCE_METADATA",
+          "status": "PENDING",
+          "timestamp": null
+        }
+      ],
+      "verification": {
+        "verified": false,
+        "verified_by": null,
+        "verification_time": null
+      },
+      "transition_status": "BLOCKED",
+      "rulespec_status": "LOCKED"
+    },
+    {
+      "strategy_id": "GSR_AT_018",
+      "capture_session": {
+        "session_status": "NOT_STARTED",
+        "active_stage": "SOURCE_METADATA",
+        "started_at": null,
+        "completed_at": null
+      },
+      "events": [
+        {
+          "event": "QUEUE_CREATED",
+          "stage": "SOURCE_METADATA",
+          "status": "PENDING",
+          "timestamp": null
+        }
+      ],
+      "verification": {
+        "verified": false,
+        "verified_by": null,
+        "verification_time": null
+      },
+      "transition_status": "BLOCKED",
+      "rulespec_status": "LOCKED"
+    }
+  ]
+}

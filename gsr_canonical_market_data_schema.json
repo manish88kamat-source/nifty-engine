@@ -1,0 +1,35 @@
+{
+  "document": "GSR Canonical Market Data Schema",
+  "generated_read_only": true,
+  "status": "PENDING_IMPLEMENTATION",
+  "purpose": "Define normalized market observation format consumed by GSR research pipeline.",
+  "policy": {
+    "raw_observations_only": true,
+    "derived_features_excluded": true,
+    "strategy_logic_excluded": true,
+    "timestamp_immutable": true
+  },
+  "fields": {
+    "timestamp": "datetime_required",
+    "symbol": "string_required",
+    "exchange": "string_required",
+    "timeframe": "string_required",
+    "open": "float_required",
+    "high": "float_required",
+    "low": "float_required",
+    "close": "float_required",
+    "volume": "float_required",
+    "oi": "float_optional",
+    "bid": "float_optional",
+    "ask": "float_optional",
+    "source_identifier": "string_required",
+    "data_quality_score": "float_generated"
+  },
+  "validation": [
+    "schema_validation",
+    "ohlc_integrity_check",
+    "volume_validation",
+    "timestamp_sequence_check"
+  ],
+  "rulespec_status": "LOCKED"
+}

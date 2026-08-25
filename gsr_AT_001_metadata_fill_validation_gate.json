@@ -1,0 +1,59 @@
+{
+  "document": "GSR_AT_001 Metadata Fill Validation Gate",
+  "generated_read_only": true,
+  "strategy_id": "GSR_AT_001",
+  "checks": [
+    {
+      "field": "source_title",
+      "value_present": false,
+      "reference_present": false,
+      "evidence_present": false,
+      "verified": false
+    },
+    {
+      "field": "author",
+      "value_present": false,
+      "reference_present": false,
+      "evidence_present": false,
+      "verified": false
+    },
+    {
+      "field": "edition_or_version",
+      "value_present": false,
+      "reference_present": false,
+      "evidence_present": false,
+      "verified": false
+    },
+    {
+      "field": "publication_date",
+      "value_present": false,
+      "reference_present": false,
+      "evidence_present": false,
+      "verified": false
+    },
+    {
+      "field": "reference_location",
+      "value_present": false,
+      "reference_present": false,
+      "evidence_present": false,
+      "verified": false
+    },
+    {
+      "field": "source_type",
+      "value_present": false,
+      "reference_present": false,
+      "evidence_present": false,
+      "verified": false
+    },
+    {
+      "field": "authority_level",
+      "value_present": false,
+      "reference_present": false,
+      "evidence_present": false,
+      "verified": false
+    }
+  ],
+  "metadata_ready": false,
+  "entry_capture_allowed": false,
+  "rulespec_status": "LOCKED"
+}

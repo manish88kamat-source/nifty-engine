@@ -1,0 +1,21 @@
+{
+  "document": "GSR_AT_001 DNA Completeness Gate",
+  "generated_read_only": true,
+  "strategy_id": "GSR_AT_001",
+  "checks": {
+    "market_context_dna": true,
+    "entry_logic_dna": true,
+    "exit_logic_dna": true,
+    "risk_dna": true,
+    "position_sizing_dna": true,
+    "execution_dna": true,
+    "regime_dna": false,
+    "failure_condition_dna": true
+  },
+  "completed_components": 7,
+  "total_components": 8,
+  "dna_complete": false,
+  "validation_ready": false,
+  "blocking_component": "regime_dna",
+  "rulespec_status": "LOCKED"
+}

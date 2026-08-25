@@ -1,0 +1,35 @@
+{
+  "document": "GSR Historical Data Storage Contract",
+  "generated_read_only": true,
+  "status": "PENDING_IMPLEMENTATION",
+  "purpose": "Define immutable storage layer for canonical historical market observations.",
+  "policy": {
+    "raw_data_immutable": true,
+    "processed_data_separated": true,
+    "replay_consistency_required": true,
+    "duplicate_data_rejected": true
+  },
+  "storage_layers": {
+    "raw_layer": "original_source_preserved",
+    "canonical_layer": "normalized_market_schema",
+    "feature_layer": "derived_features_separate",
+    "regime_layer": "frozen_labels_separate",
+    "replay_layer": "strategy_results_separate"
+  },
+  "supported_formats": [
+    "jsonl",
+    "parquet",
+    "database_table"
+  ],
+  "partition_keys": [
+    "symbol",
+    "timeframe",
+    "date"
+  ],
+  "validation": [
+    "schema_check_before_storage",
+    "timestamp_order_check",
+    "data_integrity_check"
+  ],
+  "rulespec_status": "LOCKED"
+}

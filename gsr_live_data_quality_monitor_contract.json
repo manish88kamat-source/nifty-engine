@@ -1,0 +1,41 @@
+{
+  "document": "GSR Live Data Quality Monitor Contract",
+  "generated_read_only": true,
+  "status": "PENDING_IMPLEMENTATION",
+  "purpose": "Monitor integrity and reliability of live market observations before research consumption.",
+  "policy": {
+    "invalid_data_rejected": true,
+    "quality_failures_logged": true,
+    "research_consumption_requires_quality_pass": true,
+    "source_integrity_required": true
+  },
+  "inputs": [
+    "live_canonical_observation",
+    "data_quality_report"
+  ],
+  "checks": [
+    "missing_data_check",
+    "duplicate_timestamp_check",
+    "feed_latency_check",
+    "stale_quote_check",
+    "ohlc_integrity_check",
+    "spread_anomaly_check",
+    "source_availability_check"
+  ],
+  "outputs": [
+    "quality_score",
+    "quality_status",
+    "data_failure_log"
+  ],
+  "quality_states": [
+    "PASS",
+    "WARNING",
+    "REJECT"
+  ],
+  "validation": [
+    "check_execution_order",
+    "failure_traceability",
+    "quality_version_tracking"
+  ],
+  "rulespec_status": "LOCKED"
+}

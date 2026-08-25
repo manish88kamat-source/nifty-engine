@@ -1,0 +1,45 @@
+{
+  "document": "GSR Strategy Regime Matrix Contract",
+  "generated_read_only": true,
+  "status": "PENDING_IMPLEMENTATION",
+  "purpose": "Build performance matrix mapping registered strategies against frozen market regimes.",
+  "policy": {
+    "strategy_rules_immutable": true,
+    "regime_labels_immutable": true,
+    "optimization_before_validation": false,
+    "descriptive_matrix_only": true
+  },
+  "inputs": [
+    "strategy_regime_scorecard",
+    "performance_metrics",
+    "composite_regime_state"
+  ],
+  "matrix_dimensions": [
+    "strategy_id",
+    "composite_regime_state",
+    "trend_state",
+    "volatility_state",
+    "momentum_state",
+    "market_structure_state",
+    "transition_state"
+  ],
+  "metrics": [
+    "trade_count",
+    "win_rate",
+    "profit_factor",
+    "expectancy",
+    "net_pnl",
+    "max_drawdown",
+    "average_trade"
+  ],
+  "outputs": [
+    "strategy_regime_matrix",
+    "compatibility_candidates"
+  ],
+  "validation": [
+    "minimum_trade_count_check",
+    "data_completeness_check",
+    "regime_coverage_check"
+  ],
+  "rulespec_status": "LOCKED"
+}

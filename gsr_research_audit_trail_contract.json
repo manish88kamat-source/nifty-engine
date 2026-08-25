@@ -1,0 +1,39 @@
+{
+  "document": "GSR Research Audit Trail Contract",
+  "generated_read_only": true,
+  "status": "PENDING_IMPLEMENTATION",
+  "purpose": "Maintain complete traceability of every research decision, validation event and candidate lifecycle change.",
+  "policy": {
+    "audit_records_immutable": true,
+    "source_to_decision_trace_required": true,
+    "version_history_required": true,
+    "manual_override_logging_required": true
+  },
+  "inputs": [
+    "source_records",
+    "dna_records",
+    "validation_reports",
+    "approval_records",
+    "rejection_records"
+  ],
+  "audit_events": [
+    "source_capture",
+    "dna_extraction",
+    "replay_execution",
+    "validation_result",
+    "approval_decision",
+    "rejection_decision",
+    "version_change"
+  ],
+  "outputs": [
+    "audit_log",
+    "decision_history",
+    "candidate_timeline"
+  ],
+  "validation": [
+    "event_order_check",
+    "record_integrity_check",
+    "traceability_check"
+  ],
+  "rulespec_status": "LOCKED"
+}

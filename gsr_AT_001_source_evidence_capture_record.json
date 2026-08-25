@@ -1,0 +1,53 @@
+{
+  "document": "GSR Source Evidence Capture Record",
+  "generated_read_only": true,
+  "strategy_id": "GSR_AT_001",
+  "strategy_name": "Turtle S1 Long Breakout",
+  "capture_status": "AWAITING_SOURCE",
+  "source": {
+    "title": null,
+    "author": null,
+    "version": null,
+    "date": null,
+    "reference_location": null
+  },
+  "evidence_blocks": {
+    "entry_rule": {
+      "captured_text": null,
+      "reference": null,
+      "verified": false
+    },
+    "exit_rule": {
+      "captured_text": null,
+      "reference": null,
+      "verified": false
+    },
+    "initial_stop_rule": {
+      "captured_text": null,
+      "reference": null,
+      "verified": false
+    },
+    "position_sizing_rule": {
+      "captured_text": null,
+      "reference": null,
+      "verified": false
+    },
+    "pyramiding_rule": {
+      "captured_text": null,
+      "reference": null,
+      "verified": false
+    },
+    "execution_rule": {
+      "captured_text": null,
+      "reference": null,
+      "verified": false
+    },
+    "cost_model": {
+      "captured_text": null,
+      "reference": null,
+      "verified": false
+    }
+  },
+  "do_not_infer_missing_rules": true,
+  "rulespec_allowed": false
+}

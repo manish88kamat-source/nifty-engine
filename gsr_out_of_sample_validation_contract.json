@@ -1,0 +1,37 @@
+{
+  "document": "GSR Out-of-Sample Validation Contract",
+  "generated_read_only": true,
+  "status": "PENDING_IMPLEMENTATION",
+  "purpose": "Validate discovered Strategy DNA candidates on unseen historical data before research approval.",
+  "policy": {
+    "training_period_separated": true,
+    "test_period_unseen": true,
+    "no_rule_modification": true,
+    "no_regime_modification": true,
+    "performance_only_after_freeze": true
+  },
+  "inputs": [
+    "validated_dna_candidates",
+    "unseen_market_data",
+    "frozen_regime_labels"
+  ],
+  "validation_steps": [
+    "candidate_freeze",
+    "unseen_data_execution",
+    "performance_measurement",
+    "risk_evaluation",
+    "comparison_against_expected_behavior"
+  ],
+  "outputs": [
+    "out_of_sample_report",
+    "candidate_status"
+  ],
+  "validation_metrics": [
+    "net_pnl",
+    "win_rate",
+    "profit_factor",
+    "max_drawdown",
+    "expectancy"
+  ],
+  "rulespec_status": "LOCKED"
+}

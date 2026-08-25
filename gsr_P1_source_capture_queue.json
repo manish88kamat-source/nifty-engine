@@ -1,0 +1,207 @@
+{
+  "document": "GSR P1 Source Capture Queue",
+  "generated_read_only": true,
+  "total_p1_items": 10,
+  "strategies": [
+    {
+      "strategy_id": "GSR_AT_001",
+      "strategy_name": "Turtle S1 Long Breakout",
+      "trader": "Turtle/Donchian/Seykota family",
+      "family": "Trend Following",
+      "rule_precision": "documented_framework",
+      "evidence_grade": "B",
+      "capture_status": "PENDING_SOURCE",
+      "required_blocks": [
+        "source_metadata",
+        "entry_rule",
+        "exit_rule",
+        "initial_stop_rule",
+        "position_sizing_rule",
+        "pyramiding_rule",
+        "execution_rule",
+        "cost_model"
+      ],
+      "rulespec_allowed": false
+    },
+    {
+      "strategy_id": "GSR_AT_002",
+      "strategy_name": "Turtle S1 Short Breakout",
+      "trader": "Turtle/Donchian/Seykota family",
+      "family": "Trend Following",
+      "rule_precision": "documented_framework",
+      "evidence_grade": "B",
+      "capture_status": "PENDING_SOURCE",
+      "required_blocks": [
+        "source_metadata",
+        "entry_rule",
+        "exit_rule",
+        "initial_stop_rule",
+        "position_sizing_rule",
+        "pyramiding_rule",
+        "execution_rule",
+        "cost_model"
+      ],
+      "rulespec_allowed": false
+    },
+    {
+      "strategy_id": "GSR_AT_003",
+      "strategy_name": "Turtle S2 Long Breakout",
+      "trader": "Turtle/Donchian/Seykota family",
+      "family": "Trend Following",
+      "rule_precision": "documented_framework",
+      "evidence_grade": "B",
+      "capture_status": "PENDING_SOURCE",
+      "required_blocks": [
+        "source_metadata",
+        "entry_rule",
+        "exit_rule",
+        "initial_stop_rule",
+        "position_sizing_rule",
+        "pyramiding_rule",
+        "execution_rule",
+        "cost_model"
+      ],
+      "rulespec_allowed": false
+    },
+    {
+      "strategy_id": "GSR_AT_004",
+      "strategy_name": "Turtle S2 Short Breakout",
+      "trader": "Turtle/Donchian/Seykota family",
+      "family": "Trend Following",
+      "rule_precision": "documented_framework",
+      "evidence_grade": "B",
+      "capture_status": "PENDING_SOURCE",
+      "required_blocks": [
+        "source_metadata",
+        "entry_rule",
+        "exit_rule",
+        "initial_stop_rule",
+        "position_sizing_rule",
+        "pyramiding_rule",
+        "execution_rule",
+        "cost_model"
+      ],
+      "rulespec_allowed": false
+    },
+    {
+      "strategy_id": "GSR_AT_005",
+      "strategy_name": "Turtle Volatility Position Sizing",
+      "trader": "Turtle/Donchian/Seykota family",
+      "family": "Trend Following",
+      "rule_precision": "documented_framework",
+      "evidence_grade": "B",
+      "capture_status": "PENDING_SOURCE",
+      "required_blocks": [
+        "source_metadata",
+        "entry_rule",
+        "exit_rule",
+        "initial_stop_rule",
+        "position_sizing_rule",
+        "pyramiding_rule",
+        "execution_rule",
+        "cost_model"
+      ],
+      "rulespec_allowed": false
+    },
+    {
+      "strategy_id": "GSR_AT_006",
+      "strategy_name": "Turtle 2N Initial Stop",
+      "trader": "Turtle/Donchian/Seykota family",
+      "family": "Trend Following",
+      "rule_precision": "documented_framework",
+      "evidence_grade": "B",
+      "capture_status": "PENDING_SOURCE",
+      "required_blocks": [
+        "source_metadata",
+        "entry_rule",
+        "exit_rule",
+        "initial_stop_rule",
+        "position_sizing_rule",
+        "pyramiding_rule",
+        "execution_rule",
+        "cost_model"
+      ],
+      "rulespec_allowed": false
+    },
+    {
+      "strategy_id": "GSR_AT_010",
+      "strategy_name": "Donchian Channel Breakout",
+      "trader": "Turtle/Donchian/Seykota family",
+      "family": "Trend Following",
+      "rule_precision": "documented_framework",
+      "evidence_grade": "B",
+      "capture_status": "PENDING_SOURCE",
+      "required_blocks": [
+        "source_metadata",
+        "entry_rule",
+        "exit_rule",
+        "initial_stop_rule",
+        "position_sizing_rule",
+        "pyramiding_rule",
+        "execution_rule",
+        "cost_model"
+      ],
+      "rulespec_allowed": false
+    },
+    {
+      "strategy_id": "GSR_AT_011",
+      "strategy_name": "Curtis Faith Turtle",
+      "trader": "Turtle/Donchian/Seykota family",
+      "family": "Trend Following",
+      "rule_precision": "documented_framework",
+      "evidence_grade": "B",
+      "capture_status": "PENDING_SOURCE",
+      "required_blocks": [
+        "source_metadata",
+        "entry_rule",
+        "exit_rule",
+        "initial_stop_rule",
+        "position_sizing_rule",
+        "pyramiding_rule",
+        "execution_rule",
+        "cost_model"
+      ],
+      "rulespec_allowed": false
+    },
+    {
+      "strategy_id": "GSR_AT_013",
+      "strategy_name": "Hite Systematic Trend",
+      "trader": "Turtle/Donchian/Seykota family",
+      "family": "Trend Following",
+      "rule_precision": "documented_framework",
+      "evidence_grade": "B",
+      "capture_status": "PENDING_SOURCE",
+      "required_blocks": [
+        "source_metadata",
+        "entry_rule",
+        "exit_rule",
+        "initial_stop_rule",
+        "position_sizing_rule",
+        "pyramiding_rule",
+        "execution_rule",
+        "cost_model"
+      ],
+      "rulespec_allowed": false
+    },
+    {
+      "strategy_id": "GSR_AT_018",
+      "strategy_name": "O'Neil Cup With Handle Breakout",
+      "trader": "O'Neil/Minervini/Darvas family",
+      "family": "Growth Momentum",
+      "rule_precision": "documented_framework",
+      "evidence_grade": "B",
+      "capture_status": "PENDING_SOURCE",
+      "required_blocks": [
+        "source_metadata",
+        "entry_rule",
+        "exit_rule",
+        "initial_stop_rule",
+        "position_sizing_rule",
+        "pyramiding_rule",
+        "execution_rule",
+        "cost_model"
+      ],
+      "rulespec_allowed": false
+    }
+  ]
+}

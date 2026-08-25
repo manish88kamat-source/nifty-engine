@@ -1,0 +1,13 @@
+{
+  "document": "GSR_AT_001 Entry State Transition Controller",
+  "generated_read_only": true,
+  "strategy_id": "GSR_AT_001",
+  "previous_state": "ENTRY_RULE_VERIFICATION",
+  "transition_result": "BLOCKED",
+  "current_state": "ENTRY_RULE_VERIFICATION_PENDING",
+  "next_action": "CAPTURE_AND_VERIFY_ENTRY_SOURCE_EVIDENCE",
+  "entry_complete": false,
+  "entry_capture_allowed": false,
+  "manual_override": false,
+  "rulespec_status": "LOCKED"
+}

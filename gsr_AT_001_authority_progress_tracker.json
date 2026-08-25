@@ -1,0 +1,118 @@
+{
+  "document": "GSR_AT_001 Authority Progress Tracker",
+  "generated_read_only": true,
+  "strategy_id": "GSR_AT_001",
+  "total_tasks": 7,
+  "completed_tasks": 0,
+  "completion_percentage": 0,
+  "tasks": [
+    {
+      "strategy_id": "GSR_AT_001",
+      "verification_item": "source_title_present",
+      "resolution_status": "OPEN",
+      "source_evidence_captured": false,
+      "reference_attached": false,
+      "human_verified": false,
+      "verification_status": "PENDING",
+      "completion": 0,
+      "policy": {
+        "source_only": true,
+        "inference_allowed": false,
+        "manual_override_allowed": false
+      }
+    },
+    {
+      "strategy_id": "GSR_AT_001",
+      "verification_item": "author_present",
+      "resolution_status": "OPEN",
+      "source_evidence_captured": false,
+      "reference_attached": false,
+      "human_verified": false,
+      "verification_status": "PENDING",
+      "completion": 0,
+      "policy": {
+        "source_only": true,
+        "inference_allowed": false,
+        "manual_override_allowed": false
+      }
+    },
+    {
+      "strategy_id": "GSR_AT_001",
+      "verification_item": "reference_present",
+      "resolution_status": "OPEN",
+      "source_evidence_captured": false,
+      "reference_attached": false,
+      "human_verified": false,
+      "verification_status": "PENDING",
+      "completion": 0,
+      "policy": {
+        "source_only": true,
+        "inference_allowed": false,
+        "manual_override_allowed": false
+      }
+    },
+    {
+      "strategy_id": "GSR_AT_001",
+      "verification_item": "authority_level_present",
+      "resolution_status": "OPEN",
+      "source_evidence_captured": false,
+      "reference_attached": false,
+      "human_verified": false,
+      "verification_status": "PENDING",
+      "completion": 0,
+      "policy": {
+        "source_only": true,
+        "inference_allowed": false,
+        "manual_override_allowed": false
+      }
+    },
+    {
+      "strategy_id": "GSR_AT_001",
+      "verification_item": "primary_source_confirmed",
+      "resolution_status": "OPEN",
+      "source_evidence_captured": false,
+      "reference_attached": false,
+      "human_verified": false,
+      "verification_status": "PENDING",
+      "completion": 0,
+      "policy": {
+        "source_only": true,
+        "inference_allowed": false,
+        "manual_override_allowed": false
+      }
+    },
+    {
+      "strategy_id": "GSR_AT_001",
+      "verification_item": "reference_confirmed",
+      "resolution_status": "OPEN",
+      "source_evidence_captured": false,
+      "reference_attached": false,
+      "human_verified": false,
+      "verification_status": "PENDING",
+      "completion": 0,
+      "policy": {
+        "source_only": true,
+        "inference_allowed": false,
+        "manual_override_allowed": false
+      }
+    },
+    {
+      "strategy_id": "GSR_AT_001",
+      "verification_item": "human_verified",
+      "resolution_status": "OPEN",
+      "source_evidence_captured": false,
+      "reference_attached": false,
+      "human_verified": false,
+      "verification_status": "PENDING",
+      "completion": 0,
+      "policy": {
+        "source_only": true,
+        "inference_allowed": false,
+        "manual_override_allowed": false
+      }
+    }
+  ],
+  "authority_ready": false,
+  "entry_capture_allowed": false,
+  "rulespec_status": "LOCKED"
+}

@@ -1,0 +1,21 @@
+{
+  "document": "GSR Regime Engine Readiness Gate",
+  "generated_read_only": true,
+  "checks": {
+    "classification_schema": true,
+    "classifier_contract": true,
+    "trend_contract": true,
+    "volatility_contract": true,
+    "momentum_contract": true,
+    "structure_contract": true,
+    "transition_contract": true,
+    "composite_builder_contract": true,
+    "no_lookahead": true,
+    "strategy_isolation": true
+  },
+  "completed_checks": 10,
+  "total_checks": 10,
+  "engine_ready": true,
+  "replay_allowed": true,
+  "rulespec_status": "LOCKED"
+}

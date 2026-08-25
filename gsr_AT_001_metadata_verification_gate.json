@@ -1,0 +1,39 @@
+{
+  "document": "GSR Metadata Verification Gate",
+  "generated_read_only": true,
+  "strategy_id": "GSR_AT_001",
+  "strategy_name": "Turtle S1 Long Breakout",
+  "checks": {
+    "source_title": {
+      "present": false,
+      "status": "PENDING"
+    },
+    "author": {
+      "present": false,
+      "status": "PENDING"
+    },
+    "edition_or_version": {
+      "present": false,
+      "status": "PENDING"
+    },
+    "publication_date": {
+      "present": false,
+      "status": "PENDING"
+    },
+    "reference_location": {
+      "present": false,
+      "status": "PENDING"
+    },
+    "source_type": {
+      "present": false,
+      "status": "PENDING"
+    },
+    "authority_level": {
+      "present": false,
+      "status": "PENDING"
+    }
+  },
+  "metadata_verified": false,
+  "entry_capture_allowed": false,
+  "rulespec_status": "LOCKED"
+}

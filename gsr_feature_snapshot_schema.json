@@ -1,0 +1,43 @@
+{
+  "document": "GSR Feature Snapshot Schema",
+  "generated_read_only": true,
+  "status": "PENDING_IMPLEMENTATION",
+  "purpose": "Define normalized feature output consumed by regime classifiers.",
+  "policy": {
+    "source_data_traceable": true,
+    "future_data_forbidden": true,
+    "feature_version_required": true,
+    "strategy_logic_excluded": true
+  },
+  "fields": [
+    "timestamp",
+    "symbol",
+    "timeframe",
+    "source_data_hash",
+    "feature_version",
+    "EMA20",
+    "EMA50",
+    "EMA200",
+    "EMA20_slope",
+    "ADX",
+    "ATR",
+    "ATR_percentile",
+    "realized_volatility",
+    "range_percentile",
+    "RSI",
+    "ROC",
+    "momentum_slope",
+    "higher_high",
+    "higher_low",
+    "lower_high",
+    "lower_low",
+    "range_compression",
+    "feature_status"
+  ],
+  "validation": [
+    "feature_completeness",
+    "timestamp_alignment",
+    "version_consistency"
+  ],
+  "rulespec_status": "LOCKED"
+}

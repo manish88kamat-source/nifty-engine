@@ -1,0 +1,39 @@
+{
+  "document": "GSR_AT_001 Entry Source Evidence Record",
+  "generated_read_only": true,
+  "strategy_id": "GSR_AT_001",
+  "strategy_name": "Turtle S1 Long Breakout",
+  "evidence_type": "ENTRY_RULE_EVIDENCE",
+  "capture_status": "AWAITING_SOURCE_EVIDENCE",
+  "source_reference": {
+    "document": "The Original Turtle Trading Rules",
+    "author": "ORIGINAL TURTLES; Curtis Faith (Original Turtle, sign-off)",
+    "version": "2003",
+    "page_or_location": "Chapter: Entries, System 1 Entry / Breakouts, Scribd copy pp. 19-20"
+  },
+  "entry_evidence": {
+    "raw_source_text": "System 1 Entry: Turtles entered positions when the price exceeded by a single tick the high or low of the preceding 20 days. If the price exceeded the 20-day high, the Turtles would buy one Unit to initiate a long position. System 1 breakout entry signals were ignored if the last breakout would have resulted in a winning trade.",
+    "captured_entry_rule": "Long entry when price exceeds by one tick the preceding 20-day high; initiate with one Unit. S1 signal is ignored when the last breakout would have resulted in a winning trade.",
+    "parameters": {
+      "breakout_lookback_days": 20,
+      "trigger": "one_tick_above_preceding_20_day_high",
+      "initial_units": 1,
+      "prior_breakout_filter": "ignore_if_last_breakout_would_have_been_winner"
+    },
+    "conditions": {
+      "long": "price exceeds preceding 20-day high by one tick",
+      "prior_breakout_condition": "take S1 signal only when the last breakout would have been a losing breakout"
+    }
+  },
+  "verification": {
+    "source_reference_verified": true,
+    "text_verified": true,
+    "human_verified": true
+  },
+  "transition_control": {
+    "current_state": "ENTRY_RULE_VERIFIED",
+    "next_state": "EXIT_RULE_SOURCE_CAPTURE",
+    "transition_allowed": true
+  },
+  "rulespec_status": "LOCKED"
+}

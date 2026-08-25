@@ -1,0 +1,33 @@
+{
+  "document": "GSR Source Metadata Validation Gate",
+  "generated_read_only": true,
+  "strategy_id": "GSR_AT_001",
+  "checks": {
+    "source_title": {
+      "present": false,
+      "status": "MISSING"
+    },
+    "author": {
+      "present": false,
+      "status": "MISSING"
+    },
+    "edition_or_version": {
+      "present": false,
+      "status": "MISSING"
+    },
+    "reference_location": {
+      "present": false,
+      "status": "MISSING"
+    },
+    "source_type": {
+      "present": false,
+      "status": "MISSING"
+    },
+    "authority_level": {
+      "present": false,
+      "status": "MISSING"
+    }
+  },
+  "status": "PENDING_SOURCE_METADATA",
+  "rulespec_allowed": false
+}

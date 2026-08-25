@@ -1,0 +1,16 @@
+{
+  "document": "GSR Rule Capture Readiness Audit",
+  "generated_read_only": true,
+  "strategy_id": "GSR_AT_001",
+  "checks": {
+    "strategy_identity_present": true,
+    "source_metadata_present": true,
+    "entry_block_present": true,
+    "exit_block_present": true,
+    "risk_block_present": true,
+    "execution_tracking_present": true,
+    "unknown_tracking_enabled": true
+  },
+  "ready_for_rule_capture": true,
+  "rulespec_allowed": false
+}

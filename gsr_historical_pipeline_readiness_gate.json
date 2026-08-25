@@ -1,0 +1,15 @@
+{
+  "document": "GSR Historical Data Pipeline Readiness Gate",
+  "generated_read_only": true,
+  "checks": {
+    "historical_data_contract": true,
+    "canonical_schema": true,
+    "adapter_contract": true,
+    "storage_contract": true,
+    "dataset_builder_contract": true
+  },
+  "completed_checks": 5,
+  "total_checks": 5,
+  "pipeline_ready": true,
+  "rulespec_status": "LOCKED"
+}

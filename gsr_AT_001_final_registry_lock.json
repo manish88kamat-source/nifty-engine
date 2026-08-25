@@ -1,0 +1,11 @@
+{
+  "document": "GSR_AT_001 Final Registry Lock",
+  "generated_read_only": true,
+  "strategy_id": "GSR_AT_001",
+  "registry_status": "PENDING_VALIDATION",
+  "registry_locked": true,
+  "registry_unlocked": false,
+  "unlock_allowed": false,
+  "validation_reference": "gsr_AT_001_final_validation_gate.json",
+  "rulespec_status": "LOCKED"
+}

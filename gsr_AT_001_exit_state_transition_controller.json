@@ -1,0 +1,13 @@
+{
+  "document": "GSR_AT_001 Exit State Transition Controller",
+  "generated_read_only": true,
+  "strategy_id": "GSR_AT_001",
+  "previous_state": "EXIT_RULE_VERIFICATION",
+  "transition_result": "BLOCKED",
+  "current_state": "EXIT_RULE_VERIFICATION_PENDING",
+  "next_action": "CAPTURE_AND_VERIFY_EXIT_SOURCE_EVIDENCE",
+  "exit_complete": false,
+  "exit_capture_allowed": false,
+  "manual_override": false,
+  "rulespec_status": "LOCKED"
+}

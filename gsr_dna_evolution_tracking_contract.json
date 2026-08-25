@@ -1,0 +1,36 @@
+{
+  "document": "GSR DNA Evolution Tracking Contract",
+  "generated_read_only": true,
+  "status": "PENDING_IMPLEMENTATION",
+  "purpose": "Track long-term evolution, stability and degradation of Strategy DNA patterns across research history.",
+  "policy": {
+    "dna_history_immutable": true,
+    "performance_does_not_modify_source_dna": true,
+    "version_evolution_tracked": true,
+    "retirement_requires_validation": true
+  },
+  "inputs": [
+    "strategy_dna_history",
+    "research_registry",
+    "regime_performance_history",
+    "validation_history"
+  ],
+  "tracking_dimensions": [
+    "dna_frequency_change",
+    "regime_compatibility_change",
+    "performance_drift",
+    "stability_change",
+    "research_lifecycle_state"
+  ],
+  "outputs": [
+    "dna_evolution_record",
+    "dna_stability_report",
+    "dna_lifecycle_history"
+  ],
+  "validation": [
+    "source_traceability_check",
+    "version_consistency_check",
+    "historical_comparison_check"
+  ],
+  "rulespec_status": "LOCKED"
+}

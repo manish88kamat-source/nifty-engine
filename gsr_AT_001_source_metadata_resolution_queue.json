@@ -1,0 +1,39 @@
+{
+  "document": "GSR_AT_001 Source Metadata Resolution Queue",
+  "generated_read_only": true,
+  "strategy_id": "GSR_AT_001",
+  "source_input_ready": false,
+  "tasks": [
+    {
+      "item": "source_title",
+      "status": "OPEN"
+    },
+    {
+      "item": "author",
+      "status": "OPEN"
+    },
+    {
+      "item": "edition_or_version",
+      "status": "OPEN"
+    },
+    {
+      "item": "publication_date",
+      "status": "OPEN"
+    },
+    {
+      "item": "reference_location",
+      "status": "OPEN"
+    },
+    {
+      "item": "source_type",
+      "status": "OPEN"
+    },
+    {
+      "item": "authority_level",
+      "status": "OPEN"
+    }
+  ],
+  "resolution_status": "BLOCKED_PENDING_AUTHORITATIVE_SOURCE",
+  "rule_capture_allowed": false,
+  "rulespec_status": "LOCKED"
+}

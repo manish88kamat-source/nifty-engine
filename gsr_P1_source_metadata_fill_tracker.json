@@ -1,0 +1,378 @@
+{
+  "document": "GSR P1 Source Metadata Fill Tracker",
+  "generated_read_only": true,
+  "total_strategies": 10,
+  "rulespec_allowed": false,
+  "tracker": [
+    {
+      "strategy_id": "GSR_AT_001",
+      "capture_stage": "SOURCE_METADATA_CAPTURE",
+      "fields": {
+        "source_title": {
+          "status": "PENDING",
+          "verified": false
+        },
+        "author": {
+          "status": "PENDING",
+          "verified": false
+        },
+        "version": {
+          "status": "PENDING",
+          "verified": false
+        },
+        "publication_date": {
+          "status": "PENDING",
+          "verified": false
+        },
+        "reference_location": {
+          "status": "PENDING",
+          "verified": false
+        },
+        "source_type": {
+          "status": "PENDING",
+          "verified": false
+        },
+        "authority_level": {
+          "status": "PENDING",
+          "verified": false
+        }
+      },
+      "metadata_complete": false,
+      "entry_capture_allowed": false,
+      "rulespec_status": "LOCKED"
+    },
+    {
+      "strategy_id": "GSR_AT_002",
+      "capture_stage": "SOURCE_METADATA_CAPTURE",
+      "fields": {
+        "source_title": {
+          "status": "PENDING",
+          "verified": false
+        },
+        "author": {
+          "status": "PENDING",
+          "verified": false
+        },
+        "version": {
+          "status": "PENDING",
+          "verified": false
+        },
+        "publication_date": {
+          "status": "PENDING",
+          "verified": false
+        },
+        "reference_location": {
+          "status": "PENDING",
+          "verified": false
+        },
+        "source_type": {
+          "status": "PENDING",
+          "verified": false
+        },
+        "authority_level": {
+          "status": "PENDING",
+          "verified": false
+        }
+      },
+      "metadata_complete": false,
+      "entry_capture_allowed": false,
+      "rulespec_status": "LOCKED"
+    },
+    {
+      "strategy_id": "GSR_AT_003",
+      "capture_stage": "SOURCE_METADATA_CAPTURE",
+      "fields": {
+        "source_title": {
+          "status": "PENDING",
+          "verified": false
+        },
+        "author": {
+          "status": "PENDING",
+          "verified": false
+        },
+        "version": {
+          "status": "PENDING",
+          "verified": false
+        },
+        "publication_date": {
+          "status": "PENDING",
+          "verified": false
+        },
+        "reference_location": {
+          "status": "PENDING",
+          "verified": false
+        },
+        "source_type": {
+          "status": "PENDING",
+          "verified": false
+        },
+        "authority_level": {
+          "status": "PENDING",
+          "verified": false
+        }
+      },
+      "metadata_complete": false,
+      "entry_capture_allowed": false,
+      "rulespec_status": "LOCKED"
+    },
+    {
+      "strategy_id": "GSR_AT_004",
+      "capture_stage": "SOURCE_METADATA_CAPTURE",
+      "fields": {
+        "source_title": {
+          "status": "PENDING",
+          "verified": false
+        },
+        "author": {
+          "status": "PENDING",
+          "verified": false
+        },
+        "version": {
+          "status": "PENDING",
+          "verified": false
+        },
+        "publication_date": {
+          "status": "PENDING",
+          "verified": false
+        },
+        "reference_location": {
+          "status": "PENDING",
+          "verified": false
+        },
+        "source_type": {
+          "status": "PENDING",
+          "verified": false
+        },
+        "authority_level": {
+          "status": "PENDING",
+          "verified": false
+        }
+      },
+      "metadata_complete": false,
+      "entry_capture_allowed": false,
+      "rulespec_status": "LOCKED"
+    },
+    {
+      "strategy_id": "GSR_AT_005",
+      "capture_stage": "SOURCE_METADATA_CAPTURE",
+      "fields": {
+        "source_title": {
+          "status": "PENDING",
+          "verified": false
+        },
+        "author": {
+          "status": "PENDING",
+          "verified": false
+        },
+        "version": {
+          "status": "PENDING",
+          "verified": false
+        },
+        "publication_date": {
+          "status": "PENDING",
+          "verified": false
+        },
+        "reference_location": {
+          "status": "PENDING",
+          "verified": false
+        },
+        "source_type": {
+          "status": "PENDING",
+          "verified": false
+        },
+        "authority_level": {
+          "status": "PENDING",
+          "verified": false
+        }
+      },
+      "metadata_complete": false,
+      "entry_capture_allowed": false,
+      "rulespec_status": "LOCKED"
+    },
+    {
+      "strategy_id": "GSR_AT_006",
+      "capture_stage": "SOURCE_METADATA_CAPTURE",
+      "fields": {
+        "source_title": {
+          "status": "PENDING",
+          "verified": false
+        },
+        "author": {
+          "status": "PENDING",
+          "verified": false
+        },
+        "version": {
+          "status": "PENDING",
+          "verified": false
+        },
+        "publication_date": {
+          "status": "PENDING",
+          "verified": false
+        },
+        "reference_location": {
+          "status": "PENDING",
+          "verified": false
+        },
+        "source_type": {
+          "status": "PENDING",
+          "verified": false
+        },
+        "authority_level": {
+          "status": "PENDING",
+          "verified": false
+        }
+      },
+      "metadata_complete": false,
+      "entry_capture_allowed": false,
+      "rulespec_status": "LOCKED"
+    },
+    {
+      "strategy_id": "GSR_AT_010",
+      "capture_stage": "SOURCE_METADATA_CAPTURE",
+      "fields": {
+        "source_title": {
+          "status": "PENDING",
+          "verified": false
+        },
+        "author": {
+          "status": "PENDING",
+          "verified": false
+        },
+        "version": {
+          "status": "PENDING",
+          "verified": false
+        },
+        "publication_date": {
+          "status": "PENDING",
+          "verified": false
+        },
+        "reference_location": {
+          "status": "PENDING",
+          "verified": false
+        },
+        "source_type": {
+          "status": "PENDING",
+          "verified": false
+        },
+        "authority_level": {
+          "status": "PENDING",
+          "verified": false
+        }
+      },
+      "metadata_complete": false,
+      "entry_capture_allowed": false,
+      "rulespec_status": "LOCKED"
+    },
+    {
+      "strategy_id": "GSR_AT_011",
+      "capture_stage": "SOURCE_METADATA_CAPTURE",
+      "fields": {
+        "source_title": {
+          "status": "PENDING",
+          "verified": false
+        },
+        "author": {
+          "status": "PENDING",
+          "verified": false
+        },
+        "version": {
+          "status": "PENDING",
+          "verified": false
+        },
+        "publication_date": {
+          "status": "PENDING",
+          "verified": false
+        },
+        "reference_location": {
+          "status": "PENDING",
+          "verified": false
+        },
+        "source_type": {
+          "status": "PENDING",
+          "verified": false
+        },
+        "authority_level": {
+          "status": "PENDING",
+          "verified": false
+        }
+      },
+      "metadata_complete": false,
+      "entry_capture_allowed": false,
+      "rulespec_status": "LOCKED"
+    },
+    {
+      "strategy_id": "GSR_AT_013",
+      "capture_stage": "SOURCE_METADATA_CAPTURE",
+      "fields": {
+        "source_title": {
+          "status": "PENDING",
+          "verified": false
+        },
+        "author": {
+          "status": "PENDING",
+          "verified": false
+        },
+        "version": {
+          "status": "PENDING",
+          "verified": false
+        },
+        "publication_date": {
+          "status": "PENDING",
+          "verified": false
+        },
+        "reference_location": {
+          "status": "PENDING",
+          "verified": false
+        },
+        "source_type": {
+          "status": "PENDING",
+          "verified": false
+        },
+        "authority_level": {
+          "status": "PENDING",
+          "verified": false
+        }
+      },
+      "metadata_complete": false,
+      "entry_capture_allowed": false,
+      "rulespec_status": "LOCKED"
+    },
+    {
+      "strategy_id": "GSR_AT_018",
+      "capture_stage": "SOURCE_METADATA_CAPTURE",
+      "fields": {
+        "source_title": {
+          "status": "PENDING",
+          "verified": false
+        },
+        "author": {
+          "status": "PENDING",
+          "verified": false
+        },
+        "version": {
+          "status": "PENDING",
+          "verified": false
+        },
+        "publication_date": {
+          "status": "PENDING",
+          "verified": false
+        },
+        "reference_location": {
+          "status": "PENDING",
+          "verified": false
+        },
+        "source_type": {
+          "status": "PENDING",
+          "verified": false
+        },
+        "authority_level": {
+          "status": "PENDING",
+          "verified": false
+        }
+      },
+      "metadata_complete": false,
+      "entry_capture_allowed": false,
+      "rulespec_status": "LOCKED"
+    }
+  ]
+}

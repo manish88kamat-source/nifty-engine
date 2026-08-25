@@ -1,0 +1,13 @@
+{
+  "document": "GSR_AT_001 Authority State Transition Controller",
+  "generated_read_only": true,
+  "strategy_id": "GSR_AT_001",
+  "previous_state": "SOURCE_AUTHORITY_VERIFICATION",
+  "transition_result": "BLOCKED",
+  "current_state": "SOURCE_AUTHORITY_VERIFICATION_PENDING",
+  "next_action": "CAPTURE_AND_VERIFY_AUTHORITATIVE_SOURCE",
+  "authority_complete": false,
+  "entry_capture_allowed": false,
+  "manual_override": false,
+  "rulespec_status": "LOCKED"
+}

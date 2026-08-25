@@ -1,0 +1,14 @@
+{
+  "document": "GSR Research Approval Readiness Gate",
+  "generated_read_only": true,
+  "checks": {
+    "out_of_sample_validation": true,
+    "walk_forward_validation": true,
+    "research_approval_gate": true
+  },
+  "completed_checks": 3,
+  "total_checks": 3,
+  "research_approval_ready": true,
+  "approval_flow_enabled": true,
+  "rulespec_status": "LOCKED"
+}

@@ -1,0 +1,208 @@
+{
+  "document": "GSR P1 Source Metadata Capture Session",
+  "generated_read_only": true,
+  "total_strategies": 10,
+  "rulespec_allowed": false,
+  "sessions": [
+    {
+      "strategy_id": "GSR_AT_001",
+      "capture_stage": "SOURCE_METADATA_CAPTURE",
+      "source_identity": {
+        "source_title": null,
+        "author": null,
+        "version": null,
+        "publication_date": null,
+        "reference_location": null,
+        "source_type": null,
+        "authority_level": null
+      },
+      "provenance": {
+        "captured_by": null,
+        "capture_date": null,
+        "verification_status": "PENDING"
+      },
+      "rulespec_status": "LOCKED",
+      "inference_allowed": false
+    },
+    {
+      "strategy_id": "GSR_AT_002",
+      "capture_stage": "SOURCE_METADATA_CAPTURE",
+      "source_identity": {
+        "source_title": null,
+        "author": null,
+        "version": null,
+        "publication_date": null,
+        "reference_location": null,
+        "source_type": null,
+        "authority_level": null
+      },
+      "provenance": {
+        "captured_by": null,
+        "capture_date": null,
+        "verification_status": "PENDING"
+      },
+      "rulespec_status": "LOCKED",
+      "inference_allowed": false
+    },
+    {
+      "strategy_id": "GSR_AT_003",
+      "capture_stage": "SOURCE_METADATA_CAPTURE",
+      "source_identity": {
+        "source_title": null,
+        "author": null,
+        "version": null,
+        "publication_date": null,
+        "reference_location": null,
+        "source_type": null,
+        "authority_level": null
+      },
+      "provenance": {
+        "captured_by": null,
+        "capture_date": null,
+        "verification_status": "PENDING"
+      },
+      "rulespec_status": "LOCKED",
+      "inference_allowed": false
+    },
+    {
+      "strategy_id": "GSR_AT_004",
+      "capture_stage": "SOURCE_METADATA_CAPTURE",
+      "source_identity": {
+        "source_title": null,
+        "author": null,
+        "version": null,
+        "publication_date": null,
+        "reference_location": null,
+        "source_type": null,
+        "authority_level": null
+      },
+      "provenance": {
+        "captured_by": null,
+        "capture_date": null,
+        "verification_status": "PENDING"
+      },
+      "rulespec_status": "LOCKED",
+      "inference_allowed": false
+    },
+    {
+      "strategy_id": "GSR_AT_005",
+      "capture_stage": "SOURCE_METADATA_CAPTURE",
+      "source_identity": {
+        "source_title": null,
+        "author": null,
+        "version": null,
+        "publication_date": null,
+        "reference_location": null,
+        "source_type": null,
+        "authority_level": null
+      },
+      "provenance": {
+        "captured_by": null,
+        "capture_date": null,
+        "verification_status": "PENDING"
+      },
+      "rulespec_status": "LOCKED",
+      "inference_allowed": false
+    },
+    {
+      "strategy_id": "GSR_AT_006",
+      "capture_stage": "SOURCE_METADATA_CAPTURE",
+      "source_identity": {
+        "source_title": null,
+        "author": null,
+        "version": null,
+        "publication_date": null,
+        "reference_location": null,
+        "source_type": null,
+        "authority_level": null
+      },
+      "provenance": {
+        "captured_by": null,
+        "capture_date": null,
+        "verification_status": "PENDING"
+      },
+      "rulespec_status": "LOCKED",
+      "inference_allowed": false
+    },
+    {
+      "strategy_id": "GSR_AT_010",
+      "capture_stage": "SOURCE_METADATA_CAPTURE",
+      "source_identity": {
+        "source_title": null,
+        "author": null,
+        "version": null,
+        "publication_date": null,
+        "reference_location": null,
+        "source_type": null,
+        "authority_level": null
+      },
+      "provenance": {
+        "captured_by": null,
+        "capture_date": null,
+        "verification_status": "PENDING"
+      },
+      "rulespec_status": "LOCKED",
+      "inference_allowed": false
+    },
+    {
+      "strategy_id": "GSR_AT_011",
+      "capture_stage": "SOURCE_METADATA_CAPTURE",
+      "source_identity": {
+        "source_title": null,
+        "author": null,
+        "version": null,
+        "publication_date": null,
+        "reference_location": null,
+        "source_type": null,
+        "authority_level": null
+      },
+      "provenance": {
+        "captured_by": null,
+        "capture_date": null,
+        "verification_status": "PENDING"
+      },
+      "rulespec_status": "LOCKED",
+      "inference_allowed": false
+    },
+    {
+      "strategy_id": "GSR_AT_013",
+      "capture_stage": "SOURCE_METADATA_CAPTURE",
+      "source_identity": {
+        "source_title": null,
+        "author": null,
+        "version": null,
+        "publication_date": null,
+        "reference_location": null,
+        "source_type": null,
+        "authority_level": null
+      },
+      "provenance": {
+        "captured_by": null,
+        "capture_date": null,
+        "verification_status": "PENDING"
+      },
+      "rulespec_status": "LOCKED",
+      "inference_allowed": false
+    },
+    {
+      "strategy_id": "GSR_AT_018",
+      "capture_stage": "SOURCE_METADATA_CAPTURE",
+      "source_identity": {
+        "source_title": null,
+        "author": null,
+        "version": null,
+        "publication_date": null,
+        "reference_location": null,
+        "source_type": null,
+        "authority_level": null
+      },
+      "provenance": {
+        "captured_by": null,
+        "capture_date": null,
+        "verification_status": "PENDING"
+      },
+      "rulespec_status": "LOCKED",
+      "inference_allowed": false
+    }
+  ]
+}

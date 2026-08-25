@@ -1,0 +1,36 @@
+{
+  "document": "GSR Strategy DNA Compatibility Engine Contract",
+  "generated_read_only": true,
+  "status": "PENDING_IMPLEMENTATION",
+  "purpose": "Discover compatibility relationships between Strategy DNA components and frozen market regimes.",
+  "policy": {
+    "strategy_rules_immutable": true,
+    "regime_labels_immutable": true,
+    "no_rule_generation": true,
+    "descriptive_discovery_only": true,
+    "validation_required_before_adoption": true
+  },
+  "inputs": [
+    "strategy_dna_components",
+    "strategy_regime_matrix",
+    "regime_labels",
+    "strategy_registry"
+  ],
+  "analysis_layers": [
+    "dna_component_frequency",
+    "regime_compatibility_score",
+    "strategy_similarity",
+    "combination_candidate_generation"
+  ],
+  "outputs": [
+    "dna_compatibility_matrix",
+    "candidate_combinations",
+    "similarity_groups"
+  ],
+  "validation": [
+    "minimum_sample_check",
+    "out_of_sample_required",
+    "walk_forward_required"
+  ],
+  "rulespec_status": "LOCKED"
+}

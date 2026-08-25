@@ -1,0 +1,32 @@
+{
+  "document": "GSR Momentum Classifier Contract",
+  "generated_read_only": true,
+  "status": "PENDING_IMPLEMENTATION",
+  "policy": {
+    "no_future_data": true,
+    "performance_feedback_used": false,
+    "deterministic_output": true
+  },
+  "inputs": [
+    "RSI",
+    "ROC",
+    "momentum_slope"
+  ],
+  "states": [
+    "STRONG_POSITIVE_MOMENTUM",
+    "POSITIVE_MOMENTUM",
+    "NEUTRAL_MOMENTUM",
+    "NEGATIVE_MOMENTUM",
+    "STRONG_NEGATIVE_MOMENTUM"
+  ],
+  "logic_priority": [
+    "STRONG_POSITIVE_MOMENTUM",
+    "STRONG_NEGATIVE_MOMENTUM",
+    "POSITIVE_MOMENTUM",
+    "NEGATIVE_MOMENTUM",
+    "NEUTRAL_MOMENTUM"
+  ],
+  "conflict_resolution": "RSI, ROC and momentum slope combined into directional momentum score; disagreement returns NEUTRAL_MOMENTUM",
+  "output": "momentum_state",
+  "rulespec_status": "LOCKED"
+}

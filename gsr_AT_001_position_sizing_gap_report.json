@@ -1,0 +1,76 @@
+{
+  "document": "GSR_AT_001 Position Sizing Evidence Gap Report",
+  "generated_read_only": true,
+  "strategy_id": "GSR_AT_001",
+  "missing_checks": [
+    {
+      "check": "document_present",
+      "status": "PENDING",
+      "required_action": "CAPTURE_AND_VERIFY_POSITION_SIZING_SOURCE_EVIDENCE",
+      "position_size_capture_allowed": false
+    },
+    {
+      "check": "author_present",
+      "status": "PENDING",
+      "required_action": "CAPTURE_AND_VERIFY_POSITION_SIZING_SOURCE_EVIDENCE",
+      "position_size_capture_allowed": false
+    },
+    {
+      "check": "version_present",
+      "status": "PENDING",
+      "required_action": "CAPTURE_AND_VERIFY_POSITION_SIZING_SOURCE_EVIDENCE",
+      "position_size_capture_allowed": false
+    },
+    {
+      "check": "reference_location_present",
+      "status": "PENDING",
+      "required_action": "CAPTURE_AND_VERIFY_POSITION_SIZING_SOURCE_EVIDENCE",
+      "position_size_capture_allowed": false
+    },
+    {
+      "check": "raw_source_text_present",
+      "status": "PENDING",
+      "required_action": "CAPTURE_AND_VERIFY_POSITION_SIZING_SOURCE_EVIDENCE",
+      "position_size_capture_allowed": false
+    },
+    {
+      "check": "captured_position_rule_present",
+      "status": "PENDING",
+      "required_action": "CAPTURE_AND_VERIFY_POSITION_SIZING_SOURCE_EVIDENCE",
+      "position_size_capture_allowed": false
+    },
+    {
+      "check": "sizing_parameters_present",
+      "status": "PENDING",
+      "required_action": "CAPTURE_AND_VERIFY_POSITION_SIZING_SOURCE_EVIDENCE",
+      "position_size_capture_allowed": false
+    },
+    {
+      "check": "allocation_conditions_present",
+      "status": "PENDING",
+      "required_action": "CAPTURE_AND_VERIFY_POSITION_SIZING_SOURCE_EVIDENCE",
+      "position_size_capture_allowed": false
+    },
+    {
+      "check": "source_reference_verified",
+      "status": "PENDING",
+      "required_action": "CAPTURE_AND_VERIFY_POSITION_SIZING_SOURCE_EVIDENCE",
+      "position_size_capture_allowed": false
+    },
+    {
+      "check": "text_verified",
+      "status": "PENDING",
+      "required_action": "CAPTURE_AND_VERIFY_POSITION_SIZING_SOURCE_EVIDENCE",
+      "position_size_capture_allowed": false
+    },
+    {
+      "check": "human_verified",
+      "status": "PENDING",
+      "required_action": "CAPTURE_AND_VERIFY_POSITION_SIZING_SOURCE_EVIDENCE",
+      "position_size_capture_allowed": false
+    }
+  ],
+  "position_size_ready": false,
+  "position_size_capture_allowed": false,
+  "rulespec_status": "LOCKED"
+}

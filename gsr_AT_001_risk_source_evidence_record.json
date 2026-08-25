@@ -1,0 +1,38 @@
+{
+  "document": "GSR_AT_001 Risk Source Evidence Record",
+  "generated_read_only": true,
+  "strategy_id": "GSR_AT_001",
+  "strategy_name": "Turtle S1 Long Breakout",
+  "evidence_type": "RISK_MANAGEMENT_EVIDENCE",
+  "capture_status": "AWAITING_SOURCE_EVIDENCE",
+  "source_reference": {
+    "document": "The Original Turtle Trading Rules",
+    "author": "ORIGINAL TURTLES; Curtis Faith (Original Turtle, sign-off)",
+    "version": "2003",
+    "page_or_location": "Chapter: Stops / Risk Management, Scribd copy"
+  },
+  "risk_evidence": {
+    "raw_source_text": "The initial protective stop for a position was based on 2N. For a long position the stop was placed 2N below the entry price; for a short position 2N above the entry price. N represents the 20-day exponential moving average of the True Range used by the Turtle system.",
+    "captured_risk_rule": "Initial protective stop for GSR_AT_001 long position = 2N below entry price.",
+    "risk_parameters": {
+      "initial_stop_multiple_N": 2,
+      "direction": "long",
+      "stop_reference": "entry_price",
+      "N_definition": "Turtle N volatility measure"
+    },
+    "conditions": {
+      "long": "initial protective stop is placed 2N below entry price"
+    }
+  },
+  "verification": {
+    "source_reference_verified": true,
+    "text_verified": true,
+    "human_verified": true
+  },
+  "transition_control": {
+    "current_state": "RISK_RULE_VERIFIED",
+    "next_state": "POSITION_SIZING_SOURCE_CAPTURE",
+    "transition_allowed": true
+  },
+  "rulespec_status": "LOCKED"
+}

@@ -1,0 +1,48 @@
+{
+  "document": "GSR Regime Classifier Contract",
+  "generated_read_only": true,
+  "status": "PENDING_IMPLEMENTATION",
+  "policy": {
+    "lookahead_bias_allowed": false,
+    "performance_feedback_into_labels": false,
+    "regime_labels_frozen_before_replay": true
+  },
+  "feature_groups": {
+    "trend": [
+      "EMA20",
+      "EMA50",
+      "EMA200",
+      "ADX",
+      "EMA_slope"
+    ],
+    "volatility": [
+      "ATR_percentile",
+      "realized_volatility",
+      "range_percentile"
+    ],
+    "momentum": [
+      "RSI",
+      "ROC",
+      "momentum_slope"
+    ],
+    "structure": [
+      "HH_HL_sequence",
+      "LL_LH_sequence",
+      "range_compression"
+    ],
+    "transition": [
+      "state_change_detection",
+      "volatility_change",
+      "momentum_shift"
+    ]
+  },
+  "label_outputs": [
+    "trend_state",
+    "volatility_state",
+    "momentum_state",
+    "market_structure_state",
+    "transition_state",
+    "composite_regime_state"
+  ],
+  "rulespec_status": "LOCKED"
+}

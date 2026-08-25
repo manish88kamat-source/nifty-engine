@@ -1,0 +1,55 @@
+{
+  "document": "GSR Source Capture Contract",
+  "generated_read_only": true,
+  "strategy_id": "GSR_AT_001",
+  "capture_requirements": {
+    "entry_rule": {
+      "required_fields": [
+        "breakout_definition",
+        "lookback_period",
+        "price_reference",
+        "confirmation"
+      ]
+    },
+    "exit_rule": {
+      "required_fields": [
+        "exit_signal",
+        "exit_timeframe"
+      ]
+    },
+    "initial_stop_rule": {
+      "required_fields": [
+        "stop_type",
+        "stop_distance",
+        "volatility_reference"
+      ]
+    },
+    "position_sizing_rule": {
+      "required_fields": [
+        "risk_unit_definition",
+        "allocation_method"
+      ]
+    },
+    "pyramiding_rule": {
+      "required_fields": [
+        "add_unit_condition",
+        "maximum_units"
+      ]
+    },
+    "execution_rule": {
+      "required_fields": [
+        "entry_execution",
+        "order_type",
+        "market_assumption"
+      ]
+    },
+    "cost_model": {
+      "required_fields": [
+        "commission",
+        "slippage",
+        "transaction_assumption"
+      ]
+    }
+  },
+  "rulespec_allowed": false
+}

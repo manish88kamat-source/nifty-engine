@@ -1,0 +1,15 @@
+{
+  "document": "GSR Regime Generation Readiness Gate",
+  "generated_read_only": true,
+  "checks": {
+    "feature_engine_contract": true,
+    "feature_snapshot_schema": true,
+    "feature_calculation_contract": true,
+    "regime_label_generator": true,
+    "regime_label_storage": true
+  },
+  "completed_checks": 5,
+  "total_checks": 5,
+  "regime_generation_ready": true,
+  "rulespec_status": "LOCKED"
+}

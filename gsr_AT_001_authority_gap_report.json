@@ -1,0 +1,52 @@
+{
+  "document": "GSR_AT_001 Authority Verification Gap Report",
+  "generated_read_only": true,
+  "strategy_id": "GSR_AT_001",
+  "missing_checks": [
+    {
+      "check": "source_title_present",
+      "status": "PENDING",
+      "required_action": "CAPTURE_AND_VERIFY_AUTHORITATIVE_SOURCE",
+      "entry_capture_allowed": false
+    },
+    {
+      "check": "author_present",
+      "status": "PENDING",
+      "required_action": "CAPTURE_AND_VERIFY_AUTHORITATIVE_SOURCE",
+      "entry_capture_allowed": false
+    },
+    {
+      "check": "reference_present",
+      "status": "PENDING",
+      "required_action": "CAPTURE_AND_VERIFY_AUTHORITATIVE_SOURCE",
+      "entry_capture_allowed": false
+    },
+    {
+      "check": "authority_level_present",
+      "status": "PENDING",
+      "required_action": "CAPTURE_AND_VERIFY_AUTHORITATIVE_SOURCE",
+      "entry_capture_allowed": false
+    },
+    {
+      "check": "primary_source_confirmed",
+      "status": "PENDING",
+      "required_action": "CAPTURE_AND_VERIFY_AUTHORITATIVE_SOURCE",
+      "entry_capture_allowed": false
+    },
+    {
+      "check": "reference_confirmed",
+      "status": "PENDING",
+      "required_action": "CAPTURE_AND_VERIFY_AUTHORITATIVE_SOURCE",
+      "entry_capture_allowed": false
+    },
+    {
+      "check": "human_verified",
+      "status": "PENDING",
+      "required_action": "CAPTURE_AND_VERIFY_AUTHORITATIVE_SOURCE",
+      "entry_capture_allowed": false
+    }
+  ],
+  "authority_ready": false,
+  "entry_capture_allowed": false,
+  "rulespec_status": "LOCKED"
+}

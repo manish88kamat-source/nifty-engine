@@ -1,0 +1,29 @@
+{
+  "document": "GSR Composite Regime Builder Contract",
+  "generated_read_only": true,
+  "status": "PENDING_IMPLEMENTATION",
+  "policy": {
+    "no_future_data": true,
+    "strategy_performance_input": false,
+    "deterministic_mapping": true,
+    "regime_labels_frozen_before_strategy_replay": true
+  },
+  "inputs": [
+    "trend_state",
+    "volatility_state",
+    "momentum_state",
+    "market_structure_state",
+    "transition_state"
+  ],
+  "output": "composite_regime_state",
+  "composition_logic": "Combine independent regime dimensions into a deterministic market-state label.",
+  "priority_order": [
+    "transition_state",
+    "trend_state",
+    "volatility_state",
+    "momentum_state",
+    "market_structure_state"
+  ],
+  "conflict_resolution": "Conflicting dimensions produce a controlled mixed or neutral regime state; no strategy performance feedback allowed.",
+  "rulespec_status": "LOCKED"
+}

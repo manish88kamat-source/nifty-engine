@@ -1,0 +1,30 @@
+{
+  "document": "GSR Regime Classifier Implementation Blueprint",
+  "generated_read_only": true,
+  "status": "PENDING_IMPLEMENTATION",
+  "architecture": [
+    "feature_calculation_layer",
+    "trend_classifier",
+    "volatility_classifier",
+    "momentum_classifier",
+    "structure_classifier",
+    "transition_classifier",
+    "composite_regime_builder",
+    "frozen_label_output"
+  ],
+  "classifier_policy": {
+    "no_future_data": true,
+    "no_strategy_performance_input": true,
+    "deterministic_labels": true
+  },
+  "output_schema": [
+    "timestamp",
+    "trend_state",
+    "volatility_state",
+    "momentum_state",
+    "market_structure_state",
+    "transition_state",
+    "composite_regime_state"
+  ],
+  "rulespec_status": "LOCKED"
+}

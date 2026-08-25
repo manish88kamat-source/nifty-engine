@@ -1,0 +1,100 @@
+{
+  "document": "GSR_AT_001 Position Sizing Completion Gate",
+  "generated_read_only": true,
+  "strategy_id": "GSR_AT_001",
+  "checks": [
+    {
+      "verification_item": "document_present",
+      "source_evidence_captured": false,
+      "reference_attached": false,
+      "captured_text_available": false,
+      "human_verified": false,
+      "verified": false
+    },
+    {
+      "verification_item": "author_present",
+      "source_evidence_captured": false,
+      "reference_attached": false,
+      "captured_text_available": false,
+      "human_verified": false,
+      "verified": false
+    },
+    {
+      "verification_item": "version_present",
+      "source_evidence_captured": false,
+      "reference_attached": false,
+      "captured_text_available": false,
+      "human_verified": false,
+      "verified": false
+    },
+    {
+      "verification_item": "reference_location_present",
+      "source_evidence_captured": false,
+      "reference_attached": false,
+      "captured_text_available": false,
+      "human_verified": false,
+      "verified": false
+    },
+    {
+      "verification_item": "raw_source_text_present",
+      "source_evidence_captured": false,
+      "reference_attached": false,
+      "captured_text_available": false,
+      "human_verified": false,
+      "verified": false
+    },
+    {
+      "verification_item": "captured_position_rule_present",
+      "source_evidence_captured": false,
+      "reference_attached": false,
+      "captured_text_available": false,
+      "human_verified": false,
+      "verified": false
+    },
+    {
+      "verification_item": "sizing_parameters_present",
+      "source_evidence_captured": false,
+      "reference_attached": false,
+      "captured_text_available": false,
+      "human_verified": false,
+      "verified": false
+    },
+    {
+      "verification_item": "allocation_conditions_present",
+      "source_evidence_captured": false,
+      "reference_attached": false,
+      "captured_text_available": false,
+      "human_verified": false,
+      "verified": false
+    },
+    {
+      "verification_item": "source_reference_verified",
+      "source_evidence_captured": false,
+      "reference_attached": false,
+      "captured_text_available": false,
+      "human_verified": false,
+      "verified": false
+    },
+    {
+      "verification_item": "text_verified",
+      "source_evidence_captured": false,
+      "reference_attached": false,
+      "captured_text_available": false,
+      "human_verified": false,
+      "verified": false
+    },
+    {
+      "verification_item": "human_verified",
+      "source_evidence_captured": false,
+      "reference_attached": false,
+      "captured_text_available": false,
+      "human_verified": false,
+      "verified": false
+    }
+  ],
+  "completed_tasks": 0,
+  "total_tasks": 11,
+  "position_size_complete": false,
+  "position_size_capture_allowed": false,
+  "rulespec_status": "LOCKED"
+}

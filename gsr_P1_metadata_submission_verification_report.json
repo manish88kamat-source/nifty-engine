@@ -1,0 +1,168 @@
+{
+  "document": "GSR P1 Metadata Submission Verification Report",
+  "generated_read_only": true,
+  "registry_modified": false,
+  "rulespec_created": false,
+  "strategies": [
+    {
+      "strategy_id": "GSR_AT_001",
+      "metadata_complete": false,
+      "missing_fields": [
+        "source_title",
+        "author",
+        "edition_or_version",
+        "publication_date",
+        "reference_location",
+        "source_type",
+        "authority_level"
+      ],
+      "verification_status": "PENDING",
+      "entry_capture_allowed": false,
+      "rulespec_status": "LOCKED"
+    },
+    {
+      "strategy_id": "GSR_AT_002",
+      "metadata_complete": false,
+      "missing_fields": [
+        "source_title",
+        "author",
+        "edition_or_version",
+        "publication_date",
+        "reference_location",
+        "source_type",
+        "authority_level"
+      ],
+      "verification_status": "PENDING",
+      "entry_capture_allowed": false,
+      "rulespec_status": "LOCKED"
+    },
+    {
+      "strategy_id": "GSR_AT_003",
+      "metadata_complete": false,
+      "missing_fields": [
+        "source_title",
+        "author",
+        "edition_or_version",
+        "publication_date",
+        "reference_location",
+        "source_type",
+        "authority_level"
+      ],
+      "verification_status": "PENDING",
+      "entry_capture_allowed": false,
+      "rulespec_status": "LOCKED"
+    },
+    {
+      "strategy_id": "GSR_AT_004",
+      "metadata_complete": false,
+      "missing_fields": [
+        "source_title",
+        "author",
+        "edition_or_version",
+        "publication_date",
+        "reference_location",
+        "source_type",
+        "authority_level"
+      ],
+      "verification_status": "PENDING",
+      "entry_capture_allowed": false,
+      "rulespec_status": "LOCKED"
+    },
+    {
+      "strategy_id": "GSR_AT_005",
+      "metadata_complete": false,
+      "missing_fields": [
+        "source_title",
+        "author",
+        "edition_or_version",
+        "publication_date",
+        "reference_location",
+        "source_type",
+        "authority_level"
+      ],
+      "verification_status": "PENDING",
+      "entry_capture_allowed": false,
+      "rulespec_status": "LOCKED"
+    },
+    {
+      "strategy_id": "GSR_AT_006",
+      "metadata_complete": false,
+      "missing_fields": [
+        "source_title",
+        "author",
+        "edition_or_version",
+        "publication_date",
+        "reference_location",
+        "source_type",
+        "authority_level"
+      ],
+      "verification_status": "PENDING",
+      "entry_capture_allowed": false,
+      "rulespec_status": "LOCKED"
+    },
+    {
+      "strategy_id": "GSR_AT_010",
+      "metadata_complete": false,
+      "missing_fields": [
+        "source_title",
+        "author",
+        "edition_or_version",
+        "publication_date",
+        "reference_location",
+        "source_type",
+        "authority_level"
+      ],
+      "verification_status": "PENDING",
+      "entry_capture_allowed": false,
+      "rulespec_status": "LOCKED"
+    },
+    {
+      "strategy_id": "GSR_AT_011",
+      "metadata_complete": false,
+      "missing_fields": [
+        "source_title",
+        "author",
+        "edition_or_version",
+        "publication_date",
+        "reference_location",
+        "source_type",
+        "authority_level"
+      ],
+      "verification_status": "PENDING",
+      "entry_capture_allowed": false,
+      "rulespec_status": "LOCKED"
+    },
+    {
+      "strategy_id": "GSR_AT_013",
+      "metadata_complete": false,
+      "missing_fields": [
+        "source_title",
+        "author",
+        "edition_or_version",
+        "publication_date",
+        "reference_location",
+        "source_type",
+        "authority_level"
+      ],
+      "verification_status": "PENDING",
+      "entry_capture_allowed": false,
+      "rulespec_status": "LOCKED"
+    },
+    {
+      "strategy_id": "GSR_AT_018",
+      "metadata_complete": false,
+      "missing_fields": [
+        "source_title",
+        "author",
+        "edition_or_version",
+        "publication_date",
+        "reference_location",
+        "source_type",
+        "authority_level"
+      ],
+      "verification_status": "PENDING",
+      "entry_capture_allowed": false,
+      "rulespec_status": "LOCKED"
+    }
+  ]
+}

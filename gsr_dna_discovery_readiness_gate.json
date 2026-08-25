@@ -1,0 +1,15 @@
+{
+  "document": "GSR DNA Discovery Readiness Gate",
+  "generated_read_only": true,
+  "checks": {
+    "dna_compatibility_engine": true,
+    "dna_similarity_engine": true,
+    "dna_candidate_generator": true,
+    "dna_validation_gate": true
+  },
+  "completed_checks": 4,
+  "total_checks": 4,
+  "dna_discovery_ready": true,
+  "candidate_validation_allowed": true,
+  "rulespec_status": "LOCKED"
+}

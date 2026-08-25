@@ -1,0 +1,2054 @@
+{
+  "report": "GSR Rule Capture Queue",
+  "generated_read_only": true,
+  "registry_count": 113,
+  "rows": [
+    {
+      "rank": 1,
+      "strategy_id": "GSR_AT_001",
+      "trader": "Turtle/Donchian/Seykota family",
+      "strategy_name": "Turtle S1 Long Breakout",
+      "family": "Trend Following",
+      "rule_precision": "documented_framework",
+      "capture_status": "READY_FOR_SOURCE_CAPTURE",
+      "required_capture_fields": [
+        "entry_condition",
+        "exit_condition",
+        "stop_logic",
+        "target_logic",
+        "timeframe",
+        "execution_model",
+        "cost_model"
+      ],
+      "source_basis": "Turtle rules are publicly documented; other entries remain mechanism-level where exact personal rules are not public.",
+      "do_not_infer_missing_rules": true
+    },
+    {
+      "rank": 2,
+      "strategy_id": "GSR_AT_002",
+      "trader": "Turtle/Donchian/Seykota family",
+      "strategy_name": "Turtle S1 Short Breakout",
+      "family": "Trend Following",
+      "rule_precision": "documented_framework",
+      "capture_status": "READY_FOR_SOURCE_CAPTURE",
+      "required_capture_fields": [
+        "entry_condition",
+        "exit_condition",
+        "stop_logic",
+        "target_logic",
+        "timeframe",
+        "execution_model",
+        "cost_model"
+      ],
+      "source_basis": "Turtle rules are publicly documented; other entries remain mechanism-level where exact personal rules are not public.",
+      "do_not_infer_missing_rules": true
+    },
+    {
+      "rank": 3,
+      "strategy_id": "GSR_AT_003",
+      "trader": "Turtle/Donchian/Seykota family",
+      "strategy_name": "Turtle S2 Long Breakout",
+      "family": "Trend Following",
+      "rule_precision": "documented_framework",
+      "capture_status": "READY_FOR_SOURCE_CAPTURE",
+      "required_capture_fields": [
+        "entry_condition",
+        "exit_condition",
+        "stop_logic",
+        "target_logic",
+        "timeframe",
+        "execution_model",
+        "cost_model"
+      ],
+      "source_basis": "Turtle rules are publicly documented; other entries remain mechanism-level where exact personal rules are not public.",
+      "do_not_infer_missing_rules": true
+    },
+    {
+      "rank": 4,
+      "strategy_id": "GSR_AT_004",
+      "trader": "Turtle/Donchian/Seykota family",
+      "strategy_name": "Turtle S2 Short Breakout",
+      "family": "Trend Following",
+      "rule_precision": "documented_framework",
+      "capture_status": "READY_FOR_SOURCE_CAPTURE",
+      "required_capture_fields": [
+        "entry_condition",
+        "exit_condition",
+        "stop_logic",
+        "target_logic",
+        "timeframe",
+        "execution_model",
+        "cost_model"
+      ],
+      "source_basis": "Turtle rules are publicly documented; other entries remain mechanism-level where exact personal rules are not public.",
+      "do_not_infer_missing_rules": true
+    },
+    {
+      "rank": 5,
+      "strategy_id": "GSR_AT_005",
+      "trader": "Turtle/Donchian/Seykota family",
+      "strategy_name": "Turtle Volatility Position Sizing",
+      "family": "Trend Following",
+      "rule_precision": "documented_framework",
+      "capture_status": "READY_FOR_SOURCE_CAPTURE",
+      "required_capture_fields": [
+        "entry_condition",
+        "exit_condition",
+        "stop_logic",
+        "target_logic",
+        "timeframe",
+        "execution_model",
+        "cost_model"
+      ],
+      "source_basis": "Turtle rules are publicly documented; other entries remain mechanism-level where exact personal rules are not public.",
+      "do_not_infer_missing_rules": true
+    },
+    {
+      "rank": 6,
+      "strategy_id": "GSR_AT_006",
+      "trader": "Turtle/Donchian/Seykota family",
+      "strategy_name": "Turtle 2N Initial Stop",
+      "family": "Trend Following",
+      "rule_precision": "documented_framework",
+      "capture_status": "READY_FOR_SOURCE_CAPTURE",
+      "required_capture_fields": [
+        "entry_condition",
+        "exit_condition",
+        "stop_logic",
+        "target_logic",
+        "timeframe",
+        "execution_model",
+        "cost_model"
+      ],
+      "source_basis": "Turtle rules are publicly documented; other entries remain mechanism-level where exact personal rules are not public.",
+      "do_not_infer_missing_rules": true
+    },
+    {
+      "rank": 7,
+      "strategy_id": "GSR_AT_007",
+      "trader": "Turtle/Donchian/Seykota family",
+      "strategy_name": "Turtle S1 Opposite Breakout Exit",
+      "family": "Trend Following",
+      "rule_precision": "documented_framework",
+      "capture_status": "READY_FOR_SOURCE_CAPTURE",
+      "required_capture_fields": [
+        "entry_condition",
+        "exit_condition",
+        "stop_logic",
+        "target_logic",
+        "timeframe",
+        "execution_model",
+        "cost_model"
+      ],
+      "source_basis": "Turtle rules are publicly documented; other entries remain mechanism-level where exact personal rules are not public.",
+      "do_not_infer_missing_rules": true
+    },
+    {
+      "rank": 8,
+      "strategy_id": "GSR_AT_008",
+      "trader": "Turtle/Donchian/Seykota family",
+      "strategy_name": "Turtle S2 Opposite Breakout Exit",
+      "family": "Trend Following",
+      "rule_precision": "documented_framework",
+      "capture_status": "READY_FOR_SOURCE_CAPTURE",
+      "required_capture_fields": [
+        "entry_condition",
+        "exit_condition",
+        "stop_logic",
+        "target_logic",
+        "timeframe",
+        "execution_model",
+        "cost_model"
+      ],
+      "source_basis": "Turtle rules are publicly documented; other entries remain mechanism-level where exact personal rules are not public.",
+      "do_not_infer_missing_rules": true
+    },
+    {
+      "rank": 9,
+      "strategy_id": "GSR_AT_009",
+      "trader": "Turtle/Donchian/Seykota family",
+      "strategy_name": "Turtle Pyramiding",
+      "family": "Trend Following",
+      "rule_precision": "documented_framework",
+      "capture_status": "READY_FOR_SOURCE_CAPTURE",
+      "required_capture_fields": [
+        "entry_condition",
+        "exit_condition",
+        "stop_logic",
+        "target_logic",
+        "timeframe",
+        "execution_model",
+        "cost_model"
+      ],
+      "source_basis": "Turtle rules are publicly documented; other entries remain mechanism-level where exact personal rules are not public.",
+      "do_not_infer_missing_rules": true
+    },
+    {
+      "rank": 10,
+      "strategy_id": "GSR_AT_010",
+      "trader": "Turtle/Donchian/Seykota family",
+      "strategy_name": "Donchian Channel Breakout",
+      "family": "Trend Following",
+      "rule_precision": "documented_framework",
+      "capture_status": "READY_FOR_SOURCE_CAPTURE",
+      "required_capture_fields": [
+        "entry_condition",
+        "exit_condition",
+        "stop_logic",
+        "target_logic",
+        "timeframe",
+        "execution_model",
+        "cost_model"
+      ],
+      "source_basis": "Turtle rules are publicly documented; other entries remain mechanism-level where exact personal rules are not public.",
+      "do_not_infer_missing_rules": true
+    },
+    {
+      "rank": 11,
+      "strategy_id": "GSR_AT_011",
+      "trader": "Turtle/Donchian/Seykota family",
+      "strategy_name": "Curtis Faith Turtle",
+      "family": "Trend Following",
+      "rule_precision": "documented_framework",
+      "capture_status": "READY_FOR_SOURCE_CAPTURE",
+      "required_capture_fields": [
+        "entry_condition",
+        "exit_condition",
+        "stop_logic",
+        "target_logic",
+        "timeframe",
+        "execution_model",
+        "cost_model"
+      ],
+      "source_basis": "Turtle rules are publicly documented; other entries remain mechanism-level where exact personal rules are not public.",
+      "do_not_infer_missing_rules": true
+    },
+    {
+      "rank": 12,
+      "strategy_id": "GSR_AT_012",
+      "trader": "Turtle/Donchian/Seykota family",
+      "strategy_name": "Seykota Trend Following",
+      "family": "Trend Following",
+      "rule_precision": "documented_framework",
+      "capture_status": "READY_FOR_SOURCE_CAPTURE",
+      "required_capture_fields": [
+        "entry_condition",
+        "exit_condition",
+        "stop_logic",
+        "target_logic",
+        "timeframe",
+        "execution_model",
+        "cost_model"
+      ],
+      "source_basis": "Turtle rules are publicly documented; other entries remain mechanism-level where exact personal rules are not public.",
+      "do_not_infer_missing_rules": true
+    },
+    {
+      "rank": 13,
+      "strategy_id": "GSR_AT_013",
+      "trader": "Turtle/Donchian/Seykota family",
+      "strategy_name": "Hite Systematic Trend",
+      "family": "Trend Following",
+      "rule_precision": "documented_framework",
+      "capture_status": "READY_FOR_SOURCE_CAPTURE",
+      "required_capture_fields": [
+        "entry_condition",
+        "exit_condition",
+        "stop_logic",
+        "target_logic",
+        "timeframe",
+        "execution_model",
+        "cost_model"
+      ],
+      "source_basis": "Turtle rules are publicly documented; other entries remain mechanism-level where exact personal rules are not public.",
+      "do_not_infer_missing_rules": true
+    },
+    {
+      "rank": 14,
+      "strategy_id": "GSR_AT_014",
+      "trader": "Turtle/Donchian/Seykota family",
+      "strategy_name": "Dunn Trend Following",
+      "family": "Trend Following",
+      "rule_precision": "documented_framework",
+      "capture_status": "READY_FOR_SOURCE_CAPTURE",
+      "required_capture_fields": [
+        "entry_condition",
+        "exit_condition",
+        "stop_logic",
+        "target_logic",
+        "timeframe",
+        "execution_model",
+        "cost_model"
+      ],
+      "source_basis": "Turtle rules are publicly documented; other entries remain mechanism-level where exact personal rules are not public.",
+      "do_not_infer_missing_rules": true
+    },
+    {
+      "rank": 15,
+      "strategy_id": "GSR_AT_015",
+      "trader": "Turtle/Donchian/Seykota family",
+      "strategy_name": "Harding Managed Futures Trend",
+      "family": "Trend Following",
+      "rule_precision": "documented_framework",
+      "capture_status": "READY_FOR_SOURCE_CAPTURE",
+      "required_capture_fields": [
+        "entry_condition",
+        "exit_condition",
+        "stop_logic",
+        "target_logic",
+        "timeframe",
+        "execution_model",
+        "cost_model"
+      ],
+      "source_basis": "Turtle rules are publicly documented; other entries remain mechanism-level where exact personal rules are not public.",
+      "do_not_infer_missing_rules": true
+    },
+    {
+      "rank": 16,
+      "strategy_id": "GSR_AT_016",
+      "trader": "Turtle/Donchian/Seykota family",
+      "strategy_name": "Clenow Momentum Trend",
+      "family": "Trend Following",
+      "rule_precision": "documented_framework",
+      "capture_status": "READY_FOR_SOURCE_CAPTURE",
+      "required_capture_fields": [
+        "entry_condition",
+        "exit_condition",
+        "stop_logic",
+        "target_logic",
+        "timeframe",
+        "execution_model",
+        "cost_model"
+      ],
+      "source_basis": "Turtle rules are publicly documented; other entries remain mechanism-level where exact personal rules are not public.",
+      "do_not_infer_missing_rules": true
+    },
+    {
+      "rank": 17,
+      "strategy_id": "GSR_AT_017",
+      "trader": "O'Neil/Minervini/Darvas family",
+      "strategy_name": "O'Neil CAN SLIM Leader Screen",
+      "family": "Growth Momentum",
+      "rule_precision": "documented_framework",
+      "capture_status": "READY_FOR_SOURCE_CAPTURE",
+      "required_capture_fields": [
+        "entry_condition",
+        "exit_condition",
+        "stop_logic",
+        "target_logic",
+        "timeframe",
+        "execution_model",
+        "cost_model"
+      ],
+      "source_basis": "Publicly documented growth/momentum frameworks; exact thresholds remain source-version dependent.",
+      "do_not_infer_missing_rules": true
+    },
+    {
+      "rank": 18,
+      "strategy_id": "GSR_AT_018",
+      "trader": "O'Neil/Minervini/Darvas family",
+      "strategy_name": "O'Neil Cup With Handle Breakout",
+      "family": "Growth Momentum",
+      "rule_precision": "documented_framework",
+      "capture_status": "READY_FOR_SOURCE_CAPTURE",
+      "required_capture_fields": [
+        "entry_condition",
+        "exit_condition",
+        "stop_logic",
+        "target_logic",
+        "timeframe",
+        "execution_model",
+        "cost_model"
+      ],
+      "source_basis": "Publicly documented growth/momentum frameworks; exact thresholds remain source-version dependent.",
+      "do_not_infer_missing_rules": true
+    },
+    {
+      "rank": 19,
+      "strategy_id": "GSR_AT_019",
+      "trader": "O'Neil/Minervini/Darvas family",
+      "strategy_name": "O'Neil Volume Breakout Confirmation",
+      "family": "Growth Momentum",
+      "rule_precision": "documented_framework",
+      "capture_status": "READY_FOR_SOURCE_CAPTURE",
+      "required_capture_fields": [
+        "entry_condition",
+        "exit_condition",
+        "stop_logic",
+        "target_logic",
+        "timeframe",
+        "execution_model",
+        "cost_model"
+      ],
+      "source_basis": "Publicly documented growth/momentum frameworks; exact thresholds remain source-version dependent.",
+      "do_not_infer_missing_rules": true
+    },
+    {
+      "rank": 20,
+      "strategy_id": "GSR_AT_020",
+      "trader": "O'Neil/Minervini/Darvas family",
+      "strategy_name": "O'Neil 7-8% Loss Rule",
+      "family": "Growth Momentum",
+      "rule_precision": "documented_framework",
+      "capture_status": "READY_FOR_SOURCE_CAPTURE",
+      "required_capture_fields": [
+        "entry_condition",
+        "exit_condition",
+        "stop_logic",
+        "target_logic",
+        "timeframe",
+        "execution_model",
+        "cost_model"
+      ],
+      "source_basis": "Publicly documented growth/momentum frameworks; exact thresholds remain source-version dependent.",
+      "do_not_infer_missing_rules": true
+    },
+    {
+      "rank": 21,
+      "strategy_id": "GSR_AT_021",
+      "trader": "O'Neil/Minervini/Darvas family",
+      "strategy_name": "O'Neil Follow-Through Day Context",
+      "family": "Growth Momentum",
+      "rule_precision": "documented_framework",
+      "capture_status": "READY_FOR_SOURCE_CAPTURE",
+      "required_capture_fields": [
+        "entry_condition",
+        "exit_condition",
+        "stop_logic",
+        "target_logic",
+        "timeframe",
+        "execution_model",
+        "cost_model"
+      ],
+      "source_basis": "Publicly documented growth/momentum frameworks; exact thresholds remain source-version dependent.",
+      "do_not_infer_missing_rules": true
+    },
+    {
+      "rank": 22,
+      "strategy_id": "GSR_AT_022",
+      "trader": "O'Neil/Minervini/Darvas family",
+      "strategy_name": "Minervini Trend Template",
+      "family": "Growth Momentum",
+      "rule_precision": "documented_framework",
+      "capture_status": "READY_FOR_SOURCE_CAPTURE",
+      "required_capture_fields": [
+        "entry_condition",
+        "exit_condition",
+        "stop_logic",
+        "target_logic",
+        "timeframe",
+        "execution_model",
+        "cost_model"
+      ],
+      "source_basis": "Publicly documented growth/momentum frameworks; exact thresholds remain source-version dependent.",
+      "do_not_infer_missing_rules": true
+    },
+    {
+      "rank": 23,
+      "strategy_id": "GSR_AT_023",
+      "trader": "O'Neil/Minervini/Darvas family",
+      "strategy_name": "Minervini VCP",
+      "family": "Growth Momentum",
+      "rule_precision": "documented_framework",
+      "capture_status": "READY_FOR_SOURCE_CAPTURE",
+      "required_capture_fields": [
+        "entry_condition",
+        "exit_condition",
+        "stop_logic",
+        "target_logic",
+        "timeframe",
+        "execution_model",
+        "cost_model"
+      ],
+      "source_basis": "Publicly documented growth/momentum frameworks; exact thresholds remain source-version dependent.",
+      "do_not_infer_missing_rules": true
+    },
+    {
+      "rank": 24,
+      "strategy_id": "GSR_AT_024",
+      "trader": "O'Neil/Minervini/Darvas family",
+      "strategy_name": "Minervini VCP Pivot Breakout",
+      "family": "Growth Momentum",
+      "rule_precision": "documented_framework",
+      "capture_status": "READY_FOR_SOURCE_CAPTURE",
+      "required_capture_fields": [
+        "entry_condition",
+        "exit_condition",
+        "stop_logic",
+        "target_logic",
+        "timeframe",
+        "execution_model",
+        "cost_model"
+      ],
+      "source_basis": "Publicly documented growth/momentum frameworks; exact thresholds remain source-version dependent.",
+      "do_not_infer_missing_rules": true
+    },
+    {
+      "rank": 25,
+      "strategy_id": "GSR_AT_025",
+      "trader": "O'Neil/Minervini/Darvas family",
+      "strategy_name": "Minervini Stage-2 Leader",
+      "family": "Growth Momentum",
+      "rule_precision": "documented_framework",
+      "capture_status": "READY_FOR_SOURCE_CAPTURE",
+      "required_capture_fields": [
+        "entry_condition",
+        "exit_condition",
+        "stop_logic",
+        "target_logic",
+        "timeframe",
+        "execution_model",
+        "cost_model"
+      ],
+      "source_basis": "Publicly documented growth/momentum frameworks; exact thresholds remain source-version dependent.",
+      "do_not_infer_missing_rules": true
+    },
+    {
+      "rank": 26,
+      "strategy_id": "GSR_AT_026",
+      "trader": "O'Neil/Minervini/Darvas family",
+      "strategy_name": "Minervini SEPA",
+      "family": "Growth Momentum",
+      "rule_precision": "documented_framework",
+      "capture_status": "READY_FOR_SOURCE_CAPTURE",
+      "required_capture_fields": [
+        "entry_condition",
+        "exit_condition",
+        "stop_logic",
+        "target_logic",
+        "timeframe",
+        "execution_model",
+        "cost_model"
+      ],
+      "source_basis": "Publicly documented growth/momentum frameworks; exact thresholds remain source-version dependent.",
+      "do_not_infer_missing_rules": true
+    },
+    {
+      "rank": 27,
+      "strategy_id": "GSR_AT_027",
+      "trader": "O'Neil/Minervini/Darvas family",
+      "strategy_name": "Minervini Tight-Range Breakout",
+      "family": "Growth Momentum",
+      "rule_precision": "documented_framework",
+      "capture_status": "READY_FOR_SOURCE_CAPTURE",
+      "required_capture_fields": [
+        "entry_condition",
+        "exit_condition",
+        "stop_logic",
+        "target_logic",
+        "timeframe",
+        "execution_model",
+        "cost_model"
+      ],
+      "source_basis": "Publicly documented growth/momentum frameworks; exact thresholds remain source-version dependent.",
+      "do_not_infer_missing_rules": true
+    },
+    {
+      "rank": 28,
+      "strategy_id": "GSR_AT_028",
+      "trader": "O'Neil/Minervini/Darvas family",
+      "strategy_name": "Darvas Box Breakout",
+      "family": "Growth Momentum",
+      "rule_precision": "documented_framework",
+      "capture_status": "READY_FOR_SOURCE_CAPTURE",
+      "required_capture_fields": [
+        "entry_condition",
+        "exit_condition",
+        "stop_logic",
+        "target_logic",
+        "timeframe",
+        "execution_model",
+        "cost_model"
+      ],
+      "source_basis": "Publicly documented growth/momentum frameworks; exact thresholds remain source-version dependent.",
+      "do_not_infer_missing_rules": true
+    },
+    {
+      "rank": 29,
+      "strategy_id": "GSR_AT_029",
+      "trader": "O'Neil/Minervini/Darvas family",
+      "strategy_name": "Darvas Stop Discipline",
+      "family": "Growth Momentum",
+      "rule_precision": "documented_framework",
+      "capture_status": "READY_FOR_SOURCE_CAPTURE",
+      "required_capture_fields": [
+        "entry_condition",
+        "exit_condition",
+        "stop_logic",
+        "target_logic",
+        "timeframe",
+        "execution_model",
+        "cost_model"
+      ],
+      "source_basis": "Publicly documented growth/momentum frameworks; exact thresholds remain source-version dependent.",
+      "do_not_infer_missing_rules": true
+    },
+    {
+      "rank": 30,
+      "strategy_id": "GSR_AT_030",
+      "trader": "O'Neil/Minervini/Darvas family",
+      "strategy_name": "David Ryan Growth Breakout",
+      "family": "Growth Momentum",
+      "rule_precision": "documented_framework",
+      "capture_status": "READY_FOR_SOURCE_CAPTURE",
+      "required_capture_fields": [
+        "entry_condition",
+        "exit_condition",
+        "stop_logic",
+        "target_logic",
+        "timeframe",
+        "execution_model",
+        "cost_model"
+      ],
+      "source_basis": "Publicly documented growth/momentum frameworks; exact thresholds remain source-version dependent.",
+      "do_not_infer_missing_rules": true
+    },
+    {
+      "rank": 31,
+      "strategy_id": "GSR_AT_031",
+      "trader": "Raschke/Connors family",
+      "strategy_name": "Raschke Opening Range Breakout",
+      "family": "Short-Term Mean Reversion",
+      "rule_precision": "documented_framework",
+      "capture_status": "READY_FOR_SOURCE_CAPTURE",
+      "required_capture_fields": [
+        "entry_condition",
+        "exit_condition",
+        "stop_logic",
+        "target_logic",
+        "timeframe",
+        "execution_model",
+        "cost_model"
+      ],
+      "source_basis": "Public strategy literature; exact implementation must be tied to the named source/version.",
+      "do_not_infer_missing_rules": true
+    },
+    {
+      "rank": 32,
+      "strategy_id": "GSR_AT_032",
+      "trader": "Raschke/Connors family",
+      "strategy_name": "Raschke Anti",
+      "family": "Short-Term Mean Reversion",
+      "rule_precision": "documented_framework",
+      "capture_status": "READY_FOR_SOURCE_CAPTURE",
+      "required_capture_fields": [
+        "entry_condition",
+        "exit_condition",
+        "stop_logic",
+        "target_logic",
+        "timeframe",
+        "execution_model",
+        "cost_model"
+      ],
+      "source_basis": "Public strategy literature; exact implementation must be tied to the named source/version.",
+      "do_not_infer_missing_rules": true
+    },
+    {
+      "rank": 33,
+      "strategy_id": "GSR_AT_033",
+      "trader": "Raschke/Connors family",
+      "strategy_name": "Raschke Holy Grail",
+      "family": "Short-Term Mean Reversion",
+      "rule_precision": "documented_framework",
+      "capture_status": "READY_FOR_SOURCE_CAPTURE",
+      "required_capture_fields": [
+        "entry_condition",
+        "exit_condition",
+        "stop_logic",
+        "target_logic",
+        "timeframe",
+        "execution_model",
+        "cost_model"
+      ],
+      "source_basis": "Public strategy literature; exact implementation must be tied to the named source/version.",
+      "do_not_infer_missing_rules": true
+    },
+    {
+      "rank": 34,
+      "strategy_id": "GSR_AT_034",
+      "trader": "Raschke/Connors family",
+      "strategy_name": "Raschke Turtle Soup",
+      "family": "Short-Term Mean Reversion",
+      "rule_precision": "documented_framework",
+      "capture_status": "READY_FOR_SOURCE_CAPTURE",
+      "required_capture_fields": [
+        "entry_condition",
+        "exit_condition",
+        "stop_logic",
+        "target_logic",
+        "timeframe",
+        "execution_model",
+        "cost_model"
+      ],
+      "source_basis": "Public strategy literature; exact implementation must be tied to the named source/version.",
+      "do_not_infer_missing_rules": true
+    },
+    {
+      "rank": 35,
+      "strategy_id": "GSR_AT_035",
+      "trader": "Raschke/Connors family",
+      "strategy_name": "Raschke 3-Day Pattern",
+      "family": "Short-Term Mean Reversion",
+      "rule_precision": "documented_framework",
+      "capture_status": "READY_FOR_SOURCE_CAPTURE",
+      "required_capture_fields": [
+        "entry_condition",
+        "exit_condition",
+        "stop_logic",
+        "target_logic",
+        "timeframe",
+        "execution_model",
+        "cost_model"
+      ],
+      "source_basis": "Public strategy literature; exact implementation must be tied to the named source/version.",
+      "do_not_infer_missing_rules": true
+    },
+    {
+      "rank": 36,
+      "strategy_id": "GSR_AT_036",
+      "trader": "Raschke/Connors family",
+      "strategy_name": "Raschke Day-Type Filter",
+      "family": "Short-Term Mean Reversion",
+      "rule_precision": "documented_framework",
+      "capture_status": "READY_FOR_SOURCE_CAPTURE",
+      "required_capture_fields": [
+        "entry_condition",
+        "exit_condition",
+        "stop_logic",
+        "target_logic",
+        "timeframe",
+        "execution_model",
+        "cost_model"
+      ],
+      "source_basis": "Public strategy literature; exact implementation must be tied to the named source/version.",
+      "do_not_infer_missing_rules": true
+    },
+    {
+      "rank": 37,
+      "strategy_id": "GSR_AT_037",
+      "trader": "Raschke/Connors family",
+      "strategy_name": "Raschke Trade Location",
+      "family": "Short-Term Mean Reversion",
+      "rule_precision": "documented_framework",
+      "capture_status": "READY_FOR_SOURCE_CAPTURE",
+      "required_capture_fields": [
+        "entry_condition",
+        "exit_condition",
+        "stop_logic",
+        "target_logic",
+        "timeframe",
+        "execution_model",
+        "cost_model"
+      ],
+      "source_basis": "Public strategy literature; exact implementation must be tied to the named source/version.",
+      "do_not_infer_missing_rules": true
+    },
+    {
+      "rank": 38,
+      "strategy_id": "GSR_AT_038",
+      "trader": "Raschke/Connors family",
+      "strategy_name": "Connors 2-Period RSI Long",
+      "family": "Short-Term Mean Reversion",
+      "rule_precision": "documented_framework",
+      "capture_status": "READY_FOR_SOURCE_CAPTURE",
+      "required_capture_fields": [
+        "entry_condition",
+        "exit_condition",
+        "stop_logic",
+        "target_logic",
+        "timeframe",
+        "execution_model",
+        "cost_model"
+      ],
+      "source_basis": "Public strategy literature; exact implementation must be tied to the named source/version.",
+      "do_not_infer_missing_rules": true
+    },
+    {
+      "rank": 39,
+      "strategy_id": "GSR_AT_039",
+      "trader": "Raschke/Connors family",
+      "strategy_name": "Connors 2-Period RSI Short",
+      "family": "Short-Term Mean Reversion",
+      "rule_precision": "documented_framework",
+      "capture_status": "READY_FOR_SOURCE_CAPTURE",
+      "required_capture_fields": [
+        "entry_condition",
+        "exit_condition",
+        "stop_logic",
+        "target_logic",
+        "timeframe",
+        "execution_model",
+        "cost_model"
+      ],
+      "source_basis": "Public strategy literature; exact implementation must be tied to the named source/version.",
+      "do_not_infer_missing_rules": true
+    },
+    {
+      "rank": 40,
+      "strategy_id": "GSR_AT_040",
+      "trader": "Raschke/Connors family",
+      "strategy_name": "Connors RSI(3) Pullback",
+      "family": "Short-Term Mean Reversion",
+      "rule_precision": "documented_framework",
+      "capture_status": "READY_FOR_SOURCE_CAPTURE",
+      "required_capture_fields": [
+        "entry_condition",
+        "exit_condition",
+        "stop_logic",
+        "target_logic",
+        "timeframe",
+        "execution_model",
+        "cost_model"
+      ],
+      "source_basis": "Public strategy literature; exact implementation must be tied to the named source/version.",
+      "do_not_infer_missing_rules": true
+    },
+    {
+      "rank": 41,
+      "strategy_id": "GSR_AT_041",
+      "trader": "Raschke/Connors family",
+      "strategy_name": "Connors Streak Reversal",
+      "family": "Short-Term Mean Reversion",
+      "rule_precision": "documented_framework",
+      "capture_status": "READY_FOR_SOURCE_CAPTURE",
+      "required_capture_fields": [
+        "entry_condition",
+        "exit_condition",
+        "stop_logic",
+        "target_logic",
+        "timeframe",
+        "execution_model",
+        "cost_model"
+      ],
+      "source_basis": "Public strategy literature; exact implementation must be tied to the named source/version.",
+      "do_not_infer_missing_rules": true
+    },
+    {
+      "rank": 42,
+      "strategy_id": "GSR_AT_042",
+      "trader": "Raschke/Connors family",
+      "strategy_name": "Connors PercentRank",
+      "family": "Short-Term Mean Reversion",
+      "rule_precision": "documented_framework",
+      "capture_status": "READY_FOR_SOURCE_CAPTURE",
+      "required_capture_fields": [
+        "entry_condition",
+        "exit_condition",
+        "stop_logic",
+        "target_logic",
+        "timeframe",
+        "execution_model",
+        "cost_model"
+      ],
+      "source_basis": "Public strategy literature; exact implementation must be tied to the named source/version.",
+      "do_not_infer_missing_rules": true
+    },
+    {
+      "rank": 43,
+      "strategy_id": "GSR_AT_043",
+      "trader": "Options premium-selling family",
+      "strategy_name": "Short Put",
+      "family": "Options Volatility",
+      "rule_precision": "mechanism_only",
+      "capture_status": "NOT_READY_NEEDS_SOURCE_PRECISION",
+      "required_capture_fields": [
+        "source_version",
+        "exact_parameters",
+        "entry_condition",
+        "exit_condition"
+      ],
+      "source_basis": "Public options education; exact trader-specific parameters must not be inferred.",
+      "do_not_infer_missing_rules": true
+    },
+    {
+      "rank": 44,
+      "strategy_id": "GSR_AT_044",
+      "trader": "Options premium-selling family",
+      "strategy_name": "Cash-Secured Put",
+      "family": "Options Volatility",
+      "rule_precision": "mechanism_only",
+      "capture_status": "NOT_READY_NEEDS_SOURCE_PRECISION",
+      "required_capture_fields": [
+        "source_version",
+        "exact_parameters",
+        "entry_condition",
+        "exit_condition"
+      ],
+      "source_basis": "Public options education; exact trader-specific parameters must not be inferred.",
+      "do_not_infer_missing_rules": true
+    },
+    {
+      "rank": 45,
+      "strategy_id": "GSR_AT_045",
+      "trader": "Options premium-selling family",
+      "strategy_name": "Covered Call",
+      "family": "Options Volatility",
+      "rule_precision": "mechanism_only",
+      "capture_status": "NOT_READY_NEEDS_SOURCE_PRECISION",
+      "required_capture_fields": [
+        "source_version",
+        "exact_parameters",
+        "entry_condition",
+        "exit_condition"
+      ],
+      "source_basis": "Public options education; exact trader-specific parameters must not be inferred.",
+      "do_not_infer_missing_rules": true
+    },
+    {
+      "rank": 46,
+      "strategy_id": "GSR_AT_046",
+      "trader": "Options premium-selling family",
+      "strategy_name": "Bull Put Spread",
+      "family": "Options Volatility",
+      "rule_precision": "mechanism_only",
+      "capture_status": "NOT_READY_NEEDS_SOURCE_PRECISION",
+      "required_capture_fields": [
+        "source_version",
+        "exact_parameters",
+        "entry_condition",
+        "exit_condition"
+      ],
+      "source_basis": "Public options education; exact trader-specific parameters must not be inferred.",
+      "do_not_infer_missing_rules": true
+    },
+    {
+      "rank": 47,
+      "strategy_id": "GSR_AT_047",
+      "trader": "Options premium-selling family",
+      "strategy_name": "Bear Call Spread",
+      "family": "Options Volatility",
+      "rule_precision": "mechanism_only",
+      "capture_status": "NOT_READY_NEEDS_SOURCE_PRECISION",
+      "required_capture_fields": [
+        "source_version",
+        "exact_parameters",
+        "entry_condition",
+        "exit_condition"
+      ],
+      "source_basis": "Public options education; exact trader-specific parameters must not be inferred.",
+      "do_not_infer_missing_rules": true
+    },
+    {
+      "rank": 48,
+      "strategy_id": "GSR_AT_048",
+      "trader": "Options premium-selling family",
+      "strategy_name": "Iron Condor",
+      "family": "Options Volatility",
+      "rule_precision": "mechanism_only",
+      "capture_status": "NOT_READY_NEEDS_SOURCE_PRECISION",
+      "required_capture_fields": [
+        "source_version",
+        "exact_parameters",
+        "entry_condition",
+        "exit_condition"
+      ],
+      "source_basis": "Public options education; exact trader-specific parameters must not be inferred.",
+      "do_not_infer_missing_rules": true
+    },
+    {
+      "rank": 49,
+      "strategy_id": "GSR_AT_049",
+      "trader": "Options premium-selling family",
+      "strategy_name": "Short Strangle",
+      "family": "Options Volatility",
+      "rule_precision": "mechanism_only",
+      "capture_status": "NOT_READY_NEEDS_SOURCE_PRECISION",
+      "required_capture_fields": [
+        "source_version",
+        "exact_parameters",
+        "entry_condition",
+        "exit_condition"
+      ],
+      "source_basis": "Public options education; exact trader-specific parameters must not be inferred.",
+      "do_not_infer_missing_rules": true
+    },
+    {
+      "rank": 50,
+      "strategy_id": "GSR_AT_050",
+      "trader": "Options premium-selling family",
+      "strategy_name": "Short Straddle",
+      "family": "Options Volatility",
+      "rule_precision": "mechanism_only",
+      "capture_status": "NOT_READY_NEEDS_SOURCE_PRECISION",
+      "required_capture_fields": [
+        "source_version",
+        "exact_parameters",
+        "entry_condition",
+        "exit_condition"
+      ],
+      "source_basis": "Public options education; exact trader-specific parameters must not be inferred.",
+      "do_not_infer_missing_rules": true
+    },
+    {
+      "rank": 51,
+      "strategy_id": "GSR_AT_051",
+      "trader": "Options premium-selling family",
+      "strategy_name": "IV Rank Premium Sale",
+      "family": "Options Volatility",
+      "rule_precision": "mechanism_only",
+      "capture_status": "NOT_READY_NEEDS_SOURCE_PRECISION",
+      "required_capture_fields": [
+        "source_version",
+        "exact_parameters",
+        "entry_condition",
+        "exit_condition"
+      ],
+      "source_basis": "Public options education; exact trader-specific parameters must not be inferred.",
+      "do_not_infer_missing_rules": true
+    },
+    {
+      "rank": 52,
+      "strategy_id": "GSR_AT_052",
+      "trader": "Options premium-selling family",
+      "strategy_name": "IV Crush Event Sale",
+      "family": "Options Volatility",
+      "rule_precision": "mechanism_only",
+      "capture_status": "NOT_READY_NEEDS_SOURCE_PRECISION",
+      "required_capture_fields": [
+        "source_version",
+        "exact_parameters",
+        "entry_condition",
+        "exit_condition"
+      ],
+      "source_basis": "Public options education; exact trader-specific parameters must not be inferred.",
+      "do_not_infer_missing_rules": true
+    },
+    {
+      "rank": 53,
+      "strategy_id": "GSR_AT_053",
+      "trader": "Options premium-selling family",
+      "strategy_name": "Defined-Risk Earnings Premium",
+      "family": "Options Volatility",
+      "rule_precision": "mechanism_only",
+      "capture_status": "NOT_READY_NEEDS_SOURCE_PRECISION",
+      "required_capture_fields": [
+        "source_version",
+        "exact_parameters",
+        "entry_condition",
+        "exit_condition"
+      ],
+      "source_basis": "Public options education; exact trader-specific parameters must not be inferred.",
+      "do_not_infer_missing_rules": true
+    },
+    {
+      "rank": 54,
+      "strategy_id": "GSR_AT_054",
+      "trader": "Options premium-selling family",
+      "strategy_name": "Delta-Targeted Premium Sale",
+      "family": "Options Volatility",
+      "rule_precision": "mechanism_only",
+      "capture_status": "NOT_READY_NEEDS_SOURCE_PRECISION",
+      "required_capture_fields": [
+        "source_version",
+        "exact_parameters",
+        "entry_condition",
+        "exit_condition"
+      ],
+      "source_basis": "Public options education; exact trader-specific parameters must not be inferred.",
+      "do_not_infer_missing_rules": true
+    },
+    {
+      "rank": 55,
+      "strategy_id": "GSR_AT_055",
+      "trader": "Options premium-selling family",
+      "strategy_name": "Theta Harvest",
+      "family": "Options Volatility",
+      "rule_precision": "mechanism_only",
+      "capture_status": "NOT_READY_NEEDS_SOURCE_PRECISION",
+      "required_capture_fields": [
+        "source_version",
+        "exact_parameters",
+        "entry_condition",
+        "exit_condition"
+      ],
+      "source_basis": "Public options education; exact trader-specific parameters must not be inferred.",
+      "do_not_infer_missing_rules": true
+    },
+    {
+      "rank": 56,
+      "strategy_id": "GSR_AT_056",
+      "trader": "Options premium-selling family",
+      "strategy_name": "Probability-Based Spread",
+      "family": "Options Volatility",
+      "rule_precision": "mechanism_only",
+      "capture_status": "NOT_READY_NEEDS_SOURCE_PRECISION",
+      "required_capture_fields": [
+        "source_version",
+        "exact_parameters",
+        "entry_condition",
+        "exit_condition"
+      ],
+      "source_basis": "Public options education; exact trader-specific parameters must not be inferred.",
+      "do_not_infer_missing_rules": true
+    },
+    {
+      "rank": 57,
+      "strategy_id": "GSR_AT_057",
+      "trader": "Options premium-selling family",
+      "strategy_name": "Premium Management Exit",
+      "family": "Options Volatility",
+      "rule_precision": "mechanism_only",
+      "capture_status": "NOT_READY_NEEDS_SOURCE_PRECISION",
+      "required_capture_fields": [
+        "source_version",
+        "exact_parameters",
+        "entry_condition",
+        "exit_condition"
+      ],
+      "source_basis": "Public options education; exact trader-specific parameters must not be inferred.",
+      "do_not_infer_missing_rules": true
+    },
+    {
+      "rank": 58,
+      "strategy_id": "GSR_AT_058",
+      "trader": "ICT family",
+      "strategy_name": "Liquidity Sweep",
+      "family": "Market Structure / Liquidity",
+      "rule_precision": "mechanism_only",
+      "capture_status": "NOT_READY_NEEDS_SOURCE_PRECISION",
+      "required_capture_fields": [
+        "source_version",
+        "exact_parameters",
+        "entry_condition",
+        "exit_condition"
+      ],
+      "source_basis": "Public educational material; exact ICT/community interpretations are not treated as authoritative.",
+      "do_not_infer_missing_rules": true
+    },
+    {
+      "rank": 59,
+      "strategy_id": "GSR_AT_059",
+      "trader": "ICT family",
+      "strategy_name": "Market Structure Shift",
+      "family": "Market Structure / Liquidity",
+      "rule_precision": "mechanism_only",
+      "capture_status": "NOT_READY_NEEDS_SOURCE_PRECISION",
+      "required_capture_fields": [
+        "source_version",
+        "exact_parameters",
+        "entry_condition",
+        "exit_condition"
+      ],
+      "source_basis": "Public educational material; exact ICT/community interpretations are not treated as authoritative.",
+      "do_not_infer_missing_rules": true
+    },
+    {
+      "rank": 60,
+      "strategy_id": "GSR_AT_060",
+      "trader": "ICT family",
+      "strategy_name": "Fair Value Gap",
+      "family": "Market Structure / Liquidity",
+      "rule_precision": "mechanism_only",
+      "capture_status": "NOT_READY_NEEDS_SOURCE_PRECISION",
+      "required_capture_fields": [
+        "source_version",
+        "exact_parameters",
+        "entry_condition",
+        "exit_condition"
+      ],
+      "source_basis": "Public educational material; exact ICT/community interpretations are not treated as authoritative.",
+      "do_not_infer_missing_rules": true
+    },
+    {
+      "rank": 61,
+      "strategy_id": "GSR_AT_061",
+      "trader": "ICT family",
+      "strategy_name": "Displacement",
+      "family": "Market Structure / Liquidity",
+      "rule_precision": "mechanism_only",
+      "capture_status": "NOT_READY_NEEDS_SOURCE_PRECISION",
+      "required_capture_fields": [
+        "source_version",
+        "exact_parameters",
+        "entry_condition",
+        "exit_condition"
+      ],
+      "source_basis": "Public educational material; exact ICT/community interpretations are not treated as authoritative.",
+      "do_not_infer_missing_rules": true
+    },
+    {
+      "rank": 62,
+      "strategy_id": "GSR_AT_062",
+      "trader": "ICT family",
+      "strategy_name": "Order Block",
+      "family": "Market Structure / Liquidity",
+      "rule_precision": "mechanism_only",
+      "capture_status": "NOT_READY_NEEDS_SOURCE_PRECISION",
+      "required_capture_fields": [
+        "source_version",
+        "exact_parameters",
+        "entry_condition",
+        "exit_condition"
+      ],
+      "source_basis": "Public educational material; exact ICT/community interpretations are not treated as authoritative.",
+      "do_not_infer_missing_rules": true
+    },
+    {
+      "rank": 63,
+      "strategy_id": "GSR_AT_063",
+      "trader": "ICT family",
+      "strategy_name": "Breaker Block",
+      "family": "Market Structure / Liquidity",
+      "rule_precision": "mechanism_only",
+      "capture_status": "NOT_READY_NEEDS_SOURCE_PRECISION",
+      "required_capture_fields": [
+        "source_version",
+        "exact_parameters",
+        "entry_condition",
+        "exit_condition"
+      ],
+      "source_basis": "Public educational material; exact ICT/community interpretations are not treated as authoritative.",
+      "do_not_infer_missing_rules": true
+    },
+    {
+      "rank": 64,
+      "strategy_id": "GSR_AT_064",
+      "trader": "ICT family",
+      "strategy_name": "Premium Discount Array",
+      "family": "Market Structure / Liquidity",
+      "rule_precision": "mechanism_only",
+      "capture_status": "NOT_READY_NEEDS_SOURCE_PRECISION",
+      "required_capture_fields": [
+        "source_version",
+        "exact_parameters",
+        "entry_condition",
+        "exit_condition"
+      ],
+      "source_basis": "Public educational material; exact ICT/community interpretations are not treated as authoritative.",
+      "do_not_infer_missing_rules": true
+    },
+    {
+      "rank": 65,
+      "strategy_id": "GSR_AT_065",
+      "trader": "ICT family",
+      "strategy_name": "Session Timing",
+      "family": "Market Structure / Liquidity",
+      "rule_precision": "mechanism_only",
+      "capture_status": "NOT_READY_NEEDS_SOURCE_PRECISION",
+      "required_capture_fields": [
+        "source_version",
+        "exact_parameters",
+        "entry_condition",
+        "exit_condition"
+      ],
+      "source_basis": "Public educational material; exact ICT/community interpretations are not treated as authoritative.",
+      "do_not_infer_missing_rules": true
+    },
+    {
+      "rank": 66,
+      "strategy_id": "GSR_AT_066",
+      "trader": "ICT family",
+      "strategy_name": "Asian Range Liquidity",
+      "family": "Market Structure / Liquidity",
+      "rule_precision": "mechanism_only",
+      "capture_status": "NOT_READY_NEEDS_SOURCE_PRECISION",
+      "required_capture_fields": [
+        "source_version",
+        "exact_parameters",
+        "entry_condition",
+        "exit_condition"
+      ],
+      "source_basis": "Public educational material; exact ICT/community interpretations are not treated as authoritative.",
+      "do_not_infer_missing_rules": true
+    },
+    {
+      "rank": 67,
+      "strategy_id": "GSR_AT_067",
+      "trader": "ICT family",
+      "strategy_name": "London/New York Sweep",
+      "family": "Market Structure / Liquidity",
+      "rule_precision": "mechanism_only",
+      "capture_status": "NOT_READY_NEEDS_SOURCE_PRECISION",
+      "required_capture_fields": [
+        "source_version",
+        "exact_parameters",
+        "entry_condition",
+        "exit_condition"
+      ],
+      "source_basis": "Public educational material; exact ICT/community interpretations are not treated as authoritative.",
+      "do_not_infer_missing_rules": true
+    },
+    {
+      "rank": 68,
+      "strategy_id": "GSR_AT_068",
+      "trader": "ICT family",
+      "strategy_name": "FVG Retracement Entry",
+      "family": "Market Structure / Liquidity",
+      "rule_precision": "mechanism_only",
+      "capture_status": "NOT_READY_NEEDS_SOURCE_PRECISION",
+      "required_capture_fields": [
+        "source_version",
+        "exact_parameters",
+        "entry_condition",
+        "exit_condition"
+      ],
+      "source_basis": "Public educational material; exact ICT/community interpretations are not treated as authoritative.",
+      "do_not_infer_missing_rules": true
+    },
+    {
+      "rank": 69,
+      "strategy_id": "GSR_AT_069",
+      "trader": "ICT family",
+      "strategy_name": "MSS + FVG Confirmation",
+      "family": "Market Structure / Liquidity",
+      "rule_precision": "mechanism_only",
+      "capture_status": "NOT_READY_NEEDS_SOURCE_PRECISION",
+      "required_capture_fields": [
+        "source_version",
+        "exact_parameters",
+        "entry_condition",
+        "exit_condition"
+      ],
+      "source_basis": "Public educational material; exact ICT/community interpretations are not treated as authoritative.",
+      "do_not_infer_missing_rules": true
+    },
+    {
+      "rank": 70,
+      "strategy_id": "GSR_AT_070",
+      "trader": "Broader research family",
+      "strategy_name": "Elder Triple Screen",
+      "family": "Hybrid / Risk / Regime",
+      "rule_precision": "mechanism_only",
+      "capture_status": "NOT_READY_NEEDS_SOURCE_PRECISION",
+      "required_capture_fields": [
+        "source_version",
+        "exact_parameters",
+        "entry_condition",
+        "exit_condition"
+      ],
+      "source_basis": "Public books/interviews/frameworks; not treated as complete proprietary trading systems.",
+      "do_not_infer_missing_rules": true
+    },
+    {
+      "rank": 71,
+      "strategy_id": "GSR_AT_071",
+      "trader": "Broader research family",
+      "strategy_name": "Elder Impulse Context",
+      "family": "Hybrid / Risk / Regime",
+      "rule_precision": "mechanism_only",
+      "capture_status": "NOT_READY_NEEDS_SOURCE_PRECISION",
+      "required_capture_fields": [
+        "source_version",
+        "exact_parameters",
+        "entry_condition",
+        "exit_condition"
+      ],
+      "source_basis": "Public books/interviews/frameworks; not treated as complete proprietary trading systems.",
+      "do_not_infer_missing_rules": true
+    },
+    {
+      "rank": 72,
+      "strategy_id": "GSR_AT_072",
+      "trader": "Broader research family",
+      "strategy_name": "Bollinger Mean Reversion",
+      "family": "Hybrid / Risk / Regime",
+      "rule_precision": "mechanism_only",
+      "capture_status": "NOT_READY_NEEDS_SOURCE_PRECISION",
+      "required_capture_fields": [
+        "source_version",
+        "exact_parameters",
+        "entry_condition",
+        "exit_condition"
+      ],
+      "source_basis": "Public books/interviews/frameworks; not treated as complete proprietary trading systems.",
+      "do_not_infer_missing_rules": true
+    },
+    {
+      "rank": 73,
+      "strategy_id": "GSR_AT_073",
+      "trader": "Broader research family",
+      "strategy_name": "Bollinger Band Squeeze",
+      "family": "Hybrid / Risk / Regime",
+      "rule_precision": "mechanism_only",
+      "capture_status": "NOT_READY_NEEDS_SOURCE_PRECISION",
+      "required_capture_fields": [
+        "source_version",
+        "exact_parameters",
+        "entry_condition",
+        "exit_condition"
+      ],
+      "source_basis": "Public books/interviews/frameworks; not treated as complete proprietary trading systems.",
+      "do_not_infer_missing_rules": true
+    },
+    {
+      "rank": 74,
+      "strategy_id": "GSR_AT_074",
+      "trader": "Broader research family",
+      "strategy_name": "Bollinger Breakout",
+      "family": "Hybrid / Risk / Regime",
+      "rule_precision": "mechanism_only",
+      "capture_status": "NOT_READY_NEEDS_SOURCE_PRECISION",
+      "required_capture_fields": [
+        "source_version",
+        "exact_parameters",
+        "entry_condition",
+        "exit_condition"
+      ],
+      "source_basis": "Public books/interviews/frameworks; not treated as complete proprietary trading systems.",
+      "do_not_infer_missing_rules": true
+    },
+    {
+      "rank": 75,
+      "strategy_id": "GSR_AT_075",
+      "trader": "Broader research family",
+      "strategy_name": "DeMark Sequential Exhaustion",
+      "family": "Hybrid / Risk / Regime",
+      "rule_precision": "mechanism_only",
+      "capture_status": "NOT_READY_NEEDS_SOURCE_PRECISION",
+      "required_capture_fields": [
+        "source_version",
+        "exact_parameters",
+        "entry_condition",
+        "exit_condition"
+      ],
+      "source_basis": "Public books/interviews/frameworks; not treated as complete proprietary trading systems.",
+      "do_not_infer_missing_rules": true
+    },
+    {
+      "rank": 76,
+      "strategy_id": "GSR_AT_076",
+      "trader": "Broader research family",
+      "strategy_name": "DeMark Setup Count",
+      "family": "Hybrid / Risk / Regime",
+      "rule_precision": "mechanism_only",
+      "capture_status": "NOT_READY_NEEDS_SOURCE_PRECISION",
+      "required_capture_fields": [
+        "source_version",
+        "exact_parameters",
+        "entry_condition",
+        "exit_condition"
+      ],
+      "source_basis": "Public books/interviews/frameworks; not treated as complete proprietary trading systems.",
+      "do_not_infer_missing_rules": true
+    },
+    {
+      "rank": 77,
+      "strategy_id": "GSR_AT_077",
+      "trader": "Broader research family",
+      "strategy_name": "Victor Sperandeo 2B Reversal",
+      "family": "Hybrid / Risk / Regime",
+      "rule_precision": "mechanism_only",
+      "capture_status": "NOT_READY_NEEDS_SOURCE_PRECISION",
+      "required_capture_fields": [
+        "source_version",
+        "exact_parameters",
+        "entry_condition",
+        "exit_condition"
+      ],
+      "source_basis": "Public books/interviews/frameworks; not treated as complete proprietary trading systems.",
+      "do_not_infer_missing_rules": true
+    },
+    {
+      "rank": 78,
+      "strategy_id": "GSR_AT_078",
+      "trader": "Broader research family",
+      "strategy_name": "Sperandeo Trend Change",
+      "family": "Hybrid / Risk / Regime",
+      "rule_precision": "mechanism_only",
+      "capture_status": "NOT_READY_NEEDS_SOURCE_PRECISION",
+      "required_capture_fields": [
+        "source_version",
+        "exact_parameters",
+        "entry_condition",
+        "exit_condition"
+      ],
+      "source_basis": "Public books/interviews/frameworks; not treated as complete proprietary trading systems.",
+      "do_not_infer_missing_rules": true
+    },
+    {
+      "rank": 79,
+      "strategy_id": "GSR_AT_079",
+      "trader": "Broader research family",
+      "strategy_name": "Paul Tudor Jones Macro+Technical",
+      "family": "Hybrid / Risk / Regime",
+      "rule_precision": "mechanism_only",
+      "capture_status": "NOT_READY_NEEDS_SOURCE_PRECISION",
+      "required_capture_fields": [
+        "source_version",
+        "exact_parameters",
+        "entry_condition",
+        "exit_condition"
+      ],
+      "source_basis": "Public books/interviews/frameworks; not treated as complete proprietary trading systems.",
+      "do_not_infer_missing_rules": true
+    },
+    {
+      "rank": 80,
+      "strategy_id": "GSR_AT_080",
+      "trader": "Broader research family",
+      "strategy_name": "Druckenmiller Theme Momentum",
+      "family": "Hybrid / Risk / Regime",
+      "rule_precision": "mechanism_only",
+      "capture_status": "NOT_READY_NEEDS_SOURCE_PRECISION",
+      "required_capture_fields": [
+        "source_version",
+        "exact_parameters",
+        "entry_condition",
+        "exit_condition"
+      ],
+      "source_basis": "Public books/interviews/frameworks; not treated as complete proprietary trading systems.",
+      "do_not_infer_missing_rules": true
+    },
+    {
+      "rank": 81,
+      "strategy_id": "GSR_AT_081",
+      "trader": "Broader research family",
+      "strategy_name": "Kovner Macro Trend",
+      "family": "Hybrid / Risk / Regime",
+      "rule_precision": "mechanism_only",
+      "capture_status": "NOT_READY_NEEDS_SOURCE_PRECISION",
+      "required_capture_fields": [
+        "source_version",
+        "exact_parameters",
+        "entry_condition",
+        "exit_condition"
+      ],
+      "source_basis": "Public books/interviews/frameworks; not treated as complete proprietary trading systems.",
+      "do_not_infer_missing_rules": true
+    },
+    {
+      "rank": 82,
+      "strategy_id": "GSR_AT_082",
+      "trader": "Broader research family",
+      "strategy_name": "Van Tharp R-Multiple",
+      "family": "Hybrid / Risk / Regime",
+      "rule_precision": "mechanism_only",
+      "capture_status": "NOT_READY_NEEDS_SOURCE_PRECISION",
+      "required_capture_fields": [
+        "source_version",
+        "exact_parameters",
+        "entry_condition",
+        "exit_condition"
+      ],
+      "source_basis": "Public books/interviews/frameworks; not treated as complete proprietary trading systems.",
+      "do_not_infer_missing_rules": true
+    },
+    {
+      "rank": 83,
+      "strategy_id": "GSR_AT_083",
+      "trader": "Broader research family",
+      "strategy_name": "Van Tharp Position Sizing",
+      "family": "Hybrid / Risk / Regime",
+      "rule_precision": "mechanism_only",
+      "capture_status": "NOT_READY_NEEDS_SOURCE_PRECISION",
+      "required_capture_fields": [
+        "source_version",
+        "exact_parameters",
+        "entry_condition",
+        "exit_condition"
+      ],
+      "source_basis": "Public books/interviews/frameworks; not treated as complete proprietary trading systems.",
+      "do_not_infer_missing_rules": true
+    },
+    {
+      "rank": 84,
+      "strategy_id": "GSR_AT_084",
+      "trader": "Turtle/Donchian/Seykota family",
+      "strategy_name": "Turtle S1 Long Breakout â€” Regime-Filtered Variant",
+      "family": "Trend Following",
+      "rule_precision": "research_variant",
+      "capture_status": "GSR_RESEARCH_ONLY",
+      "required_capture_fields": [
+        "variant_definition",
+        "parameter_set",
+        "regime_definition",
+        "validation_protocol"
+      ],
+      "source_basis": "GSR-derived test variant; NOT claimed as the trader's original rule.",
+      "do_not_infer_missing_rules": true
+    },
+    {
+      "rank": 85,
+      "strategy_id": "GSR_AT_085",
+      "trader": "Turtle/Donchian/Seykota family",
+      "strategy_name": "Turtle S1 Short Breakout â€” Regime-Filtered Variant",
+      "family": "Trend Following",
+      "rule_precision": "research_variant",
+      "capture_status": "GSR_RESEARCH_ONLY",
+      "required_capture_fields": [
+        "variant_definition",
+        "parameter_set",
+        "regime_definition",
+        "validation_protocol"
+      ],
+      "source_basis": "GSR-derived test variant; NOT claimed as the trader's original rule.",
+      "do_not_infer_missing_rules": true
+    },
+    {
+      "rank": 86,
+      "strategy_id": "GSR_AT_086",
+      "trader": "Turtle/Donchian/Seykota family",
+      "strategy_name": "Turtle S2 Long Breakout â€” Regime-Filtered Variant",
+      "family": "Trend Following",
+      "rule_precision": "research_variant",
+      "capture_status": "GSR_RESEARCH_ONLY",
+      "required_capture_fields": [
+        "variant_definition",
+        "parameter_set",
+        "regime_definition",
+        "validation_protocol"
+      ],
+      "source_basis": "GSR-derived test variant; NOT claimed as the trader's original rule.",
+      "do_not_infer_missing_rules": true
+    },
+    {
+      "rank": 87,
+      "strategy_id": "GSR_AT_087",
+      "trader": "Turtle/Donchian/Seykota family",
+      "strategy_name": "Turtle S2 Short Breakout â€” Regime-Filtered Variant",
+      "family": "Trend Following",
+      "rule_precision": "research_variant",
+      "capture_status": "GSR_RESEARCH_ONLY",
+      "required_capture_fields": [
+        "variant_definition",
+        "parameter_set",
+        "regime_definition",
+        "validation_protocol"
+      ],
+      "source_basis": "GSR-derived test variant; NOT claimed as the trader's original rule.",
+      "do_not_infer_missing_rules": true
+    },
+    {
+      "rank": 88,
+      "strategy_id": "GSR_AT_088",
+      "trader": "Turtle/Donchian/Seykota family",
+      "strategy_name": "Turtle Volatility Position Sizing â€” Regime-Filtered Variant",
+      "family": "Trend Following",
+      "rule_precision": "research_variant",
+      "capture_status": "GSR_RESEARCH_ONLY",
+      "required_capture_fields": [
+        "variant_definition",
+        "parameter_set",
+        "regime_definition",
+        "validation_protocol"
+      ],
+      "source_basis": "GSR-derived test variant; NOT claimed as the trader's original rule.",
+      "do_not_infer_missing_rules": true
+    },
+    {
+      "rank": 89,
+      "strategy_id": "GSR_AT_089",
+      "trader": "Turtle/Donchian/Seykota family",
+      "strategy_name": "Turtle 2N Initial Stop â€” Regime-Filtered Variant",
+      "family": "Trend Following",
+      "rule_precision": "research_variant",
+      "capture_status": "GSR_RESEARCH_ONLY",
+      "required_capture_fields": [
+        "variant_definition",
+        "parameter_set",
+        "regime_definition",
+        "validation_protocol"
+      ],
+      "source_basis": "GSR-derived test variant; NOT claimed as the trader's original rule.",
+      "do_not_infer_missing_rules": true
+    },
+    {
+      "rank": 90,
+      "strategy_id": "GSR_AT_090",
+      "trader": "Turtle/Donchian/Seykota family",
+      "strategy_name": "Turtle S1 Opposite Breakout Exit â€” Regime-Filtered Variant",
+      "family": "Trend Following",
+      "rule_precision": "research_variant",
+      "capture_status": "GSR_RESEARCH_ONLY",
+      "required_capture_fields": [
+        "variant_definition",
+        "parameter_set",
+        "regime_definition",
+        "validation_protocol"
+      ],
+      "source_basis": "GSR-derived test variant; NOT claimed as the trader's original rule.",
+      "do_not_infer_missing_rules": true
+    },
+    {
+      "rank": 91,
+      "strategy_id": "GSR_AT_091",
+      "trader": "Turtle/Donchian/Seykota family",
+      "strategy_name": "Turtle S2 Opposite Breakout Exit â€” Regime-Filtered Variant",
+      "family": "Trend Following",
+      "rule_precision": "research_variant",
+      "capture_status": "GSR_RESEARCH_ONLY",
+      "required_capture_fields": [
+        "variant_definition",
+        "parameter_set",
+        "regime_definition",
+        "validation_protocol"
+      ],
+      "source_basis": "GSR-derived test variant; NOT claimed as the trader's original rule.",
+      "do_not_infer_missing_rules": true
+    },
+    {
+      "rank": 92,
+      "strategy_id": "GSR_AT_092",
+      "trader": "Turtle/Donchian/Seykota family",
+      "strategy_name": "Turtle Pyramiding â€” Regime-Filtered Variant",
+      "family": "Trend Following",
+      "rule_precision": "research_variant",
+      "capture_status": "GSR_RESEARCH_ONLY",
+      "required_capture_fields": [
+        "variant_definition",
+        "parameter_set",
+        "regime_definition",
+        "validation_protocol"
+      ],
+      "source_basis": "GSR-derived test variant; NOT claimed as the trader's original rule.",
+      "do_not_infer_missing_rules": true
+    },
+    {
+      "rank": 93,
+      "strategy_id": "GSR_AT_093",
+      "trader": "Turtle/Donchian/Seykota family",
+      "strategy_name": "Donchian Channel Breakout â€” Regime-Filtered Variant",
+      "family": "Trend Following",
+      "rule_precision": "research_variant",
+      "capture_status": "GSR_RESEARCH_ONLY",
+      "required_capture_fields": [
+        "variant_definition",
+        "parameter_set",
+        "regime_definition",
+        "validation_protocol"
+      ],
+      "source_basis": "GSR-derived test variant; NOT claimed as the trader's original rule.",
+      "do_not_infer_missing_rules": true
+    },
+    {
+      "rank": 94,
+      "strategy_id": "GSR_AT_094",
+      "trader": "Turtle/Donchian/Seykota family",
+      "strategy_name": "Curtis Faith Turtle â€” Regime-Filtered Variant",
+      "family": "Trend Following",
+      "rule_precision": "research_variant",
+      "capture_status": "GSR_RESEARCH_ONLY",
+      "required_capture_fields": [
+        "variant_definition",
+        "parameter_set",
+        "regime_definition",
+        "validation_protocol"
+      ],
+      "source_basis": "GSR-derived test variant; NOT claimed as the trader's original rule.",
+      "do_not_infer_missing_rules": true
+    },
+    {
+      "rank": 95,
+      "strategy_id": "GSR_AT_095",
+      "trader": "Turtle/Donchian/Seykota family",
+      "strategy_name": "Seykota Trend Following â€” Regime-Filtered Variant",
+      "family": "Trend Following",
+      "rule_precision": "research_variant",
+      "capture_status": "GSR_RESEARCH_ONLY",
+      "required_capture_fields": [
+        "variant_definition",
+        "parameter_set",
+        "regime_definition",
+        "validation_protocol"
+      ],
+      "source_basis": "GSR-derived test variant; NOT claimed as the trader's original rule.",
+      "do_not_infer_missing_rules": true
+    },
+    {
+      "rank": 96,
+      "strategy_id": "GSR_AT_096",
+      "trader": "Turtle/Donchian/Seykota family",
+      "strategy_name": "Hite Systematic Trend â€” Regime-Filtered Variant",
+      "family": "Trend Following",
+      "rule_precision": "research_variant",
+      "capture_status": "GSR_RESEARCH_ONLY",
+      "required_capture_fields": [
+        "variant_definition",
+        "parameter_set",
+        "regime_definition",
+        "validation_protocol"
+      ],
+      "source_basis": "GSR-derived test variant; NOT claimed as the trader's original rule.",
+      "do_not_infer_missing_rules": true
+    },
+    {
+      "rank": 97,
+      "strategy_id": "GSR_AT_097",
+      "trader": "Turtle/Donchian/Seykota family",
+      "strategy_name": "Dunn Trend Following â€” Regime-Filtered Variant",
+      "family": "Trend Following",
+      "rule_precision": "research_variant",
+      "capture_status": "GSR_RESEARCH_ONLY",
+      "required_capture_fields": [
+        "variant_definition",
+        "parameter_set",
+        "regime_definition",
+        "validation_protocol"
+      ],
+      "source_basis": "GSR-derived test variant; NOT claimed as the trader's original rule.",
+      "do_not_infer_missing_rules": true
+    },
+    {
+      "rank": 98,
+      "strategy_id": "GSR_AT_098",
+      "trader": "Turtle/Donchian/Seykota family",
+      "strategy_name": "Harding Managed Futures Trend â€” Regime-Filtered Variant",
+      "family": "Trend Following",
+      "rule_precision": "research_variant",
+      "capture_status": "GSR_RESEARCH_ONLY",
+      "required_capture_fields": [
+        "variant_definition",
+        "parameter_set",
+        "regime_definition",
+        "validation_protocol"
+      ],
+      "source_basis": "GSR-derived test variant; NOT claimed as the trader's original rule.",
+      "do_not_infer_missing_rules": true
+    },
+    {
+      "rank": 99,
+      "strategy_id": "GSR_AT_099",
+      "trader": "Turtle/Donchian/Seykota family",
+      "strategy_name": "Clenow Momentum Trend â€” Regime-Filtered Variant",
+      "family": "Trend Following",
+      "rule_precision": "research_variant",
+      "capture_status": "GSR_RESEARCH_ONLY",
+      "required_capture_fields": [
+        "variant_definition",
+        "parameter_set",
+        "regime_definition",
+        "validation_protocol"
+      ],
+      "source_basis": "GSR-derived test variant; NOT claimed as the trader's original rule.",
+      "do_not_infer_missing_rules": true
+    },
+    {
+      "rank": 100,
+      "strategy_id": "GSR_AT_100",
+      "trader": "O'Neil/Minervini/Darvas family",
+      "strategy_name": "O'Neil CAN SLIM Leader Screen â€” Regime-Filtered Variant",
+      "family": "Growth Momentum",
+      "rule_precision": "research_variant",
+      "capture_status": "GSR_RESEARCH_ONLY",
+      "required_capture_fields": [
+        "variant_definition",
+        "parameter_set",
+        "regime_definition",
+        "validation_protocol"
+      ],
+      "source_basis": "GSR-derived test variant; NOT claimed as the trader's original rule.",
+      "do_not_infer_missing_rules": true
+    },
+    {
+      "rank": 101,
+      "strategy_id": "GSR_AT_101",
+      "trader": "O'Neil/Minervini/Darvas family",
+      "strategy_name": "O'Neil Cup With Handle Breakout â€” Regime-Filtered Variant",
+      "family": "Growth Momentum",
+      "rule_precision": "research_variant",
+      "capture_status": "GSR_RESEARCH_ONLY",
+      "required_capture_fields": [
+        "variant_definition",
+        "parameter_set",
+        "regime_definition",
+        "validation_protocol"
+      ],
+      "source_basis": "GSR-derived test variant; NOT claimed as the trader's original rule.",
+      "do_not_infer_missing_rules": true
+    },
+    {
+      "rank": 102,
+      "strategy_id": "GSR_AT_102",
+      "trader": "O'Neil/Minervini/Darvas family",
+      "strategy_name": "O'Neil Volume Breakout Confirmation â€” Regime-Filtered Variant",
+      "family": "Growth Momentum",
+      "rule_precision": "research_variant",
+      "capture_status": "GSR_RESEARCH_ONLY",
+      "required_capture_fields": [
+        "variant_definition",
+        "parameter_set",
+        "regime_definition",
+        "validation_protocol"
+      ],
+      "source_basis": "GSR-derived test variant; NOT claimed as the trader's original rule.",
+      "do_not_infer_missing_rules": true
+    },
+    {
+      "rank": 103,
+      "strategy_id": "GSR_AT_103",
+      "trader": "O'Neil/Minervini/Darvas family",
+      "strategy_name": "O'Neil 7-8% Loss Rule â€” Regime-Filtered Variant",
+      "family": "Growth Momentum",
+      "rule_precision": "research_variant",
+      "capture_status": "GSR_RESEARCH_ONLY",
+      "required_capture_fields": [
+        "variant_definition",
+        "parameter_set",
+        "regime_definition",
+        "validation_protocol"
+      ],
+      "source_basis": "GSR-derived test variant; NOT claimed as the trader's original rule.",
+      "do_not_infer_missing_rules": true
+    },
+    {
+      "rank": 104,
+      "strategy_id": "GSR_AT_104",
+      "trader": "O'Neil/Minervini/Darvas family",
+      "strategy_name": "O'Neil Follow-Through Day Context â€” Regime-Filtered Variant",
+      "family": "Growth Momentum",
+      "rule_precision": "research_variant",
+      "capture_status": "GSR_RESEARCH_ONLY",
+      "required_capture_fields": [
+        "variant_definition",
+        "parameter_set",
+        "regime_definition",
+        "validation_protocol"
+      ],
+      "source_basis": "GSR-derived test variant; NOT claimed as the trader's original rule.",
+      "do_not_infer_missing_rules": true
+    },
+    {
+      "rank": 105,
+      "strategy_id": "GSR_AT_105",
+      "trader": "O'Neil/Minervini/Darvas family",
+      "strategy_name": "Minervini Trend Template â€” Regime-Filtered Variant",
+      "family": "Growth Momentum",
+      "rule_precision": "research_variant",
+      "capture_status": "GSR_RESEARCH_ONLY",
+      "required_capture_fields": [
+        "variant_definition",
+        "parameter_set",
+        "regime_definition",
+        "validation_protocol"
+      ],
+      "source_basis": "GSR-derived test variant; NOT claimed as the trader's original rule.",
+      "do_not_infer_missing_rules": true
+    },
+    {
+      "rank": 106,
+      "strategy_id": "GSR_AT_106",
+      "trader": "O'Neil/Minervini/Darvas family",
+      "strategy_name": "Minervini VCP â€” Regime-Filtered Variant",
+      "family": "Growth Momentum",
+      "rule_precision": "research_variant",
+      "capture_status": "GSR_RESEARCH_ONLY",
+      "required_capture_fields": [
+        "variant_definition",
+        "parameter_set",
+        "regime_definition",
+        "validation_protocol"
+      ],
+      "source_basis": "GSR-derived test variant; NOT claimed as the trader's original rule.",
+      "do_not_infer_missing_rules": true
+    },
+    {
+      "rank": 107,
+      "strategy_id": "GSR_AT_107",
+      "trader": "O'Neil/Minervini/Darvas family",
+      "strategy_name": "Minervini VCP Pivot Breakout â€” Regime-Filtered Variant",
+      "family": "Growth Momentum",
+      "rule_precision": "research_variant",
+      "capture_status": "GSR_RESEARCH_ONLY",
+      "required_capture_fields": [
+        "variant_definition",
+        "parameter_set",
+        "regime_definition",
+        "validation_protocol"
+      ],
+      "source_basis": "GSR-derived test variant; NOT claimed as the trader's original rule.",
+      "do_not_infer_missing_rules": true
+    },
+    {
+      "rank": 108,
+      "strategy_id": "GSR_AT_108",
+      "trader": "O'Neil/Minervini/Darvas family",
+      "strategy_name": "Minervini Stage-2 Leader â€” Regime-Filtered Variant",
+      "family": "Growth Momentum",
+      "rule_precision": "research_variant",
+      "capture_status": "GSR_RESEARCH_ONLY",
+      "required_capture_fields": [
+        "variant_definition",
+        "parameter_set",
+        "regime_definition",
+        "validation_protocol"
+      ],
+      "source_basis": "GSR-derived test variant; NOT claimed as the trader's original rule.",
+      "do_not_infer_missing_rules": true
+    },
+    {
+      "rank": 109,
+      "strategy_id": "GSR_AT_109",
+      "trader": "O'Neil/Minervini/Darvas family",
+      "strategy_name": "Minervini SEPA â€” Regime-Filtered Variant",
+      "family": "Growth Momentum",
+      "rule_precision": "research_variant",
+      "capture_status": "GSR_RESEARCH_ONLY",
+      "required_capture_fields": [
+        "variant_definition",
+        "parameter_set",
+        "regime_definition",
+        "validation_protocol"
+      ],
+      "source_basis": "GSR-derived test variant; NOT claimed as the trader's original rule.",
+      "do_not_infer_missing_rules": true
+    },
+    {
+      "rank": 110,
+      "strategy_id": "GSR_AT_110",
+      "trader": "O'Neil/Minervini/Darvas family",
+      "strategy_name": "Minervini Tight-Range Breakout â€” Regime-Filtered Variant",
+      "family": "Growth Momentum",
+      "rule_precision": "research_variant",
+      "capture_status": "GSR_RESEARCH_ONLY",
+      "required_capture_fields": [
+        "variant_definition",
+        "parameter_set",
+        "regime_definition",
+        "validation_protocol"
+      ],
+      "source_basis": "GSR-derived test variant; NOT claimed as the trader's original rule.",
+      "do_not_infer_missing_rules": true
+    },
+    {
+      "rank": 111,
+      "strategy_id": "GSR_AT_111",
+      "trader": "O'Neil/Minervini/Darvas family",
+      "strategy_name": "Darvas Box Breakout â€” Regime-Filtered Variant",
+      "family": "Growth Momentum",
+      "rule_precision": "research_variant",
+      "capture_status": "GSR_RESEARCH_ONLY",
+      "required_capture_fields": [
+        "variant_definition",
+        "parameter_set",
+        "regime_definition",
+        "validation_protocol"
+      ],
+      "source_basis": "GSR-derived test variant; NOT claimed as the trader's original rule.",
+      "do_not_infer_missing_rules": true
+    },
+    {
+      "rank": 112,
+      "strategy_id": "GSR_AT_112",
+      "trader": "O'Neil/Minervini/Darvas family",
+      "strategy_name": "Darvas Stop Discipline â€” Regime-Filtered Variant",
+      "family": "Growth Momentum",
+      "rule_precision": "research_variant",
+      "capture_status": "GSR_RESEARCH_ONLY",
+      "required_capture_fields": [
+        "variant_definition",
+        "parameter_set",
+        "regime_definition",
+        "validation_protocol"
+      ],
+      "source_basis": "GSR-derived test variant; NOT claimed as the trader's original rule.",
+      "do_not_infer_missing_rules": true
+    },
+    {
+      "rank": 113,
+      "strategy_id": "GSR_AT_113",
+      "trader": "O'Neil/Minervini/Darvas family",
+      "strategy_name": "David Ryan Growth Breakout â€” Regime-Filtered Variant",
+      "family": "Growth Momentum",
+      "rule_precision": "research_variant",
+      "capture_status": "GSR_RESEARCH_ONLY",
+      "required_capture_fields": [
+        "variant_definition",
+        "parameter_set",
+        "regime_definition",
+        "validation_protocol"
+      ],
+      "source_basis": "GSR-derived test variant; NOT claimed as the trader's original rule.",
+      "do_not_infer_missing_rules": true
+    }
+  ]
+}

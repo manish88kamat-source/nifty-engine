@@ -1,0 +1,99 @@
+{
+  "document": "GSR P1 State Transition Controller",
+  "generated_read_only": true,
+  "registry_modified": false,
+  "rulespec_created": false,
+  "bypass_allowed": false,
+  "strategies": [
+    {
+      "strategy_id": "GSR_AT_001",
+      "previous_state": "WAITING_FOR_SOURCE",
+      "transition_result": "BLOCKED",
+      "next_state": "WAITING_FOR_SOURCE",
+      "transition_reason": "WAITING_FOR_COMPLETE_SOURCE_EVIDENCE",
+      "manual_override": false,
+      "rulespec_status": "LOCKED"
+    },
+    {
+      "strategy_id": "GSR_AT_002",
+      "previous_state": "WAITING_FOR_SOURCE",
+      "transition_result": "BLOCKED",
+      "next_state": "WAITING_FOR_SOURCE",
+      "transition_reason": "WAITING_FOR_COMPLETE_SOURCE_EVIDENCE",
+      "manual_override": false,
+      "rulespec_status": "LOCKED"
+    },
+    {
+      "strategy_id": "GSR_AT_003",
+      "previous_state": "WAITING_FOR_SOURCE",
+      "transition_result": "BLOCKED",
+      "next_state": "WAITING_FOR_SOURCE",
+      "transition_reason": "WAITING_FOR_COMPLETE_SOURCE_EVIDENCE",
+      "manual_override": false,
+      "rulespec_status": "LOCKED"
+    },
+    {
+      "strategy_id": "GSR_AT_004",
+      "previous_state": "WAITING_FOR_SOURCE",
+      "transition_result": "BLOCKED",
+      "next_state": "WAITING_FOR_SOURCE",
+      "transition_reason": "WAITING_FOR_COMPLETE_SOURCE_EVIDENCE",
+      "manual_override": false,
+      "rulespec_status": "LOCKED"
+    },
+    {
+      "strategy_id": "GSR_AT_005",
+      "previous_state": "WAITING_FOR_SOURCE",
+      "transition_result": "BLOCKED",
+      "next_state": "WAITING_FOR_SOURCE",
+      "transition_reason": "WAITING_FOR_COMPLETE_SOURCE_EVIDENCE",
+      "manual_override": false,
+      "rulespec_status": "LOCKED"
+    },
+    {
+      "strategy_id": "GSR_AT_006",
+      "previous_state": "WAITING_FOR_SOURCE",
+      "transition_result": "BLOCKED",
+      "next_state": "WAITING_FOR_SOURCE",
+      "transition_reason": "WAITING_FOR_COMPLETE_SOURCE_EVIDENCE",
+      "manual_override": false,
+      "rulespec_status": "LOCKED"
+    },
+    {
+      "strategy_id": "GSR_AT_010",
+      "previous_state": "WAITING_FOR_SOURCE",
+      "transition_result": "BLOCKED",
+      "next_state": "WAITING_FOR_SOURCE",
+      "transition_reason": "WAITING_FOR_COMPLETE_SOURCE_EVIDENCE",
+      "manual_override": false,
+      "rulespec_status": "LOCKED"
+    },
+    {
+      "strategy_id": "GSR_AT_011",
+      "previous_state": "WAITING_FOR_SOURCE",
+      "transition_result": "BLOCKED",
+      "next_state": "WAITING_FOR_SOURCE",
+      "transition_reason": "WAITING_FOR_COMPLETE_SOURCE_EVIDENCE",
+      "manual_override": false,
+      "rulespec_status": "LOCKED"
+    },
+    {
+      "strategy_id": "GSR_AT_013",
+      "previous_state": "WAITING_FOR_SOURCE",
+      "transition_result": "BLOCKED",
+      "next_state": "WAITING_FOR_SOURCE",
+      "transition_reason": "WAITING_FOR_COMPLETE_SOURCE_EVIDENCE",
+      "manual_override": false,
+      "rulespec_status": "LOCKED"
+    },
+    {
+      "strategy_id": "GSR_AT_018",
+      "previous_state": "WAITING_FOR_SOURCE",
+      "transition_result": "BLOCKED",
+      "next_state": "WAITING_FOR_SOURCE",
+      "transition_reason": "WAITING_FOR_COMPLETE_SOURCE_EVIDENCE",
+      "manual_override": false,
+      "rulespec_status": "LOCKED"
+    }
+  ]
+}

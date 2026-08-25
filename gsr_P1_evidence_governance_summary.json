@@ -1,0 +1,16 @@
+{
+  "document": "GSR P1 Evidence Governance Summary",
+  "generated_read_only": true,
+  "total_strategies": 10,
+  "state_distribution": {
+    "WAITING_FOR_SOURCE": 10
+  },
+  "blocked_count": 10,
+  "unlocked_count": 0,
+  "rulespec_status": "LOCKED",
+  "controls": {
+    "registry_modified": false,
+    "inference_used": false,
+    "manual_override": false
+  }
+}

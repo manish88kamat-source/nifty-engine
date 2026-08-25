@@ -1,0 +1,33 @@
+{
+  "document": "GSR Research Approval Gate Contract",
+  "generated_read_only": true,
+  "status": "PENDING_IMPLEMENTATION",
+  "purpose": "Approve validated Strategy DNA candidates for research registry inclusion.",
+  "policy": {
+    "approval_after_validation_only": true,
+    "candidate_not_live_strategy": true,
+    "source_traceability_required": true,
+    "strategy_rules_immutable": true,
+    "regime_labels_immutable": true
+  },
+  "inputs": [
+    "out_of_sample_report",
+    "walk_forward_report",
+    "risk_evaluation",
+    "source_evidence"
+  ],
+  "approval_checks": [
+    "source_verification",
+    "historical_support",
+    "out_of_sample_pass",
+    "walk_forward_pass",
+    "risk_consistency_pass",
+    "regime_coverage_pass"
+  ],
+  "outputs": [
+    "research_approved_candidate",
+    "approval_report",
+    "rejected_candidate_record"
+  ],
+  "rulespec_status": "LOCKED"
+}

@@ -1,0 +1,288 @@
+{
+  "document": "GSR P1 Source Evidence Intake Manifest",
+  "generated_read_only": true,
+  "registry_modified": false,
+  "rulespec_created": false,
+  "strategies": [
+    {
+      "strategy_id": "GSR_AT_001",
+      "required_evidence_blocks": {
+        "source_metadata": {
+          "status": "PENDING"
+        },
+        "entry_rule": {
+          "status": "LOCKED"
+        },
+        "exit_rule": {
+          "status": "LOCKED"
+        },
+        "risk_rule": {
+          "status": "LOCKED"
+        },
+        "position_sizing": {
+          "status": "LOCKED"
+        },
+        "execution_model": {
+          "status": "LOCKED"
+        },
+        "cost_model": {
+          "status": "LOCKED"
+        }
+      },
+      "unlock_dependency": "SOURCE_METADATA_AND_AUTHORITY_VERIFICATION",
+      "rulespec_status": "LOCKED"
+    },
+    {
+      "strategy_id": "GSR_AT_002",
+      "required_evidence_blocks": {
+        "source_metadata": {
+          "status": "PENDING"
+        },
+        "entry_rule": {
+          "status": "LOCKED"
+        },
+        "exit_rule": {
+          "status": "LOCKED"
+        },
+        "risk_rule": {
+          "status": "LOCKED"
+        },
+        "position_sizing": {
+          "status": "LOCKED"
+        },
+        "execution_model": {
+          "status": "LOCKED"
+        },
+        "cost_model": {
+          "status": "LOCKED"
+        }
+      },
+      "unlock_dependency": "SOURCE_METADATA_AND_AUTHORITY_VERIFICATION",
+      "rulespec_status": "LOCKED"
+    },
+    {
+      "strategy_id": "GSR_AT_003",
+      "required_evidence_blocks": {
+        "source_metadata": {
+          "status": "PENDING"
+        },
+        "entry_rule": {
+          "status": "LOCKED"
+        },
+        "exit_rule": {
+          "status": "LOCKED"
+        },
+        "risk_rule": {
+          "status": "LOCKED"
+        },
+        "position_sizing": {
+          "status": "LOCKED"
+        },
+        "execution_model": {
+          "status": "LOCKED"
+        },
+        "cost_model": {
+          "status": "LOCKED"
+        }
+      },
+      "unlock_dependency": "SOURCE_METADATA_AND_AUTHORITY_VERIFICATION",
+      "rulespec_status": "LOCKED"
+    },
+    {
+      "strategy_id": "GSR_AT_004",
+      "required_evidence_blocks": {
+        "source_metadata": {
+          "status": "PENDING"
+        },
+        "entry_rule": {
+          "status": "LOCKED"
+        },
+        "exit_rule": {
+          "status": "LOCKED"
+        },
+        "risk_rule": {
+          "status": "LOCKED"
+        },
+        "position_sizing": {
+          "status": "LOCKED"
+        },
+        "execution_model": {
+          "status": "LOCKED"
+        },
+        "cost_model": {
+          "status": "LOCKED"
+        }
+      },
+      "unlock_dependency": "SOURCE_METADATA_AND_AUTHORITY_VERIFICATION",
+      "rulespec_status": "LOCKED"
+    },
+    {
+      "strategy_id": "GSR_AT_005",
+      "required_evidence_blocks": {
+        "source_metadata": {
+          "status": "PENDING"
+        },
+        "entry_rule": {
+          "status": "LOCKED"
+        },
+        "exit_rule": {
+          "status": "LOCKED"
+        },
+        "risk_rule": {
+          "status": "LOCKED"
+        },
+        "position_sizing": {
+          "status": "LOCKED"
+        },
+        "execution_model": {
+          "status": "LOCKED"
+        },
+        "cost_model": {
+          "status": "LOCKED"
+        }
+      },
+      "unlock_dependency": "SOURCE_METADATA_AND_AUTHORITY_VERIFICATION",
+      "rulespec_status": "LOCKED"
+    },
+    {
+      "strategy_id": "GSR_AT_006",
+      "required_evidence_blocks": {
+        "source_metadata": {
+          "status": "PENDING"
+        },
+        "entry_rule": {
+          "status": "LOCKED"
+        },
+        "exit_rule": {
+          "status": "LOCKED"
+        },
+        "risk_rule": {
+          "status": "LOCKED"
+        },
+        "position_sizing": {
+          "status": "LOCKED"
+        },
+        "execution_model": {
+          "status": "LOCKED"
+        },
+        "cost_model": {
+          "status": "LOCKED"
+        }
+      },
+      "unlock_dependency": "SOURCE_METADATA_AND_AUTHORITY_VERIFICATION",
+      "rulespec_status": "LOCKED"
+    },
+    {
+      "strategy_id": "GSR_AT_010",
+      "required_evidence_blocks": {
+        "source_metadata": {
+          "status": "PENDING"
+        },
+        "entry_rule": {
+          "status": "LOCKED"
+        },
+        "exit_rule": {
+          "status": "LOCKED"
+        },
+        "risk_rule": {
+          "status": "LOCKED"
+        },
+        "position_sizing": {
+          "status": "LOCKED"
+        },
+        "execution_model": {
+          "status": "LOCKED"
+        },
+        "cost_model": {
+          "status": "LOCKED"
+        }
+      },
+      "unlock_dependency": "SOURCE_METADATA_AND_AUTHORITY_VERIFICATION",
+      "rulespec_status": "LOCKED"
+    },
+    {
+      "strategy_id": "GSR_AT_011",
+      "required_evidence_blocks": {
+        "source_metadata": {
+          "status": "PENDING"
+        },
+        "entry_rule": {
+          "status": "LOCKED"
+        },
+        "exit_rule": {
+          "status": "LOCKED"
+        },
+        "risk_rule": {
+          "status": "LOCKED"
+        },
+        "position_sizing": {
+          "status": "LOCKED"
+        },
+        "execution_model": {
+          "status": "LOCKED"
+        },
+        "cost_model": {
+          "status": "LOCKED"
+        }
+      },
+      "unlock_dependency": "SOURCE_METADATA_AND_AUTHORITY_VERIFICATION",
+      "rulespec_status": "LOCKED"
+    },
+    {
+      "strategy_id": "GSR_AT_013",
+      "required_evidence_blocks": {
+        "source_metadata": {
+          "status": "PENDING"
+        },
+        "entry_rule": {
+          "status": "LOCKED"
+        },
+        "exit_rule": {
+          "status": "LOCKED"
+        },
+        "risk_rule": {
+          "status": "LOCKED"
+        },
+        "position_sizing": {
+          "status": "LOCKED"
+        },
+        "execution_model": {
+          "status": "LOCKED"
+        },
+        "cost_model": {
+          "status": "LOCKED"
+        }
+      },
+      "unlock_dependency": "SOURCE_METADATA_AND_AUTHORITY_VERIFICATION",
+      "rulespec_status": "LOCKED"
+    },
+    {
+      "strategy_id": "GSR_AT_018",
+      "required_evidence_blocks": {
+        "source_metadata": {
+          "status": "PENDING"
+        },
+        "entry_rule": {
+          "status": "LOCKED"
+        },
+        "exit_rule": {
+          "status": "LOCKED"
+        },
+        "risk_rule": {
+          "status": "LOCKED"
+        },
+        "position_sizing": {
+          "status": "LOCKED"
+        },
+        "execution_model": {
+          "status": "LOCKED"
+        },
+        "cost_model": {
+          "status": "LOCKED"
+        }
+      },
+      "unlock_dependency": "SOURCE_METADATA_AND_AUTHORITY_VERIFICATION",
+      "rulespec_status": "LOCKED"
+    }
+  ]
+}

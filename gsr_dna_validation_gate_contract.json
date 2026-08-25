@@ -1,0 +1,32 @@
+{
+  "document": "GSR DNA Validation Gate Contract",
+  "generated_read_only": true,
+  "status": "PENDING_IMPLEMENTATION",
+  "purpose": "Validate discovered Strategy DNA combinations before research acceptance.",
+  "policy": {
+    "candidate_is_not_strategy": true,
+    "source_dna_traceability_required": true,
+    "out_of_sample_validation_required": true,
+    "walk_forward_validation_required": true,
+    "optimization_after_validation_only": true
+  },
+  "inputs": [
+    "dna_combination_candidates",
+    "supporting_strategies",
+    "strategy_regime_matrix"
+  ],
+  "validation_checks": [
+    "source_component_verified",
+    "minimum_historical_support",
+    "regime_coverage_check",
+    "out_of_sample_performance",
+    "walk_forward_performance",
+    "risk_consistency_check"
+  ],
+  "outputs": [
+    "accepted_dna_candidates",
+    "rejected_dna_candidates",
+    "validation_report"
+  ],
+  "rulespec_status": "LOCKED"
+}

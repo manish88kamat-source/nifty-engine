@@ -1,0 +1,46 @@
+{
+  "document": "GSR_AT_001 Evidence Progress Tracker",
+  "generated_read_only": true,
+  "strategy_id": "GSR_AT_001",
+  "strategy_name": "Turtle S1 Long Breakout",
+  "components": {
+    "source_metadata": {
+      "status": "PENDING",
+      "verified": false
+    },
+    "entry_rule": {
+      "status": "PENDING",
+      "verified": false
+    },
+    "exit_rule": {
+      "status": "LOCKED",
+      "verified": false
+    },
+    "risk_rule": {
+      "status": "LOCKED",
+      "verified": false
+    },
+    "position_sizing": {
+      "status": "LOCKED",
+      "verified": false
+    },
+    "execution_model": {
+      "status": "LOCKED",
+      "verified": false
+    },
+    "cost_model": {
+      "status": "LOCKED",
+      "verified": false
+    }
+  },
+  "readiness": {
+    "completed_components": 0,
+    "total_components": 7,
+    "percentage": 0
+  },
+  "gates": {
+    "rulespec_allowed": false,
+    "replay_allowed": false
+  },
+  "next_required_action": "CAPTURE_AUTHORITATIVE_ENTRY_SOURCE"
+}

@@ -1,0 +1,43 @@
+{
+  "document": "GSR Historical Data Contract",
+  "generated_read_only": true,
+  "status": "PENDING_IMPLEMENTATION",
+  "purpose": "Define canonical historical market data format for regime classification and strategy replay.",
+  "policy": {
+    "raw_data_only": true,
+    "strategy_signal_input_allowed": false,
+    "future_data_allowed": false,
+    "timestamp_alignment_required": true,
+    "derived_features_separated": true
+  },
+  "required_fields": [
+    "timestamp",
+    "symbol",
+    "open",
+    "high",
+    "low",
+    "close",
+    "volume"
+  ],
+  "optional_fields": [
+    "oi",
+    "bid",
+    "ask",
+    "spread",
+    "vwap",
+    "source_identifier"
+  ],
+  "data_layers": {
+    "raw_market_data": "immutable",
+    "derived_features": "generated_separately",
+    "regime_labels": "generated_after_feature_calculation",
+    "strategy_results": "generated_after_replay"
+  },
+  "validation_rules": [
+    "timestamp_sorted",
+    "duplicate_timestamp_check",
+    "missing_bar_check",
+    "source_traceability"
+  ],
+  "rulespec_status": "LOCKED"
+}

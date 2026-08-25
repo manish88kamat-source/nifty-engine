@@ -1,0 +1,45 @@
+{
+  "document": "GSR Evidence Verification Dry Run",
+  "generated_read_only": true,
+  "strategy_id": "GSR_AT_001",
+  "verification_status": "PASS",
+  "checks": {
+    "source_metadata.json": {
+      "present": true,
+      "has_content": true,
+      "status": "PENDING_VERIFICATION"
+    },
+    "entry_evidence.json": {
+      "present": true,
+      "has_content": true,
+      "status": "PENDING_VERIFICATION"
+    },
+    "exit_evidence.json": {
+      "present": true,
+      "has_content": true,
+      "status": "PENDING_VERIFICATION"
+    },
+    "risk_evidence.json": {
+      "present": true,
+      "has_content": true,
+      "status": "PENDING_VERIFICATION"
+    },
+    "position_sizing_evidence.json": {
+      "present": true,
+      "has_content": true,
+      "status": "PENDING_VERIFICATION"
+    },
+    "execution_evidence.json": {
+      "present": true,
+      "has_content": true,
+      "status": "PENDING_VERIFICATION"
+    },
+    "cost_model_evidence.json": {
+      "present": true,
+      "has_content": true,
+      "status": "PENDING_VERIFICATION"
+    }
+  },
+  "rulespec_allowed": false,
+  "reason": "RuleSpec gate still locked until manual verification"
+}

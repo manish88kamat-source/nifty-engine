@@ -1,0 +1,14 @@
+{
+  "document": "GSR Live Research Bridge Readiness Gate",
+  "generated_read_only": true,
+  "checks": {
+    "live_bridge_contract": true,
+    "data_quality_monitor": true,
+    "historical_live_consistency": true
+  },
+  "completed_checks": 3,
+  "total_checks": 3,
+  "live_bridge_ready": true,
+  "historical_live_alignment_enabled": true,
+  "rulespec_status": "LOCKED"
+}

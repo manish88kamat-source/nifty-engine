@@ -1,0 +1,36 @@
+{
+  "document": "GSR Strategy Replay Contract",
+  "generated_read_only": true,
+  "status": "PENDING_IMPLEMENTATION",
+  "purpose": "Replay registered strategies on frozen historical datasets and evaluate behavior across market regimes.",
+  "policy": {
+    "strategy_rules_immutable": true,
+    "regime_labels_immutable": true,
+    "future_data_forbidden": true,
+    "optimization_before_validation": false,
+    "execution_simulation_required": true
+  },
+  "inputs": [
+    "canonical_market_data",
+    "feature_snapshot",
+    "regime_labels",
+    "strategy_registry_object"
+  ],
+  "replay_steps": [
+    "strategy_rule_loading",
+    "historical_event_processing",
+    "entry_detection",
+    "position_management",
+    "exit_detection",
+    "risk_application",
+    "performance_calculation",
+    "regime_attribution"
+  ],
+  "outputs": [
+    "trade_events",
+    "position_history",
+    "performance_metrics",
+    "regime_performance_mapping"
+  ],
+  "rulespec_status": "LOCKED"
+}

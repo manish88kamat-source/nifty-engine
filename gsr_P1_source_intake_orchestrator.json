@@ -1,0 +1,160 @@
+{
+  "document": "GSR P1 Source Intake Orchestrator",
+  "generated_read_only": true,
+  "purpose": "Control transition between evidence capture phases",
+  "registry_modified": false,
+  "rulespec_created": false,
+  "assumptions_used": false,
+  "strategies": [
+    {
+      "strategy_id": "GSR_AT_001",
+      "current_stage": "SOURCE_METADATA_CAPTURE",
+      "status": "BLOCKED",
+      "blocking_reason": "AUTHORITATIVE_SOURCE_METADATA_MISSING",
+      "required_action": [
+        "capture_source_title",
+        "capture_author",
+        "capture_version",
+        "capture_reference_location",
+        "capture_authority_level"
+      ],
+      "next_unlock": "ENTRY_EVIDENCE_CAPTURE",
+      "rulespec_status": "LOCKED"
+    },
+    {
+      "strategy_id": "GSR_AT_002",
+      "current_stage": "SOURCE_METADATA_CAPTURE",
+      "status": "BLOCKED",
+      "blocking_reason": "AUTHORITATIVE_SOURCE_METADATA_MISSING",
+      "required_action": [
+        "capture_source_title",
+        "capture_author",
+        "capture_version",
+        "capture_reference_location",
+        "capture_authority_level"
+      ],
+      "next_unlock": "ENTRY_EVIDENCE_CAPTURE",
+      "rulespec_status": "LOCKED"
+    },
+    {
+      "strategy_id": "GSR_AT_003",
+      "current_stage": "SOURCE_METADATA_CAPTURE",
+      "status": "BLOCKED",
+      "blocking_reason": "AUTHORITATIVE_SOURCE_METADATA_MISSING",
+      "required_action": [
+        "capture_source_title",
+        "capture_author",
+        "capture_version",
+        "capture_reference_location",
+        "capture_authority_level"
+      ],
+      "next_unlock": "ENTRY_EVIDENCE_CAPTURE",
+      "rulespec_status": "LOCKED"
+    },
+    {
+      "strategy_id": "GSR_AT_004",
+      "current_stage": "SOURCE_METADATA_CAPTURE",
+      "status": "BLOCKED",
+      "blocking_reason": "AUTHORITATIVE_SOURCE_METADATA_MISSING",
+      "required_action": [
+        "capture_source_title",
+        "capture_author",
+        "capture_version",
+        "capture_reference_location",
+        "capture_authority_level"
+      ],
+      "next_unlock": "ENTRY_EVIDENCE_CAPTURE",
+      "rulespec_status": "LOCKED"
+    },
+    {
+      "strategy_id": "GSR_AT_005",
+      "current_stage": "SOURCE_METADATA_CAPTURE",
+      "status": "BLOCKED",
+      "blocking_reason": "AUTHORITATIVE_SOURCE_METADATA_MISSING",
+      "required_action": [
+        "capture_source_title",
+        "capture_author",
+        "capture_version",
+        "capture_reference_location",
+        "capture_authority_level"
+      ],
+      "next_unlock": "ENTRY_EVIDENCE_CAPTURE",
+      "rulespec_status": "LOCKED"
+    },
+    {
+      "strategy_id": "GSR_AT_006",
+      "current_stage": "SOURCE_METADATA_CAPTURE",
+      "status": "BLOCKED",
+      "blocking_reason": "AUTHORITATIVE_SOURCE_METADATA_MISSING",
+      "required_action": [
+        "capture_source_title",
+        "capture_author",
+        "capture_version",
+        "capture_reference_location",
+        "capture_authority_level"
+      ],
+      "next_unlock": "ENTRY_EVIDENCE_CAPTURE",
+      "rulespec_status": "LOCKED"
+    },
+    {
+      "strategy_id": "GSR_AT_010",
+      "current_stage": "SOURCE_METADATA_CAPTURE",
+      "status": "BLOCKED",
+      "blocking_reason": "AUTHORITATIVE_SOURCE_METADATA_MISSING",
+      "required_action": [
+        "capture_source_title",
+        "capture_author",
+        "capture_version",
+        "capture_reference_location",
+        "capture_authority_level"
+      ],
+      "next_unlock": "ENTRY_EVIDENCE_CAPTURE",
+      "rulespec_status": "LOCKED"
+    },
+    {
+      "strategy_id": "GSR_AT_011",
+      "current_stage": "SOURCE_METADATA_CAPTURE",
+      "status": "BLOCKED",
+      "blocking_reason": "AUTHORITATIVE_SOURCE_METADATA_MISSING",
+      "required_action": [
+        "capture_source_title",
+        "capture_author",
+        "capture_version",
+        "capture_reference_location",
+        "capture_authority_level"
+      ],
+      "next_unlock": "ENTRY_EVIDENCE_CAPTURE",
+      "rulespec_status": "LOCKED"
+    },
+    {
+      "strategy_id": "GSR_AT_013",
+      "current_stage": "SOURCE_METADATA_CAPTURE",
+      "status": "BLOCKED",
+      "blocking_reason": "AUTHORITATIVE_SOURCE_METADATA_MISSING",
+      "required_action": [
+        "capture_source_title",
+        "capture_author",
+        "capture_version",
+        "capture_reference_location",
+        "capture_authority_level"
+      ],
+      "next_unlock": "ENTRY_EVIDENCE_CAPTURE",
+      "rulespec_status": "LOCKED"
+    },
+    {
+      "strategy_id": "GSR_AT_018",
+      "current_stage": "SOURCE_METADATA_CAPTURE",
+      "status": "BLOCKED",
+      "blocking_reason": "AUTHORITATIVE_SOURCE_METADATA_MISSING",
+      "required_action": [
+        "capture_source_title",
+        "capture_author",
+        "capture_version",
+        "capture_reference_location",
+        "capture_authority_level"
+      ],
+      "next_unlock": "ENTRY_EVIDENCE_CAPTURE",
+      "rulespec_status": "LOCKED"
+    }
+  ]
+}

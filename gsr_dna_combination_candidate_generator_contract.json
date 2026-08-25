@@ -1,0 +1,36 @@
+{
+  "document": "GSR DNA Combination Candidate Generator Contract",
+  "generated_read_only": true,
+  "status": "PENDING_IMPLEMENTATION",
+  "purpose": "Generate candidate Strategy DNA combinations from validated existing DNA components.",
+  "policy": {
+    "source_dna_only": true,
+    "new_rule_generation_forbidden": true,
+    "strategy_rules_immutable": true,
+    "candidate_only_not_deployment": true,
+    "validation_required_before_acceptance": true
+  },
+  "inputs": [
+    "strategy_dna_components",
+    "dna_similarity_matrix",
+    "dna_compatibility_matrix",
+    "strategy_regime_matrix"
+  ],
+  "generation_logic": [
+    "component_frequency_analysis",
+    "compatible_component_pairing",
+    "cluster_based_combination",
+    "regime_alignment_check"
+  ],
+  "outputs": [
+    "dna_combination_candidates",
+    "candidate_explanation",
+    "supporting_strategies"
+  ],
+  "validation": [
+    "source_component_traceability",
+    "historical_support_check",
+    "out_of_sample_validation_required"
+  ],
+  "rulespec_status": "LOCKED"
+}

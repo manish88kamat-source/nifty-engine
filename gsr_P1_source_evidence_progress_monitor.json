@@ -1,0 +1,189 @@
+{
+  "document": "GSR P1 Source Evidence Progress Monitor",
+  "generated_read_only": true,
+  "registry_modified": false,
+  "rulespec_created": false,
+  "inference_allowed": false,
+  "strategies": [
+    {
+      "strategy_id": "GSR_AT_001",
+      "current_stage": "SOURCE_METADATA",
+      "session_status": "NOT_STARTED",
+      "progress": {
+        "source_metadata": 0,
+        "entry_rule_evidence": 0,
+        "exit_rule_evidence": 0,
+        "risk_evidence": 0,
+        "position_sizing_evidence": 0,
+        "execution_evidence": 0,
+        "cost_model_evidence": 0
+      },
+      "overall_progress_percent": 0,
+      "blocking_reason": "WAITING_FOR_SOURCE_EVIDENCE",
+      "entry_capture_allowed": false,
+      "rulespec_status": "LOCKED"
+    },
+    {
+      "strategy_id": "GSR_AT_002",
+      "current_stage": "SOURCE_METADATA",
+      "session_status": "NOT_STARTED",
+      "progress": {
+        "source_metadata": 0,
+        "entry_rule_evidence": 0,
+        "exit_rule_evidence": 0,
+        "risk_evidence": 0,
+        "position_sizing_evidence": 0,
+        "execution_evidence": 0,
+        "cost_model_evidence": 0
+      },
+      "overall_progress_percent": 0,
+      "blocking_reason": "WAITING_FOR_SOURCE_EVIDENCE",
+      "entry_capture_allowed": false,
+      "rulespec_status": "LOCKED"
+    },
+    {
+      "strategy_id": "GSR_AT_003",
+      "current_stage": "SOURCE_METADATA",
+      "session_status": "NOT_STARTED",
+      "progress": {
+        "source_metadata": 0,
+        "entry_rule_evidence": 0,
+        "exit_rule_evidence": 0,
+        "risk_evidence": 0,
+        "position_sizing_evidence": 0,
+        "execution_evidence": 0,
+        "cost_model_evidence": 0
+      },
+      "overall_progress_percent": 0,
+      "blocking_reason": "WAITING_FOR_SOURCE_EVIDENCE",
+      "entry_capture_allowed": false,
+      "rulespec_status": "LOCKED"
+    },
+    {
+      "strategy_id": "GSR_AT_004",
+      "current_stage": "SOURCE_METADATA",
+      "session_status": "NOT_STARTED",
+      "progress": {
+        "source_metadata": 0,
+        "entry_rule_evidence": 0,
+        "exit_rule_evidence": 0,
+        "risk_evidence": 0,
+        "position_sizing_evidence": 0,
+        "execution_evidence": 0,
+        "cost_model_evidence": 0
+      },
+      "overall_progress_percent": 0,
+      "blocking_reason": "WAITING_FOR_SOURCE_EVIDENCE",
+      "entry_capture_allowed": false,
+      "rulespec_status": "LOCKED"
+    },
+    {
+      "strategy_id": "GSR_AT_005",
+      "current_stage": "SOURCE_METADATA",
+      "session_status": "NOT_STARTED",
+      "progress": {
+        "source_metadata": 0,
+        "entry_rule_evidence": 0,
+        "exit_rule_evidence": 0,
+        "risk_evidence": 0,
+        "position_sizing_evidence": 0,
+        "execution_evidence": 0,
+        "cost_model_evidence": 0
+      },
+      "overall_progress_percent": 0,
+      "blocking_reason": "WAITING_FOR_SOURCE_EVIDENCE",
+      "entry_capture_allowed": false,
+      "rulespec_status": "LOCKED"
+    },
+    {
+      "strategy_id": "GSR_AT_006",
+      "current_stage": "SOURCE_METADATA",
+      "session_status": "NOT_STARTED",
+      "progress": {
+        "source_metadata": 0,
+        "entry_rule_evidence": 0,
+        "exit_rule_evidence": 0,
+        "risk_evidence": 0,
+        "position_sizing_evidence": 0,
+        "execution_evidence": 0,
+        "cost_model_evidence": 0
+      },
+      "overall_progress_percent": 0,
+      "blocking_reason": "WAITING_FOR_SOURCE_EVIDENCE",
+      "entry_capture_allowed": false,
+      "rulespec_status": "LOCKED"
+    },
+    {
+      "strategy_id": "GSR_AT_010",
+      "current_stage": "SOURCE_METADATA",
+      "session_status": "NOT_STARTED",
+      "progress": {
+        "source_metadata": 0,
+        "entry_rule_evidence": 0,
+        "exit_rule_evidence": 0,
+        "risk_evidence": 0,
+        "position_sizing_evidence": 0,
+        "execution_evidence": 0,
+        "cost_model_evidence": 0
+      },
+      "overall_progress_percent": 0,
+      "blocking_reason": "WAITING_FOR_SOURCE_EVIDENCE",
+      "entry_capture_allowed": false,
+      "rulespec_status": "LOCKED"
+    },
+    {
+      "strategy_id": "GSR_AT_011",
+      "current_stage": "SOURCE_METADATA",
+      "session_status": "NOT_STARTED",
+      "progress": {
+        "source_metadata": 0,
+        "entry_rule_evidence": 0,
+        "exit_rule_evidence": 0,
+        "risk_evidence": 0,
+        "position_sizing_evidence": 0,
+        "execution_evidence": 0,
+        "cost_model_evidence": 0
+      },
+      "overall_progress_percent": 0,
+      "blocking_reason": "WAITING_FOR_SOURCE_EVIDENCE",
+      "entry_capture_allowed": false,
+      "rulespec_status": "LOCKED"
+    },
+    {
+      "strategy_id": "GSR_AT_013",
+      "current_stage": "SOURCE_METADATA",
+      "session_status": "NOT_STARTED",
+      "progress": {
+        "source_metadata": 0,
+        "entry_rule_evidence": 0,
+        "exit_rule_evidence": 0,
+        "risk_evidence": 0,
+        "position_sizing_evidence": 0,
+        "execution_evidence": 0,
+        "cost_model_evidence": 0
+      },
+      "overall_progress_percent": 0,
+      "blocking_reason": "WAITING_FOR_SOURCE_EVIDENCE",
+      "entry_capture_allowed": false,
+      "rulespec_status": "LOCKED"
+    },
+    {
+      "strategy_id": "GSR_AT_018",
+      "current_stage": "SOURCE_METADATA",
+      "session_status": "NOT_STARTED",
+      "progress": {
+        "source_metadata": 0,
+        "entry_rule_evidence": 0,
+        "exit_rule_evidence": 0,
+        "risk_evidence": 0,
+        "position_sizing_evidence": 0,
+        "execution_evidence": 0,
+        "cost_model_evidence": 0
+      },
+      "overall_progress_percent": 0,
+      "blocking_reason": "WAITING_FOR_SOURCE_EVIDENCE",
+      "entry_capture_allowed": false,
+      "rulespec_status": "LOCKED"
+    }
+  ]
+}

@@ -1,0 +1,36 @@
+{
+  "document": "GSR Walk Forward Validation Contract",
+  "generated_read_only": true,
+  "status": "PENDING_IMPLEMENTATION",
+  "purpose": "Evaluate Strategy DNA candidate stability across sequential historical periods.",
+  "policy": {
+    "rolling_validation_required": true,
+    "future_data_forbidden": true,
+    "candidate_freeze_required": true,
+    "no_rule_modification_during_validation": true
+  },
+  "inputs": [
+    "validated_dna_candidates",
+    "historical_market_data",
+    "frozen_regime_labels"
+  ],
+  "process": [
+    "training_window_selection",
+    "validation_window_execution",
+    "performance_measurement",
+    "window_shift",
+    "stability_analysis"
+  ],
+  "outputs": [
+    "walk_forward_report",
+    "stability_score",
+    "candidate_validation_status"
+  ],
+  "metrics": [
+    "period_consistency",
+    "return_stability",
+    "drawdown_stability",
+    "regime_robustness"
+  ],
+  "rulespec_status": "LOCKED"
+}

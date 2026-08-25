@@ -1,0 +1,35 @@
+{
+  "document": "GSR Market Structure Classifier Contract",
+  "generated_read_only": true,
+  "status": "PENDING_IMPLEMENTATION",
+  "policy": {
+    "no_future_data": true,
+    "performance_feedback_used": false,
+    "deterministic_output": true
+  },
+  "inputs": [
+    "higher_high_sequence",
+    "higher_low_sequence",
+    "lower_high_sequence",
+    "lower_low_sequence",
+    "range_percentile",
+    "compression_measure"
+  ],
+  "states": [
+    "DIRECTIONAL_STRUCTURE",
+    "EXPANSION_STRUCTURE",
+    "BALANCED_STRUCTURE",
+    "COMPRESSED_STRUCTURE",
+    "DISORDERED_STRUCTURE"
+  ],
+  "logic_priority": [
+    "EXPANSION_STRUCTURE",
+    "DIRECTIONAL_STRUCTURE",
+    "COMPRESSED_STRUCTURE",
+    "BALANCED_STRUCTURE",
+    "DISORDERED_STRUCTURE"
+  ],
+  "conflict_resolution": "Structure signals evaluated through price sequence and range behavior; unresolved structure returns DISORDERED_STRUCTURE",
+  "output": "market_structure_state",
+  "rulespec_status": "LOCKED"
+}

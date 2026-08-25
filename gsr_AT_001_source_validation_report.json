@@ -1,0 +1,44 @@
+{
+  "document": "GSR Source Evidence Validation Report",
+  "strategy_id": "GSR_AT_001",
+  "generated_read_only": true,
+  "checks": {
+    "entry_rule": {
+      "present": true,
+      "verified": false,
+      "captured": false
+    },
+    "exit_rule": {
+      "present": true,
+      "verified": false,
+      "captured": false
+    },
+    "initial_stop_rule": {
+      "present": true,
+      "verified": false,
+      "captured": false
+    },
+    "position_sizing_rule": {
+      "present": true,
+      "verified": false,
+      "captured": false
+    },
+    "pyramiding_rule": {
+      "present": true,
+      "verified": false,
+      "captured": false
+    },
+    "execution_rule": {
+      "present": true,
+      "verified": false,
+      "captured": false
+    },
+    "cost_model": {
+      "present": true,
+      "verified": false,
+      "captured": false
+    }
+  },
+  "source_verified": false,
+  "rulespec_allowed": false
+}

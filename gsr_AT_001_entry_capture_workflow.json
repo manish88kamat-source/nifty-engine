@@ -1,0 +1,35 @@
+{
+  "document": "GSR First Source Capture Workflow",
+  "generated_read_only": true,
+  "strategy_id": "GSR_AT_001",
+  "strategy_name": "Turtle S1 Long Breakout",
+  "current_phase": "ENTRY_RULE_CAPTURE_ONLY",
+  "locked_components": {
+    "exit_rule": true,
+    "risk_rule": true,
+    "position_sizing": true,
+    "execution_model": true,
+    "cost_model": true
+  },
+  "capture_sequence": [
+    {
+      "step": 1,
+      "file": "source_metadata.json",
+      "status": "PENDING"
+    },
+    {
+      "step": 2,
+      "file": "entry_evidence.json",
+      "status": "PENDING"
+    },
+    {
+      "step": 3,
+      "validation": "ENTRY_SOURCE_VERIFICATION",
+      "status": "PENDING"
+    }
+  ],
+  "rulespec_creation": {
+    "allowed": false,
+    "reason": "Entry evidence not yet verified"
+  }
+}

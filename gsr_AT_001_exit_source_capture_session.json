@@ -1,0 +1,31 @@
+{
+  "document": "GSR_AT_001 Exit Source Capture Session",
+  "generated_read_only": false,
+  "strategy_id": "GSR_AT_001",
+  "strategy_name": "Turtle S1 Long Breakout",
+  "capture_phase": "EXIT_RULE_SOURCE_CAPTURE",
+  "capture_policy": {
+    "source_only": true,
+    "inference_allowed": false,
+    "rule_normalization_allowed": false
+  },
+  "source_reference": {
+    "document": null,
+    "author": null,
+    "version": null,
+    "page_or_location": null
+  },
+  "exit_source_evidence": {
+    "raw_source_text": null,
+    "captured_exit_rule": null,
+    "parameters": null,
+    "conditions": null
+  },
+  "verification": {
+    "source_verified": false,
+    "text_verified": false,
+    "human_verified": false
+  },
+  "exit_capture_status": "AWAITING_SOURCE_EXIT",
+  "rulespec_status": "LOCKED"
+}

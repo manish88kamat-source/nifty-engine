@@ -1,0 +1,348 @@
+{
+  "document": "GSR P1 Evidence Requirement Matrix",
+  "generated_read_only": true,
+  "registry_modified": false,
+  "rulespec_created": false,
+  "strategies": [
+    {
+      "strategy_id": "GSR_AT_001",
+      "evidence_requirements": {
+        "source_metadata": {
+          "mandatory": true,
+          "unlock_stage": 1
+        },
+        "entry_rule_evidence": {
+          "mandatory": true,
+          "unlock_stage": 2
+        },
+        "exit_rule_evidence": {
+          "mandatory": true,
+          "unlock_stage": 3
+        },
+        "risk_management_evidence": {
+          "mandatory": true,
+          "unlock_stage": 4
+        },
+        "position_sizing_evidence": {
+          "mandatory": true,
+          "unlock_stage": 5
+        },
+        "execution_evidence": {
+          "mandatory": true,
+          "unlock_stage": 6
+        },
+        "cost_model_evidence": {
+          "mandatory": true,
+          "unlock_stage": 7
+        }
+      },
+      "rulespec_permission": "LOCKED"
+    },
+    {
+      "strategy_id": "GSR_AT_002",
+      "evidence_requirements": {
+        "source_metadata": {
+          "mandatory": true,
+          "unlock_stage": 1
+        },
+        "entry_rule_evidence": {
+          "mandatory": true,
+          "unlock_stage": 2
+        },
+        "exit_rule_evidence": {
+          "mandatory": true,
+          "unlock_stage": 3
+        },
+        "risk_management_evidence": {
+          "mandatory": true,
+          "unlock_stage": 4
+        },
+        "position_sizing_evidence": {
+          "mandatory": true,
+          "unlock_stage": 5
+        },
+        "execution_evidence": {
+          "mandatory": true,
+          "unlock_stage": 6
+        },
+        "cost_model_evidence": {
+          "mandatory": true,
+          "unlock_stage": 7
+        }
+      },
+      "rulespec_permission": "LOCKED"
+    },
+    {
+      "strategy_id": "GSR_AT_003",
+      "evidence_requirements": {
+        "source_metadata": {
+          "mandatory": true,
+          "unlock_stage": 1
+        },
+        "entry_rule_evidence": {
+          "mandatory": true,
+          "unlock_stage": 2
+        },
+        "exit_rule_evidence": {
+          "mandatory": true,
+          "unlock_stage": 3
+        },
+        "risk_management_evidence": {
+          "mandatory": true,
+          "unlock_stage": 4
+        },
+        "position_sizing_evidence": {
+          "mandatory": true,
+          "unlock_stage": 5
+        },
+        "execution_evidence": {
+          "mandatory": true,
+          "unlock_stage": 6
+        },
+        "cost_model_evidence": {
+          "mandatory": true,
+          "unlock_stage": 7
+        }
+      },
+      "rulespec_permission": "LOCKED"
+    },
+    {
+      "strategy_id": "GSR_AT_004",
+      "evidence_requirements": {
+        "source_metadata": {
+          "mandatory": true,
+          "unlock_stage": 1
+        },
+        "entry_rule_evidence": {
+          "mandatory": true,
+          "unlock_stage": 2
+        },
+        "exit_rule_evidence": {
+          "mandatory": true,
+          "unlock_stage": 3
+        },
+        "risk_management_evidence": {
+          "mandatory": true,
+          "unlock_stage": 4
+        },
+        "position_sizing_evidence": {
+          "mandatory": true,
+          "unlock_stage": 5
+        },
+        "execution_evidence": {
+          "mandatory": true,
+          "unlock_stage": 6
+        },
+        "cost_model_evidence": {
+          "mandatory": true,
+          "unlock_stage": 7
+        }
+      },
+      "rulespec_permission": "LOCKED"
+    },
+    {
+      "strategy_id": "GSR_AT_005",
+      "evidence_requirements": {
+        "source_metadata": {
+          "mandatory": true,
+          "unlock_stage": 1
+        },
+        "entry_rule_evidence": {
+          "mandatory": true,
+          "unlock_stage": 2
+        },
+        "exit_rule_evidence": {
+          "mandatory": true,
+          "unlock_stage": 3
+        },
+        "risk_management_evidence": {
+          "mandatory": true,
+          "unlock_stage": 4
+        },
+        "position_sizing_evidence": {
+          "mandatory": true,
+          "unlock_stage": 5
+        },
+        "execution_evidence": {
+          "mandatory": true,
+          "unlock_stage": 6
+        },
+        "cost_model_evidence": {
+          "mandatory": true,
+          "unlock_stage": 7
+        }
+      },
+      "rulespec_permission": "LOCKED"
+    },
+    {
+      "strategy_id": "GSR_AT_006",
+      "evidence_requirements": {
+        "source_metadata": {
+          "mandatory": true,
+          "unlock_stage": 1
+        },
+        "entry_rule_evidence": {
+          "mandatory": true,
+          "unlock_stage": 2
+        },
+        "exit_rule_evidence": {
+          "mandatory": true,
+          "unlock_stage": 3
+        },
+        "risk_management_evidence": {
+          "mandatory": true,
+          "unlock_stage": 4
+        },
+        "position_sizing_evidence": {
+          "mandatory": true,
+          "unlock_stage": 5
+        },
+        "execution_evidence": {
+          "mandatory": true,
+          "unlock_stage": 6
+        },
+        "cost_model_evidence": {
+          "mandatory": true,
+          "unlock_stage": 7
+        }
+      },
+      "rulespec_permission": "LOCKED"
+    },
+    {
+      "strategy_id": "GSR_AT_010",
+      "evidence_requirements": {
+        "source_metadata": {
+          "mandatory": true,
+          "unlock_stage": 1
+        },
+        "entry_rule_evidence": {
+          "mandatory": true,
+          "unlock_stage": 2
+        },
+        "exit_rule_evidence": {
+          "mandatory": true,
+          "unlock_stage": 3
+        },
+        "risk_management_evidence": {
+          "mandatory": true,
+          "unlock_stage": 4
+        },
+        "position_sizing_evidence": {
+          "mandatory": true,
+          "unlock_stage": 5
+        },
+        "execution_evidence": {
+          "mandatory": true,
+          "unlock_stage": 6
+        },
+        "cost_model_evidence": {
+          "mandatory": true,
+          "unlock_stage": 7
+        }
+      },
+      "rulespec_permission": "LOCKED"
+    },
+    {
+      "strategy_id": "GSR_AT_011",
+      "evidence_requirements": {
+        "source_metadata": {
+          "mandatory": true,
+          "unlock_stage": 1
+        },
+        "entry_rule_evidence": {
+          "mandatory": true,
+          "unlock_stage": 2
+        },
+        "exit_rule_evidence": {
+          "mandatory": true,
+          "unlock_stage": 3
+        },
+        "risk_management_evidence": {
+          "mandatory": true,
+          "unlock_stage": 4
+        },
+        "position_sizing_evidence": {
+          "mandatory": true,
+          "unlock_stage": 5
+        },
+        "execution_evidence": {
+          "mandatory": true,
+          "unlock_stage": 6
+        },
+        "cost_model_evidence": {
+          "mandatory": true,
+          "unlock_stage": 7
+        }
+      },
+      "rulespec_permission": "LOCKED"
+    },
+    {
+      "strategy_id": "GSR_AT_013",
+      "evidence_requirements": {
+        "source_metadata": {
+          "mandatory": true,
+          "unlock_stage": 1
+        },
+        "entry_rule_evidence": {
+          "mandatory": true,
+          "unlock_stage": 2
+        },
+        "exit_rule_evidence": {
+          "mandatory": true,
+          "unlock_stage": 3
+        },
+        "risk_management_evidence": {
+          "mandatory": true,
+          "unlock_stage": 4
+        },
+        "position_sizing_evidence": {
+          "mandatory": true,
+          "unlock_stage": 5
+        },
+        "execution_evidence": {
+          "mandatory": true,
+          "unlock_stage": 6
+        },
+        "cost_model_evidence": {
+          "mandatory": true,
+          "unlock_stage": 7
+        }
+      },
+      "rulespec_permission": "LOCKED"
+    },
+    {
+      "strategy_id": "GSR_AT_018",
+      "evidence_requirements": {
+        "source_metadata": {
+          "mandatory": true,
+          "unlock_stage": 1
+        },
+        "entry_rule_evidence": {
+          "mandatory": true,
+          "unlock_stage": 2
+        },
+        "exit_rule_evidence": {
+          "mandatory": true,
+          "unlock_stage": 3
+        },
+        "risk_management_evidence": {
+          "mandatory": true,
+          "unlock_stage": 4
+        },
+        "position_sizing_evidence": {
+          "mandatory": true,
+          "unlock_stage": 5
+        },
+        "execution_evidence": {
+          "mandatory": true,
+          "unlock_stage": 6
+        },
+        "cost_model_evidence": {
+          "mandatory": true,
+          "unlock_stage": 7
+        }
+      },
+      "rulespec_permission": "LOCKED"
+    }
+  ]
+}

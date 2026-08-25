@@ -1,0 +1,52 @@
+{
+  "document": "GSR Rule Capture Draft",
+  "generated_read_only": true,
+  "strategy_identity": {
+    "strategy_id": "GSR_AT_001",
+    "trader": "Turtle/Donchian/Seykota family",
+    "strategy_name": "Turtle S1 Long Breakout",
+    "family": "Trend Following",
+    "asset_class": "futures",
+    "source_basis": "Turtle rules are publicly documented; other entries remain mechanism-level where exact personal rules are not public.",
+    "evidence_grade": "B"
+  },
+  "capture_status": "PENDING_SOURCE_VERIFICATION",
+  "rule_definition": {
+    "entry": {
+      "status": "REQUIRED",
+      "condition": null,
+      "parameters": null
+    },
+    "exit": {
+      "status": "REQUIRED",
+      "condition": null,
+      "parameters": null
+    },
+    "stop_logic": {
+      "status": "REQUIRED",
+      "definition": null
+    },
+    "target_logic": {
+      "status": "OPTIONAL",
+      "definition": null
+    }
+  },
+  "execution_definition": {
+    "timeframe": null,
+    "entry_execution": null,
+    "transaction_cost_model": null,
+    "slippage_model": null
+  },
+  "risk_definition": {
+    "position_sizing": null,
+    "volatility_scaling": null,
+    "max_holding_period": null
+  },
+  "validation_requirements": [
+    "source_version_confirmed",
+    "rule_parameters_locked",
+    "no_parameter_optimization_before_validation",
+    "out_of_sample_validation"
+  ],
+  "do_not_infer_missing_rules": true
+}

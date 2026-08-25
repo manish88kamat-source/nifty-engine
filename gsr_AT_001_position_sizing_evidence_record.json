@@ -1,0 +1,44 @@
+{
+  "document": "GSR_AT_001 Position Sizing Evidence Record",
+  "generated_read_only": true,
+  "strategy_id": "GSR_AT_001",
+  "strategy_name": "Turtle S1 Long Breakout",
+  "evidence_type": "POSITION_SIZING_EVIDENCE",
+  "capture_status": "AWAITING_SOURCE_EVIDENCE",
+  "source_reference": {
+    "document": "The Original Turtle Trading Rules",
+    "author": "ORIGINAL TURTLES; Curtis Faith (Original Turtle, sign-off)",
+    "version": "2003",
+    "page_or_location": "Chapter: Position Sizing, Volatility / Dollar Volatility Adjustment / Volatility Adjusted Position Units / Units as a measure of Risk, Scribd copy pp. 13-17"
+  },
+  "position_sizing_evidence": {
+    "raw_source_text": "The Turtles used a volatility-based constant percentage risk position sizing algorithm. N is the 20-day exponential moving average of True Range. Units were sized so that 1 N represented 1% of account equity. Unit = 1% of Account Equity divided by N Dollars per Point. The Turtles also limited the number of Units that could be maintained at different risk levels: 4 Units for a single market, 6 Units for closely correlated markets, 10 Units for loosely correlated markets, and 12 Units for total single-direction exposure.",
+    "captured_position_rule": "Position size is volatility-adjusted using N so that one Unit represents approximately 1% of account equity at one N of volatility; Unit size = 1% of account equity / N dollar volatility, with portfolio/unit exposure limits applied.",
+    "sizing_parameters": {
+      "N_definition": "20-day exponential moving average of True Range",
+      "unit_risk_fraction": 0.01,
+      "unit_formula": "0.01 * account_equity / (N * dollars_per_point)",
+      "max_units_single_market": 4,
+      "max_units_closely_correlated": 6,
+      "max_units_loosely_correlated": 10,
+      "max_units_single_direction": 12
+    },
+    "allocation_conditions": {
+      "single_market": "maximum 4 Units",
+      "closely_correlated_markets": "maximum 6 Units in one direction",
+      "loosely_correlated_markets": "maximum 10 Units in one direction",
+      "single_direction": "maximum 12 Units long or short"
+    }
+  },
+  "verification": {
+    "source_reference_verified": true,
+    "text_verified": true,
+    "human_verified": true
+  },
+  "transition_control": {
+    "current_state": "POSITION_SIZE_RULE_VERIFIED",
+    "next_state": "EXECUTION_SOURCE_CAPTURE",
+    "transition_allowed": true
+  },
+  "rulespec_status": "LOCKED"
+}

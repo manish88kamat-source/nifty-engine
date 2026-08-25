@@ -1,0 +1,13 @@
+{
+  "document": "GSR_AT_001 Metadata State Snapshot",
+  "generated_read_only": true,
+  "strategy_id": "GSR_AT_001",
+  "current_phase": "SOURCE_METADATA_CAPTURE",
+  "completion_percentage": 0,
+  "total_tasks": 7,
+  "completed_tasks": 0,
+  "metadata_complete": false,
+  "entry_capture_allowed": false,
+  "next_action": "CAPTURE_AUTHORITATIVE_SOURCE_METADATA",
+  "rulespec_status": "LOCKED"
+}

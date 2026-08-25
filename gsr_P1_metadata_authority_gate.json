@@ -1,0 +1,178 @@
+{
+  "document": "GSR P1 Metadata Authority Gate",
+  "generated_read_only": true,
+  "registry_modified": false,
+  "rulespec_created": false,
+  "strategies": [
+    {
+      "strategy_id": "GSR_AT_001",
+      "authority_checks": {
+        "source_identity_verified": false,
+        "reference_verified": false,
+        "authority_level_verified": false,
+        "metadata_consistency_verified": false
+      },
+      "gate_status": "BLOCKED",
+      "unlock_conditions": {
+        "metadata_verified": true,
+        "authority_verified": true,
+        "human_review_complete": true
+      },
+      "entry_capture_allowed": false,
+      "rulespec_status": "LOCKED"
+    },
+    {
+      "strategy_id": "GSR_AT_002",
+      "authority_checks": {
+        "source_identity_verified": false,
+        "reference_verified": false,
+        "authority_level_verified": false,
+        "metadata_consistency_verified": false
+      },
+      "gate_status": "BLOCKED",
+      "unlock_conditions": {
+        "metadata_verified": true,
+        "authority_verified": true,
+        "human_review_complete": true
+      },
+      "entry_capture_allowed": false,
+      "rulespec_status": "LOCKED"
+    },
+    {
+      "strategy_id": "GSR_AT_003",
+      "authority_checks": {
+        "source_identity_verified": false,
+        "reference_verified": false,
+        "authority_level_verified": false,
+        "metadata_consistency_verified": false
+      },
+      "gate_status": "BLOCKED",
+      "unlock_conditions": {
+        "metadata_verified": true,
+        "authority_verified": true,
+        "human_review_complete": true
+      },
+      "entry_capture_allowed": false,
+      "rulespec_status": "LOCKED"
+    },
+    {
+      "strategy_id": "GSR_AT_004",
+      "authority_checks": {
+        "source_identity_verified": false,
+        "reference_verified": false,
+        "authority_level_verified": false,
+        "metadata_consistency_verified": false
+      },
+      "gate_status": "BLOCKED",
+      "unlock_conditions": {
+        "metadata_verified": true,
+        "authority_verified": true,
+        "human_review_complete": true
+      },
+      "entry_capture_allowed": false,
+      "rulespec_status": "LOCKED"
+    },
+    {
+      "strategy_id": "GSR_AT_005",
+      "authority_checks": {
+        "source_identity_verified": false,
+        "reference_verified": false,
+        "authority_level_verified": false,
+        "metadata_consistency_verified": false
+      },
+      "gate_status": "BLOCKED",
+      "unlock_conditions": {
+        "metadata_verified": true,
+        "authority_verified": true,
+        "human_review_complete": true
+      },
+      "entry_capture_allowed": false,
+      "rulespec_status": "LOCKED"
+    },
+    {
+      "strategy_id": "GSR_AT_006",
+      "authority_checks": {
+        "source_identity_verified": false,
+        "reference_verified": false,
+        "authority_level_verified": false,
+        "metadata_consistency_verified": false
+      },
+      "gate_status": "BLOCKED",
+      "unlock_conditions": {
+        "metadata_verified": true,
+        "authority_verified": true,
+        "human_review_complete": true
+      },
+      "entry_capture_allowed": false,
+      "rulespec_status": "LOCKED"
+    },
+    {
+      "strategy_id": "GSR_AT_010",
+      "authority_checks": {
+        "source_identity_verified": false,
+        "reference_verified": false,
+        "authority_level_verified": false,
+        "metadata_consistency_verified": false
+      },
+      "gate_status": "BLOCKED",
+      "unlock_conditions": {
+        "metadata_verified": true,
+        "authority_verified": true,
+        "human_review_complete": true
+      },
+      "entry_capture_allowed": false,
+      "rulespec_status": "LOCKED"
+    },
+    {
+      "strategy_id": "GSR_AT_011",
+      "authority_checks": {
+        "source_identity_verified": false,
+        "reference_verified": false,
+        "authority_level_verified": false,
+        "metadata_consistency_verified": false
+      },
+      "gate_status": "BLOCKED",
+      "unlock_conditions": {
+        "metadata_verified": true,
+        "authority_verified": true,
+        "human_review_complete": true
+      },
+      "entry_capture_allowed": false,
+      "rulespec_status": "LOCKED"
+    },
+    {
+      "strategy_id": "GSR_AT_013",
+      "authority_checks": {
+        "source_identity_verified": false,
+        "reference_verified": false,
+        "authority_level_verified": false,
+        "metadata_consistency_verified": false
+      },
+      "gate_status": "BLOCKED",
+      "unlock_conditions": {
+        "metadata_verified": true,
+        "authority_verified": true,
+        "human_review_complete": true
+      },
+      "entry_capture_allowed": false,
+      "rulespec_status": "LOCKED"
+    },
+    {
+      "strategy_id": "GSR_AT_018",
+      "authority_checks": {
+        "source_identity_verified": false,
+        "reference_verified": false,
+        "authority_level_verified": false,
+        "metadata_consistency_verified": false
+      },
+      "gate_status": "BLOCKED",
+      "unlock_conditions": {
+        "metadata_verified": true,
+        "authority_verified": true,
+        "human_review_complete": true
+      },
+      "entry_capture_allowed": false,
+      "rulespec_status": "LOCKED"
+    }
+  ]
+}

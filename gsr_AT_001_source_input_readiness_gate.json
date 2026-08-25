@@ -1,0 +1,10 @@
+{
+  "document": "GSR_AT_001 Source Input Readiness Gate",
+  "generated_read_only": true,
+  "strategy_id": "GSR_AT_001",
+  "source_input_ready": false,
+  "metadata_verified": false,
+  "rule_capture_allowed": false,
+  "required_action": "PROVIDE_AND_VERIFY_AUTHORITATIVE_SOURCE_METADATA",
+  "rulespec_status": "LOCKED"
+}

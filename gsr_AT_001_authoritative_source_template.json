@@ -1,0 +1,58 @@
+{
+  "document": "GSR Authoritative Source Evidence Template",
+  "generated_read_only": true,
+  "strategy_id": "GSR_AT_001",
+  "status": "AWAITING_HUMAN_SOURCE_ENTRY",
+  "source_identity": {
+    "source_title": null,
+    "author": null,
+    "edition_or_version": null,
+    "publication_date": null,
+    "page_or_reference_location": null,
+    "source_type": null,
+    "authority_level": null
+  },
+  "rule_evidence": {
+    "entry_rule": {
+      "captured_text": null,
+      "normalized_rule": null,
+      "parameters": {},
+      "source_quote_reference": null,
+      "verified": false
+    },
+    "exit_rule": {
+      "captured_text": null,
+      "normalized_rule": null,
+      "parameters": {},
+      "source_quote_reference": null,
+      "verified": false
+    },
+    "risk_rule": {
+      "captured_text": null,
+      "normalized_rule": null,
+      "parameters": {},
+      "source_quote_reference": null,
+      "verified": false
+    },
+    "position_sizing": {
+      "captured_text": null,
+      "normalized_rule": null,
+      "parameters": {},
+      "source_quote_reference": null,
+      "verified": false
+    }
+  },
+  "anti_inference_guard": {
+    "missing_information_must_remain_unknown": true,
+    "parameter_guessing_forbidden": true,
+    "rule_completion_by_ai_forbidden": true
+  },
+  "rulespec_gate": {
+    "allowed": false,
+    "requirements": [
+      "all_rules_verified",
+      "source_reference_present",
+      "normalized_rule_complete"
+    ]
+  }
+}

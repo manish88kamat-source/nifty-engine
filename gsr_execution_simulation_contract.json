@@ -1,0 +1,37 @@
+{
+  "document": "GSR Execution Simulation Contract",
+  "generated_read_only": true,
+  "status": "PENDING_IMPLEMENTATION",
+  "purpose": "Define realistic execution assumptions for historical strategy replay.",
+  "policy": {
+    "lookahead_bias_forbidden": true,
+    "execution_after_signal_confirmation_required": true,
+    "cost_model_required": true,
+    "slippage_model_required": true
+  },
+  "inputs": [
+    "strategy_signal",
+    "canonical_market_data",
+    "position_state"
+  ],
+  "execution_rules": {
+    "entry_execution": "next_available_execution_point",
+    "exit_execution": "next_available_execution_point",
+    "price_source": "market_data_based",
+    "slippage": "configurable_model",
+    "transaction_cost": "configurable_model",
+    "latency": "explicit_parameter"
+  },
+  "outputs": [
+    "executed_orders",
+    "execution_prices",
+    "cost_adjusted_trades",
+    "realized_pnl"
+  ],
+  "validation": [
+    "execution_timestamp_check",
+    "price_availability_check",
+    "cost_application_check"
+  ],
+  "rulespec_status": "LOCKED"
+}

@@ -1,0 +1,50 @@
+{
+  "document": "GSR_AT_001 Strategy DNA Component Mapping",
+  "generated_read_only": true,
+  "strategy_id": "GSR_AT_001",
+  "mapping_phase": "DNA_COMPONENT_MAPPING",
+  "policy": {
+    "source_evidence_only": true,
+    "inference_allowed": false,
+    "rule_generation_allowed": false
+  },
+  "dna_mapping": {
+    "market_context_dna": {
+      "source": "source_metadata",
+      "status": "VERIFIED"
+    },
+    "entry_logic_dna": {
+      "source": "entry_evidence",
+      "status": "VERIFIED"
+    },
+    "exit_logic_dna": {
+      "source": "exit_evidence",
+      "status": "VERIFIED"
+    },
+    "risk_dna": {
+      "source": "risk_evidence",
+      "status": "VERIFIED"
+    },
+    "position_sizing_dna": {
+      "source": "position_sizing_evidence",
+      "status": "VERIFIED"
+    },
+    "execution_dna": {
+      "source": "execution_evidence",
+      "status": "VERIFIED"
+    },
+    "regime_dna": {
+      "source": null,
+      "status": "SOURCE_NOT_AVAILABLE",
+      "reason": "The verified source establishes Turtle breakout, exit, risk, sizing and execution rules, but no explicit formal market-regime classification rule is documented in the captured source evidence. Inference is prohibited."
+    },
+    "failure_condition_dna": {
+      "source": "entry_evidence / System 1 breakout qualification",
+      "status": "VERIFIED",
+      "evidence": "A System 1 breakout is treated as a losing breakout when, after the breakout date, price moves 2N against the position before a profitable 10-day exit occurs. A losing previous breakout permits the subsequent System 1 breakout to be taken regardless of direction.",
+      "reference": "The Original Turtle Trading Rules, Chapter Entries, System 1 Entry / Breakouts, pp. 19-20"
+    }
+  },
+  "mapping_complete": false,
+  "rulespec_status": "LOCKED"
+}

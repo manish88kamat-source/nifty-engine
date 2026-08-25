@@ -1,0 +1,31 @@
+{
+  "document": "GSR Volatility Classifier Contract",
+  "generated_read_only": true,
+  "status": "PENDING_IMPLEMENTATION",
+  "policy": {
+    "no_future_data": true,
+    "performance_feedback_used": false,
+    "deterministic_output": true
+  },
+  "inputs": [
+    "ATR",
+    "ATR_percentile",
+    "realized_volatility",
+    "range_percentile"
+  ],
+  "states": [
+    "LOW_VOLATILITY",
+    "NORMAL_VOLATILITY",
+    "HIGH_VOLATILITY",
+    "EXTREME_VOLATILITY"
+  ],
+  "logic_priority": [
+    "EXTREME_VOLATILITY",
+    "HIGH_VOLATILITY",
+    "LOW_VOLATILITY",
+    "NORMAL_VOLATILITY"
+  ],
+  "conflict_resolution": "ATR percentile and realized volatility disagreement resolved by combined volatility score; ambiguous cases return NORMAL_VOLATILITY",
+  "output": "volatility_state",
+  "rulespec_status": "LOCKED"
+}

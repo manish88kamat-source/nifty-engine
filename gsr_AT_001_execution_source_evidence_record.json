@@ -1,0 +1,42 @@
+{
+  "document": "GSR_AT_001 Execution Source Evidence Record",
+  "generated_read_only": true,
+  "strategy_id": "GSR_AT_001",
+  "strategy_name": "Turtle S1 Long Breakout",
+  "evidence_type": "EXECUTION_EVIDENCE",
+  "capture_status": "AWAITING_SOURCE_EVIDENCE",
+  "source_reference": {
+    "document": "The Original Turtle Trading Rules",
+    "author": "ORIGINAL TURTLES; Curtis Faith (Original Turtle, sign-off)",
+    "version": "2003",
+    "page_or_location": "Chapter: Entries / Breakouts and subsequent position management sections, Scribd copy"
+  },
+  "execution_evidence": {
+    "raw_source_text": "The Turtles entered when price exceeded the specified breakout level by a single tick. For a System 1 long breakout, one Unit was used to initiate the position. The source describes adding Units as the position moved in favor by 1/2 N, subject to the stated Unit and exposure limits.",
+    "captured_execution_rule": "Execute the S1 long breakout when price exceeds the preceding 20-day high by one tick; initiate with one Unit. Subsequent unit additions follow the source-defined 1/2 N favorable-move rule and exposure limits.",
+    "execution_parameters": {
+      "entry_trigger": "one_tick_above_20_day_high",
+      "initial_units": 1,
+      "add_unit_increment_N": 0.5,
+      "broker_order_type": null,
+      "slippage_model": null,
+      "transaction_cost_model": null,
+      "latency_model": null
+    },
+    "market_conditions": {
+      "required_condition": "S1 breakout condition",
+      "additional_source_defined_filter": "ignore S1 signal when the last breakout would have resulted in a winning trade"
+    }
+  },
+  "verification": {
+    "source_reference_verified": true,
+    "text_verified": true,
+    "human_verified": true
+  },
+  "transition_control": {
+    "current_state": "EXECUTION_RULE_VERIFIED",
+    "next_state": "STRATEGY_DNA_EXTRACTION",
+    "transition_allowed": true
+  },
+  "rulespec_status": "LOCKED"
+}

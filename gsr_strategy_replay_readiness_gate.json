@@ -1,0 +1,16 @@
+{
+  "document": "GSR Strategy Replay Engine Readiness Gate",
+  "generated_read_only": true,
+  "checks": {
+    "strategy_replay_contract": true,
+    "execution_simulation_contract": true,
+    "performance_metrics_contract": true,
+    "regime_attribution_contract": true,
+    "strategy_regime_matrix_contract": true
+  },
+  "completed_checks": 5,
+  "total_checks": 5,
+  "replay_engine_ready": true,
+  "matrix_generation_allowed": true,
+  "rulespec_status": "LOCKED"
+}

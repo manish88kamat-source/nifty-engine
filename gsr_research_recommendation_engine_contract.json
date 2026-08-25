@@ -1,0 +1,38 @@
+{
+  "document": "GSR Research Recommendation Engine Contract",
+  "generated_read_only": true,
+  "status": "PENDING_IMPLEMENTATION",
+  "purpose": "Generate evidence-based research suggestions from accumulated GSR research knowledge without modifying strategies or rules.",
+  "policy": {
+    "recommendation_only": true,
+    "strategy_rule_generation_forbidden": true,
+    "automatic_strategy_activation_forbidden": true,
+    "performance_feedback_used_as_evidence_only": true,
+    "human_validation_required": true
+  },
+  "inputs": [
+    "research_knowledge_base",
+    "market_behavior_patterns",
+    "dna_evolution_record",
+    "strategy_lifecycle_record",
+    "regime_performance_history"
+  ],
+  "recommendation_dimensions": [
+    "research_gap_detection",
+    "regime_undercoverage_detection",
+    "dna_stability_review",
+    "experiment_priority_suggestion",
+    "historical_behavior_revisit"
+  ],
+  "outputs": [
+    "research_recommendations",
+    "experiment_priority_list",
+    "investigation_report"
+  ],
+  "validation": [
+    "evidence_traceability_check",
+    "source_reference_check",
+    "recommendation_consistency_check"
+  ],
+  "rulespec_status": "LOCKED"
+}

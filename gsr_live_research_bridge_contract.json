@@ -1,0 +1,51 @@
+{
+  "document": "GSR Live Research Bridge Contract",
+  "generated_read_only": true,
+  "status": "PENDING_IMPLEMENTATION",
+  "purpose": "Provide controlled live market observation flow into GSR research system without strategy opinion leakage.",
+  "policy": {
+    "raw_observation_only": true,
+    "strategy_signal_input_forbidden": true,
+    "alpha_opinion_input_forbidden": true,
+    "historical_pipeline_isolation_required": true,
+    "timestamp_integrity_required": true
+  },
+  "inputs": [
+    "live_market_feed",
+    "broker_api_observation",
+    "exchange_data_stream"
+  ],
+  "observation_fields": [
+    "timestamp",
+    "symbol",
+    "open",
+    "high",
+    "low",
+    "close",
+    "volume",
+    "oi",
+    "bid",
+    "ask",
+    "spread",
+    "source_identifier",
+    "data_quality_score"
+  ],
+  "processing": [
+    "source_validation",
+    "schema_normalization",
+    "timestamp_alignment",
+    "quality_check",
+    "canonical_observation_output"
+  ],
+  "outputs": [
+    "live_canonical_observation",
+    "live_data_quality_report"
+  ],
+  "validation": [
+    "schema_check",
+    "timestamp_sequence_check",
+    "source_traceability_check",
+    "feed_integrity_check"
+  ],
+  "rulespec_status": "LOCKED"
+}

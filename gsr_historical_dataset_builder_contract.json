@@ -1,0 +1,33 @@
+{
+  "document": "GSR Historical Dataset Builder Contract",
+  "generated_read_only": true,
+  "status": "PENDING_IMPLEMENTATION",
+  "purpose": "Build versioned research datasets from validated canonical market data.",
+  "policy": {
+    "canonical_data_only": true,
+    "lookahead_bias_forbidden": true,
+    "dataset_versioning_required": true,
+    "source_traceability_required": true
+  },
+  "pipeline": [
+    "storage_validation",
+    "data_loading",
+    "symbol_filtering",
+    "timeframe_alignment",
+    "missing_data_check",
+    "dataset_version_creation"
+  ],
+  "dataset_layers": {
+    "research_input": "canonical_market_data",
+    "feature_input": "generated_features",
+    "regime_input": "frozen_regime_labels",
+    "replay_output": "strategy_results"
+  },
+  "validation": [
+    "coverage_check",
+    "date_range_check",
+    "symbol_integrity_check",
+    "version_hash_generation"
+  ],
+  "rulespec_status": "LOCKED"
+}

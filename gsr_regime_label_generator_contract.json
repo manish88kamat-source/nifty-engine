@@ -1,0 +1,41 @@
+{
+  "document": "GSR Regime Label Generator Contract",
+  "generated_read_only": true,
+  "status": "PENDING_IMPLEMENTATION",
+  "purpose": "Generate frozen regime labels from validated feature snapshots before strategy replay.",
+  "policy": {
+    "feature_snapshot_only": true,
+    "strategy_performance_input": false,
+    "future_data_forbidden": true,
+    "labels_immutable_after_generation": true,
+    "classifier_versions_required": true
+  },
+  "pipeline": [
+    "feature_snapshot_validation",
+    "trend_classification",
+    "volatility_classification",
+    "momentum_classification",
+    "structure_classification",
+    "transition_classification",
+    "composite_regime_generation",
+    "label_storage"
+  ],
+  "outputs": [
+    "timestamp",
+    "symbol",
+    "trend_state",
+    "volatility_state",
+    "momentum_state",
+    "market_structure_state",
+    "transition_state",
+    "composite_regime_state",
+    "regime_version"
+  ],
+  "validation": [
+    "feature_version_check",
+    "classifier_version_check",
+    "timestamp_alignment",
+    "duplicate_label_check"
+  ],
+  "rulespec_status": "LOCKED"
+}

@@ -1,0 +1,35 @@
+{
+  "document": "GSR Trend Classifier Contract",
+  "generated_read_only": true,
+  "status": "PENDING_IMPLEMENTATION",
+  "policy": {
+    "no_future_data": true,
+    "performance_feedback_used": false,
+    "deterministic_output": true
+  },
+  "inputs": [
+    "close",
+    "EMA20",
+    "EMA50",
+    "EMA200",
+    "ADX",
+    "EMA20_slope"
+  ],
+  "states": [
+    "STRONG_UPTREND",
+    "UPTREND",
+    "NEUTRAL",
+    "DOWNTREND",
+    "STRONG_DOWNTREND"
+  ],
+  "logic_priority": [
+    "STRONG_UPTREND",
+    "STRONG_DOWNTREND",
+    "UPTREND",
+    "DOWNTREND",
+    "NEUTRAL"
+  ],
+  "conflict_resolution": "Higher confidence structural state wins; unresolved conflicts return NEUTRAL",
+  "output": "trend_state",
+  "rulespec_status": "LOCKED"
+}

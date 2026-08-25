@@ -1,0 +1,116 @@
+{
+  "document": "GSR_AT_001 Authority Resolution Queue",
+  "generated_read_only": true,
+  "strategy_id": "GSR_AT_001",
+  "total_tasks": 7,
+  "open_tasks": [
+    {
+      "strategy_id": "GSR_AT_001",
+      "verification_item": "source_title_present",
+      "resolution_status": "OPEN",
+      "source_evidence": null,
+      "reference": null,
+      "human_verification": false,
+      "verification_status": "PENDING",
+      "resolution_policy": {
+        "source_only": true,
+        "inference_allowed": false,
+        "manual_override_allowed": false
+      },
+      "next_action": "CAPTURE_AND_VERIFY_AUTHORITATIVE_SOURCE"
+    },
+    {
+      "strategy_id": "GSR_AT_001",
+      "verification_item": "author_present",
+      "resolution_status": "OPEN",
+      "source_evidence": null,
+      "reference": null,
+      "human_verification": false,
+      "verification_status": "PENDING",
+      "resolution_policy": {
+        "source_only": true,
+        "inference_allowed": false,
+        "manual_override_allowed": false
+      },
+      "next_action": "CAPTURE_AND_VERIFY_AUTHORITATIVE_SOURCE"
+    },
+    {
+      "strategy_id": "GSR_AT_001",
+      "verification_item": "reference_present",
+      "resolution_status": "OPEN",
+      "source_evidence": null,
+      "reference": null,
+      "human_verification": false,
+      "verification_status": "PENDING",
+      "resolution_policy": {
+        "source_only": true,
+        "inference_allowed": false,
+        "manual_override_allowed": false
+      },
+      "next_action": "CAPTURE_AND_VERIFY_AUTHORITATIVE_SOURCE"
+    },
+    {
+      "strategy_id": "GSR_AT_001",
+      "verification_item": "authority_level_present",
+      "resolution_status": "OPEN",
+      "source_evidence": null,
+      "reference": null,
+      "human_verification": false,
+      "verification_status": "PENDING",
+      "resolution_policy": {
+        "source_only": true,
+        "inference_allowed": false,
+        "manual_override_allowed": false
+      },
+      "next_action": "CAPTURE_AND_VERIFY_AUTHORITATIVE_SOURCE"
+    },
+    {
+      "strategy_id": "GSR_AT_001",
+      "verification_item": "primary_source_confirmed",
+      "resolution_status": "OPEN",
+      "source_evidence": null,
+      "reference": null,
+      "human_verification": false,
+      "verification_status": "PENDING",
+      "resolution_policy": {
+        "source_only": true,
+        "inference_allowed": false,
+        "manual_override_allowed": false
+      },
+      "next_action": "CAPTURE_AND_VERIFY_AUTHORITATIVE_SOURCE"
+    },
+    {
+      "strategy_id": "GSR_AT_001",
+      "verification_item": "reference_confirmed",
+      "resolution_status": "OPEN",
+      "source_evidence": null,
+      "reference": null,
+      "human_verification": false,
+      "verification_status": "PENDING",
+      "resolution_policy": {
+        "source_only": true,
+        "inference_allowed": false,
+        "manual_override_allowed": false
+      },
+      "next_action": "CAPTURE_AND_VERIFY_AUTHORITATIVE_SOURCE"
+    },
+    {
+      "strategy_id": "GSR_AT_001",
+      "verification_item": "human_verified",
+      "resolution_status": "OPEN",
+      "source_evidence": null,
+      "reference": null,
+      "human_verification": false,
+      "verification_status": "PENDING",
+      "resolution_policy": {
+        "source_only": true,
+        "inference_allowed": false,
+        "manual_override_allowed": false
+      },
+      "next_action": "CAPTURE_AND_VERIFY_AUTHORITATIVE_SOURCE"
+    }
+  ],
+  "authority_ready": false,
+  "entry_capture_allowed": false,
+  "rulespec_status": "LOCKED"
+}

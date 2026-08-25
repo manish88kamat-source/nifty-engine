@@ -1,0 +1,14 @@
+{
+  "document": "GSR_AT_001 Final Validation Gate",
+  "generated_read_only": true,
+  "strategy_id": "GSR_AT_001",
+  "checks": {
+    "dna_complete": false,
+    "validation_status_approved": false,
+    "validation_passed": false
+  },
+  "validation_pass": false,
+  "registry_ready": false,
+  "unlock_allowed": false,
+  "rulespec_status": "LOCKED"
+}

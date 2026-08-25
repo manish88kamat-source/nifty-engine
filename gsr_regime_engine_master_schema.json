@@ -1,0 +1,31 @@
+{
+  "document": "GSR Regime Engine Master Schema",
+  "generated_read_only": true,
+  "status": "PENDING_IMPLEMENTATION",
+  "architecture_components": [
+    "gsr_regime_classification_schema.json",
+    "gsr_regime_classifier_contract.json",
+    "gsr_trend_classifier_contract.json",
+    "gsr_volatility_classifier_contract.json",
+    "gsr_momentum_classifier_contract.json",
+    "gsr_structure_classifier_contract.json",
+    "gsr_transition_classifier_contract.json",
+    "gsr_composite_regime_builder_contract.json"
+  ],
+  "policy": {
+    "strategy_rules_isolated": true,
+    "strategy_performance_not_used_for_regime_labels": true,
+    "lookahead_bias_allowed": false,
+    "regime_definition_frozen_before_replay": true
+  },
+  "outputs": [
+    "timestamp",
+    "trend_state",
+    "volatility_state",
+    "momentum_state",
+    "market_structure_state",
+    "transition_state",
+    "composite_regime_state"
+  ],
+  "rulespec_status": "LOCKED"
+}

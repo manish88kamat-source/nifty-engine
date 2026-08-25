@@ -1,0 +1,62 @@
+{
+  "document": "GSR Source Capture Sheet",
+  "generated_read_only": true,
+  "strategy_identity": {
+    "strategy_id": "GSR_AT_001",
+    "strategy_name": "Turtle S1 Long Breakout",
+    "capture_version": "1.0"
+  },
+  "capture_policy": {
+    "do_not_infer_missing_rules": true,
+    "source_required": true,
+    "rulespec_creation_allowed_after_verification": true
+  },
+  "evidence_capture": {
+    "entry_rule": {
+      "status": "PENDING_SOURCE",
+      "source_reference": null,
+      "captured_text": null,
+      "verified": false
+    },
+    "exit_rule": {
+      "status": "PENDING_SOURCE",
+      "source_reference": null,
+      "captured_text": null,
+      "verified": false
+    },
+    "initial_stop_rule": {
+      "status": "PENDING_SOURCE",
+      "source_reference": null,
+      "captured_text": null,
+      "verified": false
+    },
+    "position_sizing_rule": {
+      "status": "PENDING_SOURCE",
+      "source_reference": null,
+      "captured_text": null,
+      "verified": false
+    },
+    "pyramiding_rule": {
+      "status": "PENDING_SOURCE",
+      "source_reference": null,
+      "captured_text": null,
+      "verified": false
+    },
+    "execution_rule": {
+      "status": "PENDING_SOURCE",
+      "source_reference": null,
+      "captured_text": null,
+      "verified": false
+    },
+    "cost_model": {
+      "status": "PENDING_ENGINE_CONFIG",
+      "source_reference": null,
+      "captured_text": null,
+      "verified": false
+    }
+  },
+  "final_gate": {
+    "all_rules_verified": false,
+    "rulespec_allowed": false
+  }
+}

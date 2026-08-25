@@ -1,0 +1,16 @@
+{
+  "document": "GSR_AT_001 Source Metadata Intake Control Gate",
+  "generated_read_only": true,
+  "strategy_id": "GSR_AT_001",
+  "current_phase": "SOURCE_METADATA_CAPTURE",
+  "metadata_status": "INCOMPLETE",
+  "completion_percentage": 0.0,
+  "transition_checks": {
+    "metadata_complete": false,
+    "source_verified": false,
+    "entry_capture_unlock": false
+  },
+  "next_allowed_phase": "SOURCE_METADATA_FILL",
+  "entry_capture_allowed": false,
+  "rulespec_status": "LOCKED"
+}

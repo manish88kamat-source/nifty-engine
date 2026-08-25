@@ -1,0 +1,32 @@
+{
+  "document": "GSR Entry Rule Evidence Record",
+  "generated_read_only": true,
+  "strategy_id": "GSR_AT_001",
+  "strategy_name": "Turtle S1 Long Breakout",
+  "capture_status": "AWAITING_ENTRY_SOURCE",
+  "source_reference": {
+    "title": null,
+    "author": null,
+    "version": null,
+    "page_or_location": null
+  },
+  "entry_evidence": {
+    "captured_text": null,
+    "normalized_rule": null,
+    "parameters": {
+      "lookback_period": null,
+      "breakout_definition": null,
+      "price_reference": null,
+      "confirmation": null
+    },
+    "verified": false
+  },
+  "anti_inference_guard": {
+    "missing_fields_remain_unknown": true,
+    "parameter_guessing_forbidden": true
+  },
+  "rulespec_gate": {
+    "allowed": false,
+    "reason": "ENTRY_SOURCE_NOT_VERIFIED"
+  }
+}

@@ -1,0 +1,52 @@
+{
+  "document": "GSR_AT_001 Metadata Resolution Report",
+  "generated_read_only": true,
+  "strategy_id": "GSR_AT_001",
+  "missing_fields": [
+    {
+      "field": "source_title",
+      "status": "MISSING",
+      "required_action": "FILL_FROM_AUTHORITATIVE_SOURCE",
+      "verification_required": true
+    },
+    {
+      "field": "author",
+      "status": "MISSING",
+      "required_action": "FILL_FROM_AUTHORITATIVE_SOURCE",
+      "verification_required": true
+    },
+    {
+      "field": "edition_or_version",
+      "status": "MISSING",
+      "required_action": "FILL_FROM_AUTHORITATIVE_SOURCE",
+      "verification_required": true
+    },
+    {
+      "field": "publication_date",
+      "status": "MISSING",
+      "required_action": "FILL_FROM_AUTHORITATIVE_SOURCE",
+      "verification_required": true
+    },
+    {
+      "field": "reference_location",
+      "status": "MISSING",
+      "required_action": "FILL_FROM_AUTHORITATIVE_SOURCE",
+      "verification_required": true
+    },
+    {
+      "field": "source_type",
+      "status": "MISSING",
+      "required_action": "FILL_FROM_AUTHORITATIVE_SOURCE",
+      "verification_required": true
+    },
+    {
+      "field": "authority_level",
+      "status": "MISSING",
+      "required_action": "FILL_FROM_AUTHORITATIVE_SOURCE",
+      "verification_required": true
+    }
+  ],
+  "resolution_status": "PENDING_SOURCE_FILL",
+  "entry_capture_allowed": false,
+  "rulespec_status": "LOCKED"
+}

@@ -1,0 +1,70 @@
+{
+  "document": "GSR P1 Metadata Control Dashboard",
+  "generated_read_only": true,
+  "strategies": [
+    {
+      "strategy_id": "GSR_AT_001",
+      "metadata_ready": false,
+      "entry_capture_allowed": false,
+      "rulespec_status": "LOCKED"
+    },
+    {
+      "strategy_id": "GSR_AT_002",
+      "metadata_ready": false,
+      "entry_capture_allowed": false,
+      "rulespec_status": "LOCKED"
+    },
+    {
+      "strategy_id": "GSR_AT_003",
+      "metadata_ready": false,
+      "entry_capture_allowed": false,
+      "rulespec_status": "LOCKED"
+    },
+    {
+      "strategy_id": "GSR_AT_004",
+      "metadata_ready": false,
+      "entry_capture_allowed": false,
+      "rulespec_status": "LOCKED"
+    },
+    {
+      "strategy_id": "GSR_AT_005",
+      "metadata_ready": false,
+      "entry_capture_allowed": false,
+      "rulespec_status": "LOCKED"
+    },
+    {
+      "strategy_id": "GSR_AT_006",
+      "metadata_ready": false,
+      "entry_capture_allowed": false,
+      "rulespec_status": "LOCKED"
+    },
+    {
+      "strategy_id": "GSR_AT_010",
+      "metadata_ready": false,
+      "entry_capture_allowed": false,
+      "rulespec_status": "LOCKED"
+    },
+    {
+      "strategy_id": "GSR_AT_011",
+      "metadata_ready": false,
+      "entry_capture_allowed": false,
+      "rulespec_status": "LOCKED"
+    },
+    {
+      "strategy_id": "GSR_AT_013",
+      "metadata_ready": false,
+      "entry_capture_allowed": false,
+      "rulespec_status": "LOCKED"
+    },
+    {
+      "strategy_id": "GSR_AT_018",
+      "metadata_ready": false,
+      "entry_capture_allowed": false,
+      "rulespec_status": "LOCKED"
+    }
+  ],
+  "total": 10,
+  "metadata_ready_count": 0,
+  "entry_capture_unlock_count": 0,
+  "rulespec_unlock_count": 0
+}

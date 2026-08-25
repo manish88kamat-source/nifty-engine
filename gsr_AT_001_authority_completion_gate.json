@@ -1,0 +1,61 @@
+{
+  "document": "GSR_AT_001 Authority Completion Gate",
+  "generated_read_only": true,
+  "strategy_id": "GSR_AT_001",
+  "checks": [
+    {
+      "verification_item": "source_title_present",
+      "source_evidence_captured": false,
+      "reference_attached": false,
+      "human_verified": false,
+      "verified": false
+    },
+    {
+      "verification_item": "author_present",
+      "source_evidence_captured": false,
+      "reference_attached": false,
+      "human_verified": false,
+      "verified": false
+    },
+    {
+      "verification_item": "reference_present",
+      "source_evidence_captured": false,
+      "reference_attached": false,
+      "human_verified": false,
+      "verified": false
+    },
+    {
+      "verification_item": "authority_level_present",
+      "source_evidence_captured": false,
+      "reference_attached": false,
+      "human_verified": false,
+      "verified": false
+    },
+    {
+      "verification_item": "primary_source_confirmed",
+      "source_evidence_captured": false,
+      "reference_attached": false,
+      "human_verified": false,
+      "verified": false
+    },
+    {
+      "verification_item": "reference_confirmed",
+      "source_evidence_captured": false,
+      "reference_attached": false,
+      "human_verified": false,
+      "verified": false
+    },
+    {
+      "verification_item": "human_verified",
+      "source_evidence_captured": false,
+      "reference_attached": false,
+      "human_verified": false,
+      "verified": false
+    }
+  ],
+  "completed_tasks": 0,
+  "total_tasks": 7,
+  "authority_complete": false,
+  "entry_capture_allowed": false,
+  "rulespec_status": "LOCKED"
+}

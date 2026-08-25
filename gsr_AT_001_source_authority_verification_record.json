@@ -1,0 +1,35 @@
+{
+  "document": "GSR_AT_001 Source Authority Verification Record",
+  "generated_read_only": false,
+  "strategy_id": "GSR_AT_001",
+  "strategy_name": "Turtle S1 Long Breakout",
+  "verification_phase": "SOURCE_AUTHORITY_VERIFICATION",
+  "source_identity": {
+    "source_title": "The Original Turtle Trading Rules",
+    "author": "ORIGINAL TURTLES; Curtis Faith (Original Turtle, sign-off)",
+    "edition_or_version": "2003",
+    "publication_date": "2003",
+    "reference_location": "Scribd copy, 38 pages; Foreword and Chapters 1-8",
+    "source_type": "Publicly released documented Turtle Trading rules",
+    "authority_level": "DOCUMENTED_NEAR_PRIMARY"
+  },
+  "authority_assessment": {
+    "source_type": "Publicly released documented Turtle rules",
+    "authority_level": "DOCUMENTED_NEAR_PRIMARY",
+    "primary_source_confirmed": false,
+    "reference_location_confirmed": true,
+    "identity_consistency_confirmed": true
+  },
+  "verification_result": {
+    "authority_verified": true,
+    "verified_by": "GSR source verification process",
+    "verification_date": "2026-08-25",
+    "notes": "Source identifies the document as The Original Turtle Trading Rules, dated 2003, attributed to the Original Turtles. Curtis Faith signs as an Original Turtle. The source states the rules were taught by Richard Dennis and William Eckhardt."
+  },
+  "transition_control": {
+    "current_state": "AUTHORITY_VERIFIED",
+    "next_state": "ENTRY_RULE_SOURCE_CAPTURE",
+    "transition_allowed": true
+  },
+  "rulespec_status": "LOCKED"
+}

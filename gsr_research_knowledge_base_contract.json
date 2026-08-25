@@ -1,0 +1,36 @@
+{
+  "document": "GSR Research Knowledge Base Contract",
+  "generated_read_only": true,
+  "status": "PENDING_IMPLEMENTATION",
+  "purpose": "Maintain long-term research memory of Strategy DNA, validation outcomes and market behavior discoveries.",
+  "policy": {
+    "historical_records_immutable": true,
+    "evidence_traceability_required": true,
+    "failed_candidates_preserved": true,
+    "knowledge_updates_versioned": true
+  },
+  "inputs": [
+    "research_registry",
+    "rejected_candidates",
+    "strategy_dna_history",
+    "regime_performance_history"
+  ],
+  "knowledge_entities": [
+    "strategy_dna_record",
+    "candidate_history",
+    "regime_behavior_record",
+    "validation_history",
+    "failure_analysis_record"
+  ],
+  "outputs": [
+    "research_knowledge_graph",
+    "dna_evolution_history",
+    "market_behavior_archive"
+  ],
+  "validation": [
+    "record_integrity_check",
+    "source_link_check",
+    "version_tracking_check"
+  ],
+  "rulespec_status": "LOCKED"
+}

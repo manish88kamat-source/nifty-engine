@@ -1,0 +1,180 @@
+{
+  "document": "GSR P1 Evidence Capture Queue Manager",
+  "generated_read_only": true,
+  "registry_modified": false,
+  "rulespec_created": false,
+  "inference_allowed": false,
+  "queue_status": "ACTIVE",
+  "strategies": [
+    {
+      "strategy_id": "GSR_AT_001",
+      "capture_priority": "P1",
+      "current_capture_stage": "SOURCE_METADATA",
+      "stage_status": {
+        "source_metadata": "PENDING",
+        "entry_rule_evidence": "LOCKED",
+        "exit_rule_evidence": "LOCKED",
+        "risk_management_evidence": "LOCKED",
+        "position_sizing_evidence": "LOCKED",
+        "execution_evidence": "LOCKED",
+        "cost_model_evidence": "LOCKED"
+      },
+      "next_action": "CAPTURE_AUTHORITATIVE_SOURCE_METADATA",
+      "unlock_dependency": "SOURCE_METADATA_VERIFICATION",
+      "rulespec_status": "LOCKED"
+    },
+    {
+      "strategy_id": "GSR_AT_002",
+      "capture_priority": "P1",
+      "current_capture_stage": "SOURCE_METADATA",
+      "stage_status": {
+        "source_metadata": "PENDING",
+        "entry_rule_evidence": "LOCKED",
+        "exit_rule_evidence": "LOCKED",
+        "risk_management_evidence": "LOCKED",
+        "position_sizing_evidence": "LOCKED",
+        "execution_evidence": "LOCKED",
+        "cost_model_evidence": "LOCKED"
+      },
+      "next_action": "CAPTURE_AUTHORITATIVE_SOURCE_METADATA",
+      "unlock_dependency": "SOURCE_METADATA_VERIFICATION",
+      "rulespec_status": "LOCKED"
+    },
+    {
+      "strategy_id": "GSR_AT_003",
+      "capture_priority": "P1",
+      "current_capture_stage": "SOURCE_METADATA",
+      "stage_status": {
+        "source_metadata": "PENDING",
+        "entry_rule_evidence": "LOCKED",
+        "exit_rule_evidence": "LOCKED",
+        "risk_management_evidence": "LOCKED",
+        "position_sizing_evidence": "LOCKED",
+        "execution_evidence": "LOCKED",
+        "cost_model_evidence": "LOCKED"
+      },
+      "next_action": "CAPTURE_AUTHORITATIVE_SOURCE_METADATA",
+      "unlock_dependency": "SOURCE_METADATA_VERIFICATION",
+      "rulespec_status": "LOCKED"
+    },
+    {
+      "strategy_id": "GSR_AT_004",
+      "capture_priority": "P1",
+      "current_capture_stage": "SOURCE_METADATA",
+      "stage_status": {
+        "source_metadata": "PENDING",
+        "entry_rule_evidence": "LOCKED",
+        "exit_rule_evidence": "LOCKED",
+        "risk_management_evidence": "LOCKED",
+        "position_sizing_evidence": "LOCKED",
+        "execution_evidence": "LOCKED",
+        "cost_model_evidence": "LOCKED"
+      },
+      "next_action": "CAPTURE_AUTHORITATIVE_SOURCE_METADATA",
+      "unlock_dependency": "SOURCE_METADATA_VERIFICATION",
+      "rulespec_status": "LOCKED"
+    },
+    {
+      "strategy_id": "GSR_AT_005",
+      "capture_priority": "P1",
+      "current_capture_stage": "SOURCE_METADATA",
+      "stage_status": {
+        "source_metadata": "PENDING",
+        "entry_rule_evidence": "LOCKED",
+        "exit_rule_evidence": "LOCKED",
+        "risk_management_evidence": "LOCKED",
+        "position_sizing_evidence": "LOCKED",
+        "execution_evidence": "LOCKED",
+        "cost_model_evidence": "LOCKED"
+      },
+      "next_action": "CAPTURE_AUTHORITATIVE_SOURCE_METADATA",
+      "unlock_dependency": "SOURCE_METADATA_VERIFICATION",
+      "rulespec_status": "LOCKED"
+    },
+    {
+      "strategy_id": "GSR_AT_006",
+      "capture_priority": "P1",
+      "current_capture_stage": "SOURCE_METADATA",
+      "stage_status": {
+        "source_metadata": "PENDING",
+        "entry_rule_evidence": "LOCKED",
+        "exit_rule_evidence": "LOCKED",
+        "risk_management_evidence": "LOCKED",
+        "position_sizing_evidence": "LOCKED",
+        "execution_evidence": "LOCKED",
+        "cost_model_evidence": "LOCKED"
+      },
+      "next_action": "CAPTURE_AUTHORITATIVE_SOURCE_METADATA",
+      "unlock_dependency": "SOURCE_METADATA_VERIFICATION",
+      "rulespec_status": "LOCKED"
+    },
+    {
+      "strategy_id": "GSR_AT_010",
+      "capture_priority": "P1",
+      "current_capture_stage": "SOURCE_METADATA",
+      "stage_status": {
+        "source_metadata": "PENDING",
+        "entry_rule_evidence": "LOCKED",
+        "exit_rule_evidence": "LOCKED",
+        "risk_management_evidence": "LOCKED",
+        "position_sizing_evidence": "LOCKED",
+        "execution_evidence": "LOCKED",
+        "cost_model_evidence": "LOCKED"
+      },
+      "next_action": "CAPTURE_AUTHORITATIVE_SOURCE_METADATA",
+      "unlock_dependency": "SOURCE_METADATA_VERIFICATION",
+      "rulespec_status": "LOCKED"
+    },
+    {
+      "strategy_id": "GSR_AT_011",
+      "capture_priority": "P1",
+      "current_capture_stage": "SOURCE_METADATA",
+      "stage_status": {
+        "source_metadata": "PENDING",
+        "entry_rule_evidence": "LOCKED",
+        "exit_rule_evidence": "LOCKED",
+        "risk_management_evidence": "LOCKED",
+        "position_sizing_evidence": "LOCKED",
+        "execution_evidence": "LOCKED",
+        "cost_model_evidence": "LOCKED"
+      },
+      "next_action": "CAPTURE_AUTHORITATIVE_SOURCE_METADATA",
+      "unlock_dependency": "SOURCE_METADATA_VERIFICATION",
+      "rulespec_status": "LOCKED"
+    },
+    {
+      "strategy_id": "GSR_AT_013",
+      "capture_priority": "P1",
+      "current_capture_stage": "SOURCE_METADATA",
+      "stage_status": {
+        "source_metadata": "PENDING",
+        "entry_rule_evidence": "LOCKED",
+        "exit_rule_evidence": "LOCKED",
+        "risk_management_evidence": "LOCKED",
+        "position_sizing_evidence": "LOCKED",
+        "execution_evidence": "LOCKED",
+        "cost_model_evidence": "LOCKED"
+      },
+      "next_action": "CAPTURE_AUTHORITATIVE_SOURCE_METADATA",
+      "unlock_dependency": "SOURCE_METADATA_VERIFICATION",
+      "rulespec_status": "LOCKED"
+    },
+    {
+      "strategy_id": "GSR_AT_018",
+      "capture_priority": "P1",
+      "current_capture_stage": "SOURCE_METADATA",
+      "stage_status": {
+        "source_metadata": "PENDING",
+        "entry_rule_evidence": "LOCKED",
+        "exit_rule_evidence": "LOCKED",
+        "risk_management_evidence": "LOCKED",
+        "position_sizing_evidence": "LOCKED",
+        "execution_evidence": "LOCKED",
+        "cost_model_evidence": "LOCKED"
+      },
+      "next_action": "CAPTURE_AUTHORITATIVE_SOURCE_METADATA",
+      "unlock_dependency": "SOURCE_METADATA_VERIFICATION",
+      "rulespec_status": "LOCKED"
+    }
+  ]
+}

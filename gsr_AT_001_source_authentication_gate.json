@@ -1,0 +1,51 @@
+{
+  "document": "GSR Source Authentication Gate",
+  "generated_read_only": true,
+  "strategy_id": "GSR_AT_001",
+  "authentication_status": "PENDING",
+  "rulespec_allowed": false,
+  "checks": {
+    "source_metadata": {
+      "status": "PENDING_SOURCE_AUTH",
+      "source_reference_present": false,
+      "captured_rule_present": false,
+      "verification_flag": false
+    },
+    "entry_rule": {
+      "status": "PENDING_SOURCE_AUTH",
+      "source_reference_present": false,
+      "captured_rule_present": false,
+      "verification_flag": false
+    },
+    "exit_rule": {
+      "status": "PENDING_SOURCE_AUTH",
+      "source_reference_present": false,
+      "captured_rule_present": false,
+      "verification_flag": false
+    },
+    "risk_rule": {
+      "status": "PENDING_SOURCE_AUTH",
+      "source_reference_present": false,
+      "captured_rule_present": false,
+      "verification_flag": false
+    },
+    "position_sizing": {
+      "status": "PENDING_SOURCE_AUTH",
+      "source_reference_present": false,
+      "captured_rule_present": false,
+      "verification_flag": false
+    },
+    "execution": {
+      "status": "PENDING_SOURCE_AUTH",
+      "source_reference_present": false,
+      "captured_rule_present": false,
+      "verification_flag": false
+    },
+    "cost_model": {
+      "status": "PENDING_SOURCE_AUTH",
+      "source_reference_present": false,
+      "captured_rule_present": false,
+      "verification_flag": false
+    }
+  }
+}

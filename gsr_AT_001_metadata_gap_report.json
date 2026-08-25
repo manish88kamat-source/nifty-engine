@@ -1,0 +1,51 @@
+{
+  "document": "GSR_AT_001 Metadata Gap Report",
+  "generated_read_only": true,
+  "strategy_id": "GSR_AT_001",
+  "missing_fields": [
+    {
+      "field": "source_title",
+      "status": "MISSING",
+      "required_action": "CAPTURE_FROM_AUTHORITATIVE_SOURCE",
+      "entry_capture_allowed": false
+    },
+    {
+      "field": "author",
+      "status": "MISSING",
+      "required_action": "CAPTURE_FROM_AUTHORITATIVE_SOURCE",
+      "entry_capture_allowed": false
+    },
+    {
+      "field": "edition_or_version",
+      "status": "MISSING",
+      "required_action": "CAPTURE_FROM_AUTHORITATIVE_SOURCE",
+      "entry_capture_allowed": false
+    },
+    {
+      "field": "publication_date",
+      "status": "MISSING",
+      "required_action": "CAPTURE_FROM_AUTHORITATIVE_SOURCE",
+      "entry_capture_allowed": false
+    },
+    {
+      "field": "reference_location",
+      "status": "MISSING",
+      "required_action": "CAPTURE_FROM_AUTHORITATIVE_SOURCE",
+      "entry_capture_allowed": false
+    },
+    {
+      "field": "source_type",
+      "status": "MISSING",
+      "required_action": "CAPTURE_FROM_AUTHORITATIVE_SOURCE",
+      "entry_capture_allowed": false
+    },
+    {
+      "field": "authority_level",
+      "status": "MISSING",
+      "required_action": "CAPTURE_FROM_AUTHORITATIVE_SOURCE",
+      "entry_capture_allowed": false
+    }
+  ],
+  "metadata_ready": false,
+  "rulespec_status": "LOCKED"
+}

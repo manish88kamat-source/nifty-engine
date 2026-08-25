@@ -1,0 +1,167 @@
+{
+  "document": "GSR P1 Source Metadata Readiness Tracker",
+  "generated_read_only": true,
+  "total_strategies": 10,
+  "strategies": [
+    {
+      "strategy_id": "GSR_AT_001",
+      "source_metadata": {
+        "status": "PENDING",
+        "source_title": false,
+        "author": false,
+        "version": false,
+        "reference_location": false,
+        "authority_level": false
+      },
+      "entry_evidence": "LOCKED",
+      "exit_evidence": "LOCKED",
+      "risk_evidence": "LOCKED",
+      "rulespec_status": "LOCKED",
+      "replay_status": "LOCKED"
+    },
+    {
+      "strategy_id": "GSR_AT_002",
+      "source_metadata": {
+        "status": "PENDING",
+        "source_title": false,
+        "author": false,
+        "version": false,
+        "reference_location": false,
+        "authority_level": false
+      },
+      "entry_evidence": "LOCKED",
+      "exit_evidence": "LOCKED",
+      "risk_evidence": "LOCKED",
+      "rulespec_status": "LOCKED",
+      "replay_status": "LOCKED"
+    },
+    {
+      "strategy_id": "GSR_AT_003",
+      "source_metadata": {
+        "status": "PENDING",
+        "source_title": false,
+        "author": false,
+        "version": false,
+        "reference_location": false,
+        "authority_level": false
+      },
+      "entry_evidence": "LOCKED",
+      "exit_evidence": "LOCKED",
+      "risk_evidence": "LOCKED",
+      "rulespec_status": "LOCKED",
+      "replay_status": "LOCKED"
+    },
+    {
+      "strategy_id": "GSR_AT_004",
+      "source_metadata": {
+        "status": "PENDING",
+        "source_title": false,
+        "author": false,
+        "version": false,
+        "reference_location": false,
+        "authority_level": false
+      },
+      "entry_evidence": "LOCKED",
+      "exit_evidence": "LOCKED",
+      "risk_evidence": "LOCKED",
+      "rulespec_status": "LOCKED",
+      "replay_status": "LOCKED"
+    },
+    {
+      "strategy_id": "GSR_AT_005",
+      "source_metadata": {
+        "status": "PENDING",
+        "source_title": false,
+        "author": false,
+        "version": false,
+        "reference_location": false,
+        "authority_level": false
+      },
+      "entry_evidence": "LOCKED",
+      "exit_evidence": "LOCKED",
+      "risk_evidence": "LOCKED",
+      "rulespec_status": "LOCKED",
+      "replay_status": "LOCKED"
+    },
+    {
+      "strategy_id": "GSR_AT_006",
+      "source_metadata": {
+        "status": "PENDING",
+        "source_title": false,
+        "author": false,
+        "version": false,
+        "reference_location": false,
+        "authority_level": false
+      },
+      "entry_evidence": "LOCKED",
+      "exit_evidence": "LOCKED",
+      "risk_evidence": "LOCKED",
+      "rulespec_status": "LOCKED",
+      "replay_status": "LOCKED"
+    },
+    {
+      "strategy_id": "GSR_AT_010",
+      "source_metadata": {
+        "status": "PENDING",
+        "source_title": false,
+        "author": false,
+        "version": false,
+        "reference_location": false,
+        "authority_level": false
+      },
+      "entry_evidence": "LOCKED",
+      "exit_evidence": "LOCKED",
+      "risk_evidence": "LOCKED",
+      "rulespec_status": "LOCKED",
+      "replay_status": "LOCKED"
+    },
+    {
+      "strategy_id": "GSR_AT_011",
+      "source_metadata": {
+        "status": "PENDING",
+        "source_title": false,
+        "author": false,
+        "version": false,
+        "reference_location": false,
+        "authority_level": false
+      },
+      "entry_evidence": "LOCKED",
+      "exit_evidence": "LOCKED",
+      "risk_evidence": "LOCKED",
+      "rulespec_status": "LOCKED",
+      "replay_status": "LOCKED"
+    },
+    {
+      "strategy_id": "GSR_AT_013",
+      "source_metadata": {
+        "status": "PENDING",
+        "source_title": false,
+        "author": false,
+        "version": false,
+        "reference_location": false,
+        "authority_level": false
+      },
+      "entry_evidence": "LOCKED",
+      "exit_evidence": "LOCKED",
+      "risk_evidence": "LOCKED",
+      "rulespec_status": "LOCKED",
+      "replay_status": "LOCKED"
+    },
+    {
+      "strategy_id": "GSR_AT_018",
+      "source_metadata": {
+        "status": "PENDING",
+        "source_title": false,
+        "author": false,
+        "version": false,
+        "reference_location": false,
+        "authority_level": false
+      },
+      "entry_evidence": "LOCKED",
+      "exit_evidence": "LOCKED",
+      "risk_evidence": "LOCKED",
+      "rulespec_status": "LOCKED",
+      "replay_status": "LOCKED"
+    }
+  ]
+}

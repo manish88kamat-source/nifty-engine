@@ -1,0 +1,30 @@
+{
+  "document": "GSR Historical Data Adapter Contract",
+  "generated_read_only": true,
+  "status": "PENDING_IMPLEMENTATION",
+  "purpose": "Normalize external historical market data sources into GSR canonical schema.",
+  "policy": {
+    "source_specific_logic_isolated": true,
+    "raw_data_preserved": true,
+    "schema_conversion_required": true,
+    "invalid_data_rejected": true
+  },
+  "supported_sources": [
+    "csv",
+    "broker_api_export",
+    "exchange_data",
+    "database",
+    "replay_dataset"
+  ],
+  "adapter_steps": [
+    "source_ingestion",
+    "field_mapping",
+    "timestamp_normalization",
+    "ohlc_validation",
+    "quality_scoring",
+    "canonical_output"
+  ],
+  "required_output": "gsr_canonical_market_data_schema",
+  "validation_gate": "required_before_storage",
+  "rulespec_status": "LOCKED"
+}

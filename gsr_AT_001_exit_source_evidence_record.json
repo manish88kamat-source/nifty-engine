@@ -1,0 +1,37 @@
+{
+  "document": "GSR_AT_001 Exit Source Evidence Record",
+  "generated_read_only": true,
+  "strategy_id": "GSR_AT_001",
+  "strategy_name": "Turtle S1 Long Breakout",
+  "evidence_type": "EXIT_RULE_EVIDENCE",
+  "capture_status": "AWAITING_SOURCE_EVIDENCE",
+  "source_reference": {
+    "document": "The Original Turtle Trading Rules",
+    "author": "ORIGINAL TURTLES; Curtis Faith (Original Turtle, sign-off)",
+    "version": "2003",
+    "page_or_location": "Chapter: Exits, Turtle Exits, Scribd copy pp. 26-27"
+  },
+  "exit_evidence": {
+    "raw_source_text": "System 1 exit: 10-day low for long positions and 10-day high for short positions.",
+    "captured_exit_rule": "For GSR_AT_001 long positions, exit the complete position when price breaks the 10-day low against the position.",
+    "parameters": {
+      "exit_lookback_days": 10,
+      "long_exit_trigger": "10_day_low",
+      "exit_scope": "all_units"
+    },
+    "conditions": {
+      "long": "price trades through the 10-day low against the long position"
+    }
+  },
+  "verification": {
+    "source_reference_verified": true,
+    "text_verified": true,
+    "human_verified": true
+  },
+  "transition_control": {
+    "current_state": "EXIT_RULE_VERIFIED",
+    "next_state": "RISK_MANAGEMENT_SOURCE_CAPTURE",
+    "transition_allowed": true
+  },
+  "rulespec_status": "LOCKED"
+}

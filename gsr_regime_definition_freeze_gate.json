@@ -1,0 +1,16 @@
+{
+  "document": "GSR Regime Definition Freeze Gate",
+  "generated_read_only": true,
+  "checks": {
+    "trend": true,
+    "volatility": true,
+    "momentum": true,
+    "market_structure": true,
+    "transition": true
+  },
+  "completed_dimensions": 5,
+  "total_dimensions": 5,
+  "regime_definition_frozen": true,
+  "replay_allowed": true,
+  "rulespec_status": "LOCKED"
+}

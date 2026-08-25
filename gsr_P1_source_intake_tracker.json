@@ -1,0 +1,157 @@
+{
+  "document": "GSR P1 Source Intake Tracker",
+  "generated_read_only": true,
+  "total_strategies": 10,
+  "strategies": [
+    {
+      "strategy_id": "GSR_AT_001",
+      "source_stage": "NOT_STARTED",
+      "evidence_status": {
+        "source_metadata": "PENDING",
+        "entry_rule": "PENDING",
+        "exit_rule": "PENDING",
+        "risk_rule": "PENDING",
+        "position_sizing": "PENDING",
+        "execution": "PENDING",
+        "cost_model": "PENDING"
+      },
+      "rulespec_status": "LOCKED",
+      "replay_status": "LOCKED"
+    },
+    {
+      "strategy_id": "GSR_AT_002",
+      "source_stage": "NOT_STARTED",
+      "evidence_status": {
+        "source_metadata": "PENDING",
+        "entry_rule": "PENDING",
+        "exit_rule": "PENDING",
+        "risk_rule": "PENDING",
+        "position_sizing": "PENDING",
+        "execution": "PENDING",
+        "cost_model": "PENDING"
+      },
+      "rulespec_status": "LOCKED",
+      "replay_status": "LOCKED"
+    },
+    {
+      "strategy_id": "GSR_AT_003",
+      "source_stage": "NOT_STARTED",
+      "evidence_status": {
+        "source_metadata": "PENDING",
+        "entry_rule": "PENDING",
+        "exit_rule": "PENDING",
+        "risk_rule": "PENDING",
+        "position_sizing": "PENDING",
+        "execution": "PENDING",
+        "cost_model": "PENDING"
+      },
+      "rulespec_status": "LOCKED",
+      "replay_status": "LOCKED"
+    },
+    {
+      "strategy_id": "GSR_AT_004",
+      "source_stage": "NOT_STARTED",
+      "evidence_status": {
+        "source_metadata": "PENDING",
+        "entry_rule": "PENDING",
+        "exit_rule": "PENDING",
+        "risk_rule": "PENDING",
+        "position_sizing": "PENDING",
+        "execution": "PENDING",
+        "cost_model": "PENDING"
+      },
+      "rulespec_status": "LOCKED",
+      "replay_status": "LOCKED"
+    },
+    {
+      "strategy_id": "GSR_AT_005",
+      "source_stage": "NOT_STARTED",
+      "evidence_status": {
+        "source_metadata": "PENDING",
+        "entry_rule": "PENDING",
+        "exit_rule": "PENDING",
+        "risk_rule": "PENDING",
+        "position_sizing": "PENDING",
+        "execution": "PENDING",
+        "cost_model": "PENDING"
+      },
+      "rulespec_status": "LOCKED",
+      "replay_status": "LOCKED"
+    },
+    {
+      "strategy_id": "GSR_AT_006",
+      "source_stage": "NOT_STARTED",
+      "evidence_status": {
+        "source_metadata": "PENDING",
+        "entry_rule": "PENDING",
+        "exit_rule": "PENDING",
+        "risk_rule": "PENDING",
+        "position_sizing": "PENDING",
+        "execution": "PENDING",
+        "cost_model": "PENDING"
+      },
+      "rulespec_status": "LOCKED",
+      "replay_status": "LOCKED"
+    },
+    {
+      "strategy_id": "GSR_AT_010",
+      "source_stage": "NOT_STARTED",
+      "evidence_status": {
+        "source_metadata": "PENDING",
+        "entry_rule": "PENDING",
+        "exit_rule": "PENDING",
+        "risk_rule": "PENDING",
+        "position_sizing": "PENDING",
+        "execution": "PENDING",
+        "cost_model": "PENDING"
+      },
+      "rulespec_status": "LOCKED",
+      "replay_status": "LOCKED"
+    },
+    {
+      "strategy_id": "GSR_AT_011",
+      "source_stage": "NOT_STARTED",
+      "evidence_status": {
+        "source_metadata": "PENDING",
+        "entry_rule": "PENDING",
+        "exit_rule": "PENDING",
+        "risk_rule": "PENDING",
+        "position_sizing": "PENDING",
+        "execution": "PENDING",
+        "cost_model": "PENDING"
+      },
+      "rulespec_status": "LOCKED",
+      "replay_status": "LOCKED"
+    },
+    {
+      "strategy_id": "GSR_AT_013",
+      "source_stage": "NOT_STARTED",
+      "evidence_status": {
+        "source_metadata": "PENDING",
+        "entry_rule": "PENDING",
+        "exit_rule": "PENDING",
+        "risk_rule": "PENDING",
+        "position_sizing": "PENDING",
+        "execution": "PENDING",
+        "cost_model": "PENDING"
+      },
+      "rulespec_status": "LOCKED",
+      "replay_status": "LOCKED"
+    },
+    {
+      "strategy_id": "GSR_AT_018",
+      "source_stage": "NOT_STARTED",
+      "evidence_status": {
+        "source_metadata": "PENDING",
+        "entry_rule": "PENDING",
+        "exit_rule": "PENDING",
+        "risk_rule": "PENDING",
+        "position_sizing": "PENDING",
+        "execution": "PENDING",
+        "cost_model": "PENDING"
+      },
+      "rulespec_status": "LOCKED",
+      "replay_status": "LOCKED"
+    }
+  ]
+}

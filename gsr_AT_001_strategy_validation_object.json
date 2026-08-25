@@ -1,0 +1,37 @@
+{
+  "document": "GSR_AT_001 Strategy Validation Object",
+  "generated_read_only": true,
+  "strategy_id": "GSR_AT_001",
+  "strategy_name": "Turtle S1 Long Breakout",
+  "validation_phase": "STRATEGY_VALIDATION",
+  "validation_policy": {
+    "source_evidence_only": true,
+    "inference_allowed": false,
+    "rule_generation_allowed": false,
+    "optimization_allowed": false
+  },
+  "evidence_blocks": {
+    "source_metadata": "PRESENT",
+    "source_authority": "PRESENT",
+    "entry_rule": "PENDING",
+    "exit_rule": "PENDING",
+    "risk_management": "PENDING",
+    "position_sizing": "PENDING",
+    "execution": "PENDING"
+  },
+  "strategy_dna_status": {
+    "dna_complete": false,
+    "completed_components": 0,
+    "total_components": 8
+  },
+  "validation_status": {
+    "status": "PENDING",
+    "approved": false,
+    "validation_passed": false
+  },
+  "registry_state": {
+    "registry_ready": false,
+    "unlock_allowed": false
+  },
+  "rulespec_status": "LOCKED"
+}

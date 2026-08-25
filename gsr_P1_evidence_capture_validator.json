@@ -1,0 +1,169 @@
+{
+  "document": "GSR P1 Evidence Capture Validator",
+  "generated_read_only": true,
+  "registry_modified": false,
+  "rulespec_created": false,
+  "inference_allowed": false,
+  "strategies": [
+    {
+      "strategy_id": "GSR_AT_001",
+      "current_state": "WAITING_FOR_SOURCE",
+      "missing_fields": [
+        "source_title",
+        "author",
+        "version",
+        "date",
+        "reference_location",
+        "raw_source_excerpt"
+      ],
+      "verification_complete": false,
+      "capture_validation_status": "BLOCKED",
+      "next_transition": "WAITING_FOR_SOURCE",
+      "rulespec_status": "LOCKED"
+    },
+    {
+      "strategy_id": "GSR_AT_002",
+      "current_state": "WAITING_FOR_SOURCE",
+      "missing_fields": [
+        "source_title",
+        "author",
+        "version",
+        "date",
+        "reference_location",
+        "raw_source_excerpt"
+      ],
+      "verification_complete": false,
+      "capture_validation_status": "BLOCKED",
+      "next_transition": "WAITING_FOR_SOURCE",
+      "rulespec_status": "LOCKED"
+    },
+    {
+      "strategy_id": "GSR_AT_003",
+      "current_state": "WAITING_FOR_SOURCE",
+      "missing_fields": [
+        "source_title",
+        "author",
+        "version",
+        "date",
+        "reference_location",
+        "raw_source_excerpt"
+      ],
+      "verification_complete": false,
+      "capture_validation_status": "BLOCKED",
+      "next_transition": "WAITING_FOR_SOURCE",
+      "rulespec_status": "LOCKED"
+    },
+    {
+      "strategy_id": "GSR_AT_004",
+      "current_state": "WAITING_FOR_SOURCE",
+      "missing_fields": [
+        "source_title",
+        "author",
+        "version",
+        "date",
+        "reference_location",
+        "raw_source_excerpt"
+      ],
+      "verification_complete": false,
+      "capture_validation_status": "BLOCKED",
+      "next_transition": "WAITING_FOR_SOURCE",
+      "rulespec_status": "LOCKED"
+    },
+    {
+      "strategy_id": "GSR_AT_005",
+      "current_state": "WAITING_FOR_SOURCE",
+      "missing_fields": [
+        "source_title",
+        "author",
+        "version",
+        "date",
+        "reference_location",
+        "raw_source_excerpt"
+      ],
+      "verification_complete": false,
+      "capture_validation_status": "BLOCKED",
+      "next_transition": "WAITING_FOR_SOURCE",
+      "rulespec_status": "LOCKED"
+    },
+    {
+      "strategy_id": "GSR_AT_006",
+      "current_state": "WAITING_FOR_SOURCE",
+      "missing_fields": [
+        "source_title",
+        "author",
+        "version",
+        "date",
+        "reference_location",
+        "raw_source_excerpt"
+      ],
+      "verification_complete": false,
+      "capture_validation_status": "BLOCKED",
+      "next_transition": "WAITING_FOR_SOURCE",
+      "rulespec_status": "LOCKED"
+    },
+    {
+      "strategy_id": "GSR_AT_010",
+      "current_state": "WAITING_FOR_SOURCE",
+      "missing_fields": [
+        "source_title",
+        "author",
+        "version",
+        "date",
+        "reference_location",
+        "raw_source_excerpt"
+      ],
+      "verification_complete": false,
+      "capture_validation_status": "BLOCKED",
+      "next_transition": "WAITING_FOR_SOURCE",
+      "rulespec_status": "LOCKED"
+    },
+    {
+      "strategy_id": "GSR_AT_011",
+      "current_state": "WAITING_FOR_SOURCE",
+      "missing_fields": [
+        "source_title",
+        "author",
+        "version",
+        "date",
+        "reference_location",
+        "raw_source_excerpt"
+      ],
+      "verification_complete": false,
+      "capture_validation_status": "BLOCKED",
+      "next_transition": "WAITING_FOR_SOURCE",
+      "rulespec_status": "LOCKED"
+    },
+    {
+      "strategy_id": "GSR_AT_013",
+      "current_state": "WAITING_FOR_SOURCE",
+      "missing_fields": [
+        "source_title",
+        "author",
+        "version",
+        "date",
+        "reference_location",
+        "raw_source_excerpt"
+      ],
+      "verification_complete": false,
+      "capture_validation_status": "BLOCKED",
+      "next_transition": "WAITING_FOR_SOURCE",
+      "rulespec_status": "LOCKED"
+    },
+    {
+      "strategy_id": "GSR_AT_018",
+      "current_state": "WAITING_FOR_SOURCE",
+      "missing_fields": [
+        "source_title",
+        "author",
+        "version",
+        "date",
+        "reference_location",
+        "raw_source_excerpt"
+      ],
+      "verification_complete": false,
+      "capture_validation_status": "BLOCKED",
+      "next_transition": "WAITING_FOR_SOURCE",
+      "rulespec_status": "LOCKED"
+    }
+  ]
+}

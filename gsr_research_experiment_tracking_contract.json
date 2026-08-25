@@ -1,0 +1,39 @@
+{
+  "document": "GSR Research Experiment Tracking Contract",
+  "generated_read_only": true,
+  "status": "PENDING_IMPLEMENTATION",
+  "purpose": "Track and reproduce every GSR research experiment with complete version lineage.",
+  "policy": {
+    "experiment_history_immutable": true,
+    "dataset_version_required": true,
+    "strategy_version_required": true,
+    "regime_version_required": true,
+    "result_traceability_required": true
+  },
+  "inputs": [
+    "dataset_version",
+    "strategy_dna_version",
+    "regime_version",
+    "execution_version",
+    "validation_version"
+  ],
+  "experiment_fields": [
+    "experiment_id",
+    "timestamp",
+    "researcher_action",
+    "input_versions",
+    "execution_parameters",
+    "result_summary",
+    "validation_status"
+  ],
+  "outputs": [
+    "experiment_record",
+    "reproducibility_report"
+  ],
+  "validation": [
+    "version_completeness_check",
+    "lineage_check",
+    "result_traceability_check"
+  ],
+  "rulespec_status": "LOCKED"
+}

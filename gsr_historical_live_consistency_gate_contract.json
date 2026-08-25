@@ -1,0 +1,43 @@
+{
+  "document": "GSR Historical Live Consistency Gate Contract",
+  "generated_read_only": true,
+  "status": "PENDING_IMPLEMENTATION",
+  "purpose": "Ensure live observations maintain consistency with historical research data standards.",
+  "policy": {
+    "schema_consistency_required": true,
+    "feature_compatibility_required": true,
+    "timestamp_alignment_required": true,
+    "historical_results_not_modified": true,
+    "live_data_cannot_modify_history": true
+  },
+  "inputs": [
+    "historical_canonical_data",
+    "live_canonical_observation",
+    "feature_schema",
+    "regime_schema"
+  ],
+  "checks": [
+    "field_schema_match",
+    "timestamp_format_match",
+    "ohlc_integrity_match",
+    "feature_calculation_compatibility",
+    "data_quality_threshold_match",
+    "source_identifier_validation"
+  ],
+  "outputs": [
+    "consistency_score",
+    "consistency_status",
+    "drift_report"
+  ],
+  "states": [
+    "PASS",
+    "WARNING",
+    "REJECT"
+  ],
+  "validation": [
+    "schema_version_check",
+    "comparison_traceability",
+    "drift_logging"
+  ],
+  "rulespec_status": "LOCKED"
+}

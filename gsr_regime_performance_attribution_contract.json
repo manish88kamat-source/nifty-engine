@@ -1,0 +1,37 @@
+{
+  "document": "GSR Regime Performance Attribution Contract",
+  "generated_read_only": true,
+  "status": "PENDING_IMPLEMENTATION",
+  "purpose": "Attribute strategy replay results to frozen market regime states.",
+  "policy": {
+    "regime_labels_immutable": true,
+    "strategy_rules_immutable": true,
+    "performance_feedback_into_regime": false,
+    "descriptive_analysis_only": true
+  },
+  "inputs": [
+    "trade_events",
+    "performance_metrics",
+    "regime_labels",
+    "strategy_id"
+  ],
+  "attribution_keys": [
+    "strategy_id",
+    "composite_regime_state",
+    "trend_state",
+    "volatility_state",
+    "momentum_state",
+    "market_structure_state",
+    "transition_state"
+  ],
+  "outputs": [
+    "regime_performance_summary",
+    "strategy_regime_scorecard"
+  ],
+  "validation": [
+    "trade_regime_alignment_check",
+    "timestamp_alignment_check",
+    "attribution_completeness_check"
+  ],
+  "rulespec_status": "LOCKED"
+}

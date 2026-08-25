@@ -1,0 +1,43 @@
+{
+  "document": "GSR Research Registry Contract",
+  "generated_read_only": true,
+  "status": "PENDING_IMPLEMENTATION",
+  "purpose": "Maintain permanent registry of validated Strategy DNA research candidates and their evidence history.",
+  "policy": {
+    "candidate_history_immutable": true,
+    "validation_evidence_link_required": true,
+    "strategy_rules_immutable": true,
+    "audit_trail_required": true
+  },
+  "inputs": [
+    "approved_dna_candidates",
+    "validation_reports",
+    "supporting_strategies"
+  ],
+  "lifecycle": [
+    "DISCOVERED",
+    "VALIDATING",
+    "APPROVED",
+    "ACTIVE_RESEARCH",
+    "RETIRED"
+  ],
+  "registry_fields": [
+    "candidate_id",
+    "dna_components",
+    "supporting_strategies",
+    "regime_compatibility",
+    "validation_status",
+    "approval_date",
+    "version"
+  ],
+  "outputs": [
+    "research_registry",
+    "candidate_history"
+  ],
+  "validation": [
+    "registry_integrity_check",
+    "evidence_link_check",
+    "version_consistency_check"
+  ],
+  "rulespec_status": "LOCKED"
+}

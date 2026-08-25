@@ -1,0 +1,43 @@
+{
+  "document": "GSR Rule Capture Gap Report",
+  "generated_read_only": true,
+  "strategy_id": "GSR_AT_001",
+  "missing_components": [
+    {
+      "component": "entry_rule",
+      "status": "SOURCE_EVIDENCE_REQUIRED",
+      "action": "CAPTURE_FROM_AUTHORITATIVE_SOURCE"
+    },
+    {
+      "component": "exit_rule",
+      "status": "SOURCE_EVIDENCE_REQUIRED",
+      "action": "CAPTURE_FROM_AUTHORITATIVE_SOURCE"
+    },
+    {
+      "component": "initial_stop_rule",
+      "status": "SOURCE_EVIDENCE_REQUIRED",
+      "action": "CAPTURE_FROM_AUTHORITATIVE_SOURCE"
+    },
+    {
+      "component": "position_sizing_rule",
+      "status": "SOURCE_EVIDENCE_REQUIRED",
+      "action": "CAPTURE_FROM_AUTHORITATIVE_SOURCE"
+    },
+    {
+      "component": "pyramiding_rule",
+      "status": "SOURCE_EVIDENCE_REQUIRED",
+      "action": "CAPTURE_FROM_AUTHORITATIVE_SOURCE"
+    },
+    {
+      "component": "execution_rule",
+      "status": "SOURCE_EVIDENCE_REQUIRED",
+      "action": "CAPTURE_FROM_AUTHORITATIVE_SOURCE"
+    },
+    {
+      "component": "cost_model",
+      "status": "SOURCE_EVIDENCE_REQUIRED",
+      "action": "CAPTURE_FROM_AUTHORITATIVE_SOURCE"
+    }
+  ],
+  "ready_for_rulespec": false
+}

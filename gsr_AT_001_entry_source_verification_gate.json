@@ -1,0 +1,14 @@
+{
+  "document": "GSR Entry Source Verification Gate",
+  "generated_read_only": true,
+  "strategy_id": "GSR_AT_001",
+  "checks": {
+    "source_document_present": false,
+    "author_present": false,
+    "raw_source_text_present": false,
+    "normalized_rule_present": true,
+    "verification_complete": false
+  },
+  "status": "PENDING_SOURCE_VERIFICATION",
+  "rulespec_allowed": false
+}

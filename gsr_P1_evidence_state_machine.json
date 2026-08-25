@@ -1,0 +1,247 @@
+{
+  "document": "GSR P1 Evidence Capture State Machine",
+  "generated_read_only": true,
+  "purpose": "Control evidence capture phase transitions",
+  "strategies": [
+    {
+      "strategy_id": "GSR_AT_001",
+      "current_state": "WAITING_FOR_SOURCE",
+      "allowed_transitions": {
+        "WAITING_FOR_SOURCE": "SOURCE_METADATA_CAPTURED",
+        "SOURCE_METADATA_CAPTURED": "AUTHORITY_VERIFIED",
+        "AUTHORITY_VERIFIED": "ENTRY_EVIDENCE_UNLOCKED",
+        "ENTRY_EVIDENCE_UNLOCKED": "FULL_EVIDENCE_CAPTURE",
+        "FULL_EVIDENCE_CAPTURE": "RULESPEC_ALLOWED"
+      },
+      "transition_checks": {
+        "source_metadata_verified": false,
+        "authority_verified": false,
+        "entry_verified": false,
+        "exit_verified": false,
+        "risk_verified": false,
+        "execution_verified": false,
+        "cost_verified": false
+      },
+      "registry_modified": false,
+      "rulespec_created": false,
+      "assumption_inference": false,
+      "rulespec_status": "LOCKED"
+    },
+    {
+      "strategy_id": "GSR_AT_002",
+      "current_state": "WAITING_FOR_SOURCE",
+      "allowed_transitions": {
+        "WAITING_FOR_SOURCE": "SOURCE_METADATA_CAPTURED",
+        "SOURCE_METADATA_CAPTURED": "AUTHORITY_VERIFIED",
+        "AUTHORITY_VERIFIED": "ENTRY_EVIDENCE_UNLOCKED",
+        "ENTRY_EVIDENCE_UNLOCKED": "FULL_EVIDENCE_CAPTURE",
+        "FULL_EVIDENCE_CAPTURE": "RULESPEC_ALLOWED"
+      },
+      "transition_checks": {
+        "source_metadata_verified": false,
+        "authority_verified": false,
+        "entry_verified": false,
+        "exit_verified": false,
+        "risk_verified": false,
+        "execution_verified": false,
+        "cost_verified": false
+      },
+      "registry_modified": false,
+      "rulespec_created": false,
+      "assumption_inference": false,
+      "rulespec_status": "LOCKED"
+    },
+    {
+      "strategy_id": "GSR_AT_003",
+      "current_state": "WAITING_FOR_SOURCE",
+      "allowed_transitions": {
+        "WAITING_FOR_SOURCE": "SOURCE_METADATA_CAPTURED",
+        "SOURCE_METADATA_CAPTURED": "AUTHORITY_VERIFIED",
+        "AUTHORITY_VERIFIED": "ENTRY_EVIDENCE_UNLOCKED",
+        "ENTRY_EVIDENCE_UNLOCKED": "FULL_EVIDENCE_CAPTURE",
+        "FULL_EVIDENCE_CAPTURE": "RULESPEC_ALLOWED"
+      },
+      "transition_checks": {
+        "source_metadata_verified": false,
+        "authority_verified": false,
+        "entry_verified": false,
+        "exit_verified": false,
+        "risk_verified": false,
+        "execution_verified": false,
+        "cost_verified": false
+      },
+      "registry_modified": false,
+      "rulespec_created": false,
+      "assumption_inference": false,
+      "rulespec_status": "LOCKED"
+    },
+    {
+      "strategy_id": "GSR_AT_004",
+      "current_state": "WAITING_FOR_SOURCE",
+      "allowed_transitions": {
+        "WAITING_FOR_SOURCE": "SOURCE_METADATA_CAPTURED",
+        "SOURCE_METADATA_CAPTURED": "AUTHORITY_VERIFIED",
+        "AUTHORITY_VERIFIED": "ENTRY_EVIDENCE_UNLOCKED",
+        "ENTRY_EVIDENCE_UNLOCKED": "FULL_EVIDENCE_CAPTURE",
+        "FULL_EVIDENCE_CAPTURE": "RULESPEC_ALLOWED"
+      },
+      "transition_checks": {
+        "source_metadata_verified": false,
+        "authority_verified": false,
+        "entry_verified": false,
+        "exit_verified": false,
+        "risk_verified": false,
+        "execution_verified": false,
+        "cost_verified": false
+      },
+      "registry_modified": false,
+      "rulespec_created": false,
+      "assumption_inference": false,
+      "rulespec_status": "LOCKED"
+    },
+    {
+      "strategy_id": "GSR_AT_005",
+      "current_state": "WAITING_FOR_SOURCE",
+      "allowed_transitions": {
+        "WAITING_FOR_SOURCE": "SOURCE_METADATA_CAPTURED",
+        "SOURCE_METADATA_CAPTURED": "AUTHORITY_VERIFIED",
+        "AUTHORITY_VERIFIED": "ENTRY_EVIDENCE_UNLOCKED",
+        "ENTRY_EVIDENCE_UNLOCKED": "FULL_EVIDENCE_CAPTURE",
+        "FULL_EVIDENCE_CAPTURE": "RULESPEC_ALLOWED"
+      },
+      "transition_checks": {
+        "source_metadata_verified": false,
+        "authority_verified": false,
+        "entry_verified": false,
+        "exit_verified": false,
+        "risk_verified": false,
+        "execution_verified": false,
+        "cost_verified": false
+      },
+      "registry_modified": false,
+      "rulespec_created": false,
+      "assumption_inference": false,
+      "rulespec_status": "LOCKED"
+    },
+    {
+      "strategy_id": "GSR_AT_006",
+      "current_state": "WAITING_FOR_SOURCE",
+      "allowed_transitions": {
+        "WAITING_FOR_SOURCE": "SOURCE_METADATA_CAPTURED",
+        "SOURCE_METADATA_CAPTURED": "AUTHORITY_VERIFIED",
+        "AUTHORITY_VERIFIED": "ENTRY_EVIDENCE_UNLOCKED",
+        "ENTRY_EVIDENCE_UNLOCKED": "FULL_EVIDENCE_CAPTURE",
+        "FULL_EVIDENCE_CAPTURE": "RULESPEC_ALLOWED"
+      },
+      "transition_checks": {
+        "source_metadata_verified": false,
+        "authority_verified": false,
+        "entry_verified": false,
+        "exit_verified": false,
+        "risk_verified": false,
+        "execution_verified": false,
+        "cost_verified": false
+      },
+      "registry_modified": false,
+      "rulespec_created": false,
+      "assumption_inference": false,
+      "rulespec_status": "LOCKED"
+    },
+    {
+      "strategy_id": "GSR_AT_010",
+      "current_state": "WAITING_FOR_SOURCE",
+      "allowed_transitions": {
+        "WAITING_FOR_SOURCE": "SOURCE_METADATA_CAPTURED",
+        "SOURCE_METADATA_CAPTURED": "AUTHORITY_VERIFIED",
+        "AUTHORITY_VERIFIED": "ENTRY_EVIDENCE_UNLOCKED",
+        "ENTRY_EVIDENCE_UNLOCKED": "FULL_EVIDENCE_CAPTURE",
+        "FULL_EVIDENCE_CAPTURE": "RULESPEC_ALLOWED"
+      },
+      "transition_checks": {
+        "source_metadata_verified": false,
+        "authority_verified": false,
+        "entry_verified": false,
+        "exit_verified": false,
+        "risk_verified": false,
+        "execution_verified": false,
+        "cost_verified": false
+      },
+      "registry_modified": false,
+      "rulespec_created": false,
+      "assumption_inference": false,
+      "rulespec_status": "LOCKED"
+    },
+    {
+      "strategy_id": "GSR_AT_011",
+      "current_state": "WAITING_FOR_SOURCE",
+      "allowed_transitions": {
+        "WAITING_FOR_SOURCE": "SOURCE_METADATA_CAPTURED",
+        "SOURCE_METADATA_CAPTURED": "AUTHORITY_VERIFIED",
+        "AUTHORITY_VERIFIED": "ENTRY_EVIDENCE_UNLOCKED",
+        "ENTRY_EVIDENCE_UNLOCKED": "FULL_EVIDENCE_CAPTURE",
+        "FULL_EVIDENCE_CAPTURE": "RULESPEC_ALLOWED"
+      },
+      "transition_checks": {
+        "source_metadata_verified": false,
+        "authority_verified": false,
+        "entry_verified": false,
+        "exit_verified": false,
+        "risk_verified": false,
+        "execution_verified": false,
+        "cost_verified": false
+      },
+      "registry_modified": false,
+      "rulespec_created": false,
+      "assumption_inference": false,
+      "rulespec_status": "LOCKED"
+    },
+    {
+      "strategy_id": "GSR_AT_013",
+      "current_state": "WAITING_FOR_SOURCE",
+      "allowed_transitions": {
+        "WAITING_FOR_SOURCE": "SOURCE_METADATA_CAPTURED",
+        "SOURCE_METADATA_CAPTURED": "AUTHORITY_VERIFIED",
+        "AUTHORITY_VERIFIED": "ENTRY_EVIDENCE_UNLOCKED",
+        "ENTRY_EVIDENCE_UNLOCKED": "FULL_EVIDENCE_CAPTURE",
+        "FULL_EVIDENCE_CAPTURE": "RULESPEC_ALLOWED"
+      },
+      "transition_checks": {
+        "source_metadata_verified": false,
+        "authority_verified": false,
+        "entry_verified": false,
+        "exit_verified": false,
+        "risk_verified": false,
+        "execution_verified": false,
+        "cost_verified": false
+      },
+      "registry_modified": false,
+      "rulespec_created": false,
+      "assumption_inference": false,
+      "rulespec_status": "LOCKED"
+    },
+    {
+      "strategy_id": "GSR_AT_018",
+      "current_state": "WAITING_FOR_SOURCE",
+      "allowed_transitions": {
+        "WAITING_FOR_SOURCE": "SOURCE_METADATA_CAPTURED",
+        "SOURCE_METADATA_CAPTURED": "AUTHORITY_VERIFIED",
+        "AUTHORITY_VERIFIED": "ENTRY_EVIDENCE_UNLOCKED",
+        "ENTRY_EVIDENCE_UNLOCKED": "FULL_EVIDENCE_CAPTURE",
+        "FULL_EVIDENCE_CAPTURE": "RULESPEC_ALLOWED"
+      },
+      "transition_checks": {
+        "source_metadata_verified": false,
+        "authority_verified": false,
+        "entry_verified": false,
+        "exit_verified": false,
+        "risk_verified": false,
+        "execution_verified": false,
+        "cost_verified": false
+      },
+      "registry_modified": false,
+      "rulespec_created": false,
+      "assumption_inference": false,
+      "rulespec_status": "LOCKED"
+    }
+  ]
+}

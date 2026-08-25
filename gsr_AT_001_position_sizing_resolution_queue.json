@@ -1,0 +1,187 @@
+{
+  "document": "GSR_AT_001 Position Sizing Resolution Queue",
+  "generated_read_only": true,
+  "strategy_id": "GSR_AT_001",
+  "total_tasks": 11,
+  "open_tasks": [
+    {
+      "strategy_id": "GSR_AT_001",
+      "verification_item": "document_present",
+      "resolution_status": "OPEN",
+      "source_evidence": null,
+      "reference": null,
+      "captured_text": null,
+      "human_verified": false,
+      "verification_status": "PENDING",
+      "resolution_policy": {
+        "source_only": true,
+        "inference_allowed": false,
+        "manual_override_allowed": false
+      },
+      "next_action": "CAPTURE_AND_VERIFY_POSITION_SIZING_SOURCE_EVIDENCE"
+    },
+    {
+      "strategy_id": "GSR_AT_001",
+      "verification_item": "author_present",
+      "resolution_status": "OPEN",
+      "source_evidence": null,
+      "reference": null,
+      "captured_text": null,
+      "human_verified": false,
+      "verification_status": "PENDING",
+      "resolution_policy": {
+        "source_only": true,
+        "inference_allowed": false,
+        "manual_override_allowed": false
+      },
+      "next_action": "CAPTURE_AND_VERIFY_POSITION_SIZING_SOURCE_EVIDENCE"
+    },
+    {
+      "strategy_id": "GSR_AT_001",
+      "verification_item": "version_present",
+      "resolution_status": "OPEN",
+      "source_evidence": null,
+      "reference": null,
+      "captured_text": null,
+      "human_verified": false,
+      "verification_status": "PENDING",
+      "resolution_policy": {
+        "source_only": true,
+        "inference_allowed": false,
+        "manual_override_allowed": false
+      },
+      "next_action": "CAPTURE_AND_VERIFY_POSITION_SIZING_SOURCE_EVIDENCE"
+    },
+    {
+      "strategy_id": "GSR_AT_001",
+      "verification_item": "reference_location_present",
+      "resolution_status": "OPEN",
+      "source_evidence": null,
+      "reference": null,
+      "captured_text": null,
+      "human_verified": false,
+      "verification_status": "PENDING",
+      "resolution_policy": {
+        "source_only": true,
+        "inference_allowed": false,
+        "manual_override_allowed": false
+      },
+      "next_action": "CAPTURE_AND_VERIFY_POSITION_SIZING_SOURCE_EVIDENCE"
+    },
+    {
+      "strategy_id": "GSR_AT_001",
+      "verification_item": "raw_source_text_present",
+      "resolution_status": "OPEN",
+      "source_evidence": null,
+      "reference": null,
+      "captured_text": null,
+      "human_verified": false,
+      "verification_status": "PENDING",
+      "resolution_policy": {
+        "source_only": true,
+        "inference_allowed": false,
+        "manual_override_allowed": false
+      },
+      "next_action": "CAPTURE_AND_VERIFY_POSITION_SIZING_SOURCE_EVIDENCE"
+    },
+    {
+      "strategy_id": "GSR_AT_001",
+      "verification_item": "captured_position_rule_present",
+      "resolution_status": "OPEN",
+      "source_evidence": null,
+      "reference": null,
+      "captured_text": null,
+      "human_verified": false,
+      "verification_status": "PENDING",
+      "resolution_policy": {
+        "source_only": true,
+        "inference_allowed": false,
+        "manual_override_allowed": false
+      },
+      "next_action": "CAPTURE_AND_VERIFY_POSITION_SIZING_SOURCE_EVIDENCE"
+    },
+    {
+      "strategy_id": "GSR_AT_001",
+      "verification_item": "sizing_parameters_present",
+      "resolution_status": "OPEN",
+      "source_evidence": null,
+      "reference": null,
+      "captured_text": null,
+      "human_verified": false,
+      "verification_status": "PENDING",
+      "resolution_policy": {
+        "source_only": true,
+        "inference_allowed": false,
+        "manual_override_allowed": false
+      },
+      "next_action": "CAPTURE_AND_VERIFY_POSITION_SIZING_SOURCE_EVIDENCE"
+    },
+    {
+      "strategy_id": "GSR_AT_001",
+      "verification_item": "allocation_conditions_present",
+      "resolution_status": "OPEN",
+      "source_evidence": null,
+      "reference": null,
+      "captured_text": null,
+      "human_verified": false,
+      "verification_status": "PENDING",
+      "resolution_policy": {
+        "source_only": true,
+        "inference_allowed": false,
+        "manual_override_allowed": false
+      },
+      "next_action": "CAPTURE_AND_VERIFY_POSITION_SIZING_SOURCE_EVIDENCE"
+    },
+    {
+      "strategy_id": "GSR_AT_001",
+      "verification_item": "source_reference_verified",
+      "resolution_status": "OPEN",
+      "source_evidence": null,
+      "reference": null,
+      "captured_text": null,
+      "human_verified": false,
+      "verification_status": "PENDING",
+      "resolution_policy": {
+        "source_only": true,
+        "inference_allowed": false,
+        "manual_override_allowed": false
+      },
+      "next_action": "CAPTURE_AND_VERIFY_POSITION_SIZING_SOURCE_EVIDENCE"
+    },
+    {
+      "strategy_id": "GSR_AT_001",
+      "verification_item": "text_verified",
+      "resolution_status": "OPEN",
+      "source_evidence": null,
+      "reference": null,
+      "captured_text": null,
+      "human_verified": false,
+      "verification_status": "PENDING",
+      "resolution_policy": {
+        "source_only": true,
+        "inference_allowed": false,
+        "manual_override_allowed": false
+      },
+      "next_action": "CAPTURE_AND_VERIFY_POSITION_SIZING_SOURCE_EVIDENCE"
+    },
+    {
+      "strategy_id": "GSR_AT_001",
+      "verification_item": "human_verified",
+      "resolution_status": "OPEN",
+      "source_evidence": null,
+      "reference": null,
+      "captured_text": null,
+      "human_verified": false,
+      "verification_status": "PENDING",
+      "resolution_policy": {
+        "source_only": true,
+        "inference_allowed": false,
+        "manual_override_allowed": false
+      },
+      "next_action": "CAPTURE_AND_VERIFY_POSITION_SIZING_SOURCE_EVIDENCE"
+    }
+  ],
+  "position_size_ready": false,
+  "position_size_capture_allowed": false,
+  "rulespec_status": "LOCKED"
+}

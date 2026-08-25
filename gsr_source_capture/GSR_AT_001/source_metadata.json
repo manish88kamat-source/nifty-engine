@@ -1,0 +1,29 @@
+{
+  "document": "GSR Source Metadata Record",
+  "generated_read_only": true,
+  "strategy_id": "GSR_AT_001",
+  "strategy_name": "Turtle S1 Long Breakout",
+  "capture_status": "AWAITING_SOURCE_METADATA",
+  "source_metadata": {
+    "source_title": null,
+    "author": null,
+    "edition_or_version": null,
+    "publication_date": null,
+    "page_or_reference_location": null,
+    "source_type": null,
+    "authority_level": null
+  },
+  "verification": {
+    "source_verified": false,
+    "verified_by": null,
+    "verification_date": null
+  },
+  "anti_inference_guard": {
+    "unknown_information_preserved": true,
+    "missing_source_details_must_not_be_filled": true
+  },
+  "rulespec_gate": {
+    "allowed": false,
+    "reason": "SOURCE_METADATA_NOT_VERIFIED"
+  }
+}

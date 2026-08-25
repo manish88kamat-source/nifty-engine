@@ -1,0 +1,79 @@
+{
+  "document": "GSR P1 Source Metadata Gate Report",
+  "generated_read_only": true,
+  "total": 10,
+  "metadata_complete": 0,
+  "metadata_pending": 10,
+  "strategies": [
+    {
+      "strategy_id": "GSR_AT_001",
+      "metadata_status": "PENDING_SOURCE",
+      "entry_capture_allowed": false,
+      "rulespec_status": "LOCKED",
+      "replay_status": "LOCKED"
+    },
+    {
+      "strategy_id": "GSR_AT_002",
+      "metadata_status": "PENDING_SOURCE",
+      "entry_capture_allowed": false,
+      "rulespec_status": "LOCKED",
+      "replay_status": "LOCKED"
+    },
+    {
+      "strategy_id": "GSR_AT_003",
+      "metadata_status": "PENDING_SOURCE",
+      "entry_capture_allowed": false,
+      "rulespec_status": "LOCKED",
+      "replay_status": "LOCKED"
+    },
+    {
+      "strategy_id": "GSR_AT_004",
+      "metadata_status": "PENDING_SOURCE",
+      "entry_capture_allowed": false,
+      "rulespec_status": "LOCKED",
+      "replay_status": "LOCKED"
+    },
+    {
+      "strategy_id": "GSR_AT_005",
+      "metadata_status": "PENDING_SOURCE",
+      "entry_capture_allowed": false,
+      "rulespec_status": "LOCKED",
+      "replay_status": "LOCKED"
+    },
+    {
+      "strategy_id": "GSR_AT_006",
+      "metadata_status": "PENDING_SOURCE",
+      "entry_capture_allowed": false,
+      "rulespec_status": "LOCKED",
+      "replay_status": "LOCKED"
+    },
+    {
+      "strategy_id": "GSR_AT_010",
+      "metadata_status": "PENDING_SOURCE",
+      "entry_capture_allowed": false,
+      "rulespec_status": "LOCKED",
+      "replay_status": "LOCKED"
+    },
+    {
+      "strategy_id": "GSR_AT_011",
+      "metadata_status": "PENDING_SOURCE",
+      "entry_capture_allowed": false,
+      "rulespec_status": "LOCKED",
+      "replay_status": "LOCKED"
+    },
+    {
+      "strategy_id": "GSR_AT_013",
+      "metadata_status": "PENDING_SOURCE",
+      "entry_capture_allowed": false,
+      "rulespec_status": "LOCKED",
+      "replay_status": "LOCKED"
+    },
+    {
+      "strategy_id": "GSR_AT_018",
+      "metadata_status": "PENDING_SOURCE",
+      "entry_capture_allowed": false,
+      "rulespec_status": "LOCKED",
+      "replay_status": "LOCKED"
+    }
+  ]
+}

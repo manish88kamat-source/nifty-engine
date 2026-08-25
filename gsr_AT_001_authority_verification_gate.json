@@ -1,0 +1,17 @@
+{
+  "document": "GSR_AT_001 Authority Verification Gate",
+  "generated_read_only": true,
+  "strategy_id": "GSR_AT_001",
+  "checks": {
+    "source_title_present": false,
+    "author_present": false,
+    "reference_present": false,
+    "authority_level_present": false,
+    "primary_source_confirmed": false,
+    "reference_confirmed": false,
+    "human_verified": false
+  },
+  "authority_gate_pass": false,
+  "entry_capture_allowed": false,
+  "rulespec_status": "LOCKED"
+}

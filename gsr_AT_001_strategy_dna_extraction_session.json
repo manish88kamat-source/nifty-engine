@@ -1,0 +1,35 @@
+{
+  "document": "GSR_AT_001 Strategy DNA Extraction Session",
+  "generated_read_only": false,
+  "strategy_id": "GSR_AT_001",
+  "strategy_name": "Turtle S1 Long Breakout",
+  "extraction_phase": "STRATEGY_DNA_EXTRACTION",
+  "extraction_policy": {
+    "source_evidence_only": true,
+    "inference_allowed": false,
+    "rule_generation_allowed": false,
+    "optimization_allowed": false
+  },
+  "evidence_dependencies": {
+    "source_metadata": "gsr_AT_001_source_metadata_capture_session.json",
+    "authority": "gsr_AT_001_source_authority_verification_record.json",
+    "entry": "gsr_AT_001_entry_source_evidence_record.json",
+    "exit": "gsr_AT_001_exit_source_evidence_record.json",
+    "risk": "gsr_AT_001_risk_source_evidence_record.json",
+    "position_sizing": "gsr_AT_001_position_sizing_evidence_record.json",
+    "execution": "gsr_AT_001_execution_source_evidence_record.json"
+  },
+  "strategy_dna_components": {
+    "market_context_dna": null,
+    "entry_logic_dna": null,
+    "exit_logic_dna": null,
+    "risk_dna": null,
+    "position_sizing_dna": null,
+    "execution_dna": null,
+    "regime_dna": null,
+    "failure_condition_dna": null
+  },
+  "extraction_status": "INITIALIZED",
+  "validation_ready": false,
+  "rulespec_status": "LOCKED"
+}

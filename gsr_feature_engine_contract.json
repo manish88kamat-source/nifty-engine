@@ -1,0 +1,50 @@
+{
+  "document": "GSR Feature Engine Contract",
+  "generated_read_only": true,
+  "status": "PENDING_IMPLEMENTATION",
+  "purpose": "Generate deterministic market features from canonical historical data for regime classification.",
+  "policy": {
+    "canonical_data_only": true,
+    "strategy_logic_excluded": true,
+    "future_data_forbidden": true,
+    "feature_generation_before_regime_labeling": true
+  },
+  "feature_groups": {
+    "trend": [
+      "EMA20",
+      "EMA50",
+      "EMA200",
+      "EMA20_slope",
+      "ADX"
+    ],
+    "volatility": [
+      "ATR",
+      "ATR_percentile",
+      "realized_volatility",
+      "range_percentile"
+    ],
+    "momentum": [
+      "RSI",
+      "ROC",
+      "momentum_slope"
+    ],
+    "structure": [
+      "higher_high",
+      "higher_low",
+      "lower_high",
+      "lower_low",
+      "range_compression"
+    ],
+    "transition": [
+      "previous_state_tracking",
+      "feature_change_detection"
+    ]
+  },
+  "output": "feature_snapshot",
+  "validation": [
+    "timestamp_alignment",
+    "missing_feature_check",
+    "calculation_integrity_check"
+  ],
+  "rulespec_status": "LOCKED"
+}

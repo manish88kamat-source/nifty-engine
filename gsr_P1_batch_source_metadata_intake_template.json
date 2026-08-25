@@ -1,0 +1,172 @@
+{
+  "document": "GSR P1 Batch Source Metadata Intake Template",
+  "generated_read_only": true,
+  "registry_modified": false,
+  "rulespec_created": false,
+  "assumption_policy": {
+    "inference_allowed": false,
+    "source_only_capture": true
+  },
+  "strategies": [
+    {
+      "strategy_id": "GSR_AT_001",
+      "source_metadata": {
+        "source_title": null,
+        "author": null,
+        "edition_or_version": null,
+        "publication_date": null,
+        "reference_location": null,
+        "source_type": null,
+        "authority_level": null
+      },
+      "capture_status": "WAITING_FOR_AUTHORITATIVE_SOURCE",
+      "verification_status": "PENDING",
+      "entry_capture_allowed": false,
+      "rulespec_status": "LOCKED"
+    },
+    {
+      "strategy_id": "GSR_AT_002",
+      "source_metadata": {
+        "source_title": null,
+        "author": null,
+        "edition_or_version": null,
+        "publication_date": null,
+        "reference_location": null,
+        "source_type": null,
+        "authority_level": null
+      },
+      "capture_status": "WAITING_FOR_AUTHORITATIVE_SOURCE",
+      "verification_status": "PENDING",
+      "entry_capture_allowed": false,
+      "rulespec_status": "LOCKED"
+    },
+    {
+      "strategy_id": "GSR_AT_003",
+      "source_metadata": {
+        "source_title": null,
+        "author": null,
+        "edition_or_version": null,
+        "publication_date": null,
+        "reference_location": null,
+        "source_type": null,
+        "authority_level": null
+      },
+      "capture_status": "WAITING_FOR_AUTHORITATIVE_SOURCE",
+      "verification_status": "PENDING",
+      "entry_capture_allowed": false,
+      "rulespec_status": "LOCKED"
+    },
+    {
+      "strategy_id": "GSR_AT_004",
+      "source_metadata": {
+        "source_title": null,
+        "author": null,
+        "edition_or_version": null,
+        "publication_date": null,
+        "reference_location": null,
+        "source_type": null,
+        "authority_level": null
+      },
+      "capture_status": "WAITING_FOR_AUTHORITATIVE_SOURCE",
+      "verification_status": "PENDING",
+      "entry_capture_allowed": false,
+      "rulespec_status": "LOCKED"
+    },
+    {
+      "strategy_id": "GSR_AT_005",
+      "source_metadata": {
+        "source_title": null,
+        "author": null,
+        "edition_or_version": null,
+        "publication_date": null,
+        "reference_location": null,
+        "source_type": null,
+        "authority_level": null
+      },
+      "capture_status": "WAITING_FOR_AUTHORITATIVE_SOURCE",
+      "verification_status": "PENDING",
+      "entry_capture_allowed": false,
+      "rulespec_status": "LOCKED"
+    },
+    {
+      "strategy_id": "GSR_AT_006",
+      "source_metadata": {
+        "source_title": null,
+        "author": null,
+        "edition_or_version": null,
+        "publication_date": null,
+        "reference_location": null,
+        "source_type": null,
+        "authority_level": null
+      },
+      "capture_status": "WAITING_FOR_AUTHORITATIVE_SOURCE",
+      "verification_status": "PENDING",
+      "entry_capture_allowed": false,
+      "rulespec_status": "LOCKED"
+    },
+    {
+      "strategy_id": "GSR_AT_010",
+      "source_metadata": {
+        "source_title": null,
+        "author": null,
+        "edition_or_version": null,
+        "publication_date": null,
+        "reference_location": null,
+        "source_type": null,
+        "authority_level": null
+      },
+      "capture_status": "WAITING_FOR_AUTHORITATIVE_SOURCE",
+      "verification_status": "PENDING",
+      "entry_capture_allowed": false,
+      "rulespec_status": "LOCKED"
+    },
+    {
+      "strategy_id": "GSR_AT_011",
+      "source_metadata": {
+        "source_title": null,
+        "author": null,
+        "edition_or_version": null,
+        "publication_date": null,
+        "reference_location": null,
+        "source_type": null,
+        "authority_level": null
+      },
+      "capture_status": "WAITING_FOR_AUTHORITATIVE_SOURCE",
+      "verification_status": "PENDING",
+      "entry_capture_allowed": false,
+      "rulespec_status": "LOCKED"
+    },
+    {
+      "strategy_id": "GSR_AT_013",
+      "source_metadata": {
+        "source_title": null,
+        "author": null,
+        "edition_or_version": null,
+        "publication_date": null,
+        "reference_location": null,
+        "source_type": null,
+        "authority_level": null
+      },
+      "capture_status": "WAITING_FOR_AUTHORITATIVE_SOURCE",
+      "verification_status": "PENDING",
+      "entry_capture_allowed": false,
+      "rulespec_status": "LOCKED"
+    },
+    {
+      "strategy_id": "GSR_AT_018",
+      "source_metadata": {
+        "source_title": null,
+        "author": null,
+        "edition_or_version": null,
+        "publication_date": null,
+        "reference_location": null,
+        "source_type": null,
+        "authority_level": null
+      },
+      "capture_status": "WAITING_FOR_AUTHORITATIVE_SOURCE",
+      "verification_status": "PENDING",
+      "entry_capture_allowed": false,
+      "rulespec_status": "LOCKED"
+    }
+  ]
+}

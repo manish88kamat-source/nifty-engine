@@ -1,0 +1,24 @@
+{
+  "document": "GSR Source Evidence Intake Validation",
+  "generated_read_only": true,
+  "strategy_id": "GSR_AT_001",
+  "source_metadata_complete": false,
+  "missing_source_fields": [
+    "title",
+    "author",
+    "version",
+    "date",
+    "reference_location"
+  ],
+  "missing_evidence_blocks": [
+    "entry_rule",
+    "exit_rule",
+    "initial_stop_rule",
+    "position_sizing_rule",
+    "pyramiding_rule",
+    "execution_rule",
+    "cost_model"
+  ],
+  "evidence_verified": false,
+  "rulespec_allowed": false
+}
