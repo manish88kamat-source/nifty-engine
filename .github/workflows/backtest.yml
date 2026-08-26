@@ -1,31 +1,129 @@
-name: Nifty Multi-Regime Engine Run
+name: Next-Day Alpha Result Publisher
 
 on:
-  push:
-    branches: [ "main" ]
   workflow_dispatch:
+    inputs:
+      mode:
+        description: "Run day-ahead or morning confirmation"
+        required: true
+        default: "day_ahead"
+        type: choice
+        options:
+          - day_ahead
+          - morning
+  schedule:
+    # 15:35 IST = 10:05 UTC, Monday-Friday
+    - cron: "5 10 * * 1-5"
+    # 09:25 IST = 03:55 UTC, Monday-Friday
+    - cron: "55 3 * * 1-5"
+
+permissions:
+  contents: write
 
 jobs:
-  run-engine:
+  day-ahead:
+    if: >
+      (github.event_name == 'schedule' &&
+       github.event.schedule == '5 10 * * 1-5') ||
+      (github.event_name == 'workflow_dispatch' &&
+       github.event.inputs.mode == 'day_ahead')
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout Code
+      - name: Checkout main
         uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
 
-      - name: Set up Python
+      - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: "3.11"
 
-      - name: Install Dependencies
+      - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Run Clean Engine Backtest
+      - name: Run day-ahead engine
         env:
           PYTHONUNBUFFERED: "1"
-          RUN_TESTS: "1"
+          KOTAK_CONSUMER_KEY: ${{ secrets.KOTAK_CONSUMER_KEY }}
+          KOTAK_MOBILE: ${{ secrets.KOTAK_MOBILE }}
+          KOTAK_UCC: ${{ secrets.KOTAK_UCC }}
+          KOTAK_TOTP: ${{ secrets.KOTAK_TOTP }}
+          KOTAK_MPIN: ${{ secrets.KOTAK_MPIN }}
+          NEXT_DAY_KOTAK_LIVE: "1"
+          NEXT_DAY_REQUIRE_KOTAK: "0"
         run: |
-          python app.py
+          python next_day_alpha_engine.py --day-ahead
+
+      - name: Publish result to next-day-results branch
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -B next-day-results
+          git add -f next_day_alpha/latest.json
+          if git diff --cached --quiet; then
+            echo "No result change to publish."
+            exit 0
+          fi
+          git commit -m "Update Next-Day Alpha result"
+          git push origin next-day-results --force
+
+  morning:
+    if: >
+      (github.event_name == 'schedule' &&
+       github.event.schedule == '55 3 * * 1-5') ||
+      (github.event_name == 'workflow_dispatch' &&
+       github.event.inputs.mode == 'morning')
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout persisted result branch
+        uses: actions/checkout@v4
+        with:
+          ref: next-day-results
+          fetch-depth: 0
+
+      - name: Refresh engine code from main
+        run: |
+          git fetch origin main
+          git checkout origin/main -- next_day_alpha_engine.py requirements.txt
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run morning confirmation
+        env:
+          PYTHONUNBUFFERED: "1"
+          KOTAK_CONSUMER_KEY: ${{ secrets.KOTAK_CONSUMER_KEY }}
+          KOTAK_MOBILE: ${{ secrets.KOTAK_MOBILE }}
+          KOTAK_UCC: ${{ secrets.KOTAK_UCC }}
+          KOTAK_TOTP: ${{ secrets.KOTAK_TOTP }}
+          KOTAK_MPIN: ${{ secrets.KOTAK_MPIN }}
+          NEXT_DAY_KOTAK_LIVE: "1"
+          NEXT_DAY_REQUIRE_KOTAK: "0"
+        run: |
+          python next_day_alpha_engine.py --morning
+
+      - name: Publish morning result
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -B next-day-results
+          git add -f next_day_alpha/latest.json
+          if git diff --cached --quiet; then
+            echo "No morning result change to publish."
+            exit 0
+          fi
+          git commit -m "Update Next-Day Alpha morning result"
+          git push origin next-day-results --force
