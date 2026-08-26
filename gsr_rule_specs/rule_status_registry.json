@@ -1,0 +1,82 @@
+{
+  "document": "GSR Rule Status Registry",
+  "version": "1.0.0",
+  "generated_read_only": true,
+
+  "purpose": "Governance registry controlling executable rule readiness.",
+
+  "rules": {
+
+    "GSR_AT_001": {
+      "strategy_name": "Turtle S1 Long Breakout",
+      "family": "Trend Following",
+
+      "state": "PENDING_SOURCE_VERIFICATION",
+
+      "executable": false,
+
+      "rule_precision": "MECHANISM_ONLY",
+
+      "missing_requirements": [
+        "verified_entry_condition",
+        "verified_exit_condition",
+        "verified_stop_logic",
+        "execution_definition",
+        "risk_definition"
+      ],
+
+      "reason": "Strategy metadata exists but executable rule parameters are not verified.",
+
+      "allow_replay": false
+    },
+
+
+    "GSR_AT_084": {
+      "strategy_name": "Turtle S1 Long Breakout - Regime-Filtered Variant",
+      "family": "Trend Following",
+
+      "state": "RESEARCH_VARIANT",
+
+      "executable": false,
+
+      "rule_precision": "RESEARCH_VARIANT",
+
+      "missing_requirements": [
+        "regime_definition",
+        "threshold",
+        "execution_cost_model",
+        "slippage_model"
+      ],
+
+      "reason": "GSR derived hypothesis. Not original trader rule.",
+
+      "allow_replay": false
+    },
+
+
+    "DEFAULT": {
+
+      "state": "UNKNOWN",
+
+      "executable": false,
+
+      "allow_replay": false,
+
+      "reason": "No verified executable rule exists."
+    }
+  },
+
+
+  "governance_rules": [
+
+    "Metadata cannot become executable rule automatically.",
+
+    "Strategy DNA cannot generate missing parameters.",
+
+    "Unknown strategies must remain UNKNOWN.",
+
+    "Only validated ReplayRule objects can enter historical replay.",
+
+    "Research variants must be explicitly marked as non-original."
+  ]
+}
