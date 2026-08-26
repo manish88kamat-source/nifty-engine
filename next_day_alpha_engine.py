@@ -10,7 +10,7 @@ Purpose
 A completely isolated stock-selection engine for:
 
 1. Market-close / day-ahead scan
-2. Selecting exactly up to TOP 5 high-quality stock candidates
+2. Selecting up to TOP 15 high-quality overnight candidates
 3. Assigning directional bias (LONG / SHORT)
 4. Next morning 09:15-09:20 confirmation
 5. Producing FINAL 2 / FINAL 1 / NO TRADE
@@ -100,7 +100,7 @@ DEPENDENCIES
 numpy
 pandas
 requests
-optional: yfinance (historical fallback only)
+yfinance (historical data only; real market data, never synthetic)
 optional: neo_api_client (preferred live/intraday)
 
 PUBLIC API
@@ -196,7 +196,18 @@ MIN_AVG_VOLUME = 100_000
 
 DAY_AHEAD_MIN_SCORE = 68.0
 # No forced trade rule: fewer than 5 may be returned if quality gates fail.
-TOP5_COUNT = 5
+TOP15_COUNT = 15
+TOP5_COUNT = TOP15_COUNT  # legacy compatibility alias
+
+# Data-integrity policy: synthetic/mock/dummy market data is NEVER permitted.
+# Historical daily data may use Yahoo because Kotak Neo does not expose the
+# required historical depth in this engine; live/intraday confirmation is
+# Kotak Neo/shared raw only.
+ALLOW_SYNTHETIC_DATA = False
+REQUIRE_REAL_INTRADAY = True
+PREMARKET_CAPTURE_START = (9, 0)
+PREMARKET_CAPTURE_END = (9, 14)
+PREMARKET_MOOD_MIN_SCORE = 55.0
 
 # ----------------------------- Morning confirmation ------------------------
 
@@ -1108,11 +1119,10 @@ def fetch_history(
                         )
 
                         if len(sub) >= MIN_HISTORY_DAYS:
-                            result[symbol] = (
-                                sub.reset_index(
-                                    drop=True
-                                )
-                            )
+                            clean = sub.reset_index(drop=True)
+                            clean.attrs["source"] = "YFINANCE_REAL"
+                            clean.attrs["synthetic"] = False
+                            result[symbol] = clean
 
                 except Exception:
                     continue
@@ -1167,7 +1177,8 @@ def fetch_history(
                         and len(df)
                         >= MIN_HISTORY_DAYS
                     ):
-
+                        df.attrs["source"] = "YAHOO_CHART_REAL"
+                        df.attrs["synthetic"] = False
                         result[symbol] = df
 
                 except Exception:
@@ -1281,6 +1292,46 @@ def structure_features(
     }
 
 
+def _wma(series: pd.Series, period: int) -> pd.Series:
+    """Weighted moving average used by the Hilega-Milega-style momentum layer."""
+    weights = np.arange(1, period + 1, dtype=float)
+    denom = float(weights.sum())
+    return series.rolling(period, min_periods=period).apply(
+        lambda values: float(np.dot(values, weights) / denom), raw=True
+    )
+
+
+def hilega_milega_features(close: pd.Series) -> Tuple[pd.Series, pd.Series, pd.Series, pd.Series]:
+    """
+    Hilega-Milega-style strength layer.
+
+    It is deliberately treated as a momentum/strength confirmation, not as an
+    independent trade trigger. Components: RSI(9), WMA(21), EMA(3), and EMA(3)
+    slope. This avoids giving multiple momentum indicators duplicate authority.
+    Returns RSI9, WMA21, EMA3, and signed score [-1, +1].
+    """
+    rsi9 = rsi(close, 9)
+    wma21 = _wma(close, 21)
+    ema3 = ema(close, 3)
+    slope3 = ema3.diff(2)
+
+    rsi_component = ((rsi9 - 50.0) / 25.0).clip(-1.0, 1.0)
+    spread_component = ((ema3 / wma21) - 1.0) * 25.0
+    spread_component = spread_component.clip(-1.0, 1.0)
+    slope_component = (slope3 / close.replace(0, np.nan) * 1000.0).clip(-1.0, 1.0)
+    signed = (0.45 * rsi_component + 0.40 * spread_component + 0.15 * slope_component).clip(-1.0, 1.0)
+    return rsi9, wma21, ema3, signed
+
+
+def hilega_milega_score(row: pd.Series, direction: str) -> float:
+    """Return 0-100 directional confirmation score."""
+    signed = safe_float(row.get("HilegaMilegaSigned", np.nan), np.nan)
+    if not np.isfinite(signed):
+        return 50.0
+    aligned = signed if direction == "LONG" else -signed
+    return clip(50.0 + 50.0 * aligned)
+
+
 def build_features(
     symbol: str,
     df: pd.DataFrame,
@@ -1369,6 +1420,14 @@ def build_features(
     ) = macd(
         d["Close"]
     )
+
+    # ---------------- Hilega-Milega-style momentum confirmation ----------------
+    (
+        d["HilegaMilegaRSI9"],
+        d["HilegaMilegaWMA21"],
+        d["HilegaMilegaEMA3"],
+        d["HilegaMilegaSigned"],
+    ) = hilega_milega_features(d["Close"])
 
     # ---------------- Volatility ----------------
 
@@ -1556,6 +1615,11 @@ def build_features(
         )
     )
 
+    hm_rsi9 = safe_float(last["HilegaMilegaRSI9"], np.nan)
+    hm_wma21 = safe_float(last["HilegaMilegaWMA21"], np.nan)
+    hm_ema3 = safe_float(last["HilegaMilegaEMA3"], np.nan)
+    hm_signed = safe_float(last["HilegaMilegaSigned"], np.nan)
+
     ema20_slope = slope(
         d["EMA20"].dropna(),
         5,
@@ -1700,6 +1764,7 @@ def build_features(
             and plus > minus
         ),
         int(st_dir > 0),
+        int(np.isfinite(hm_signed) and hm_signed > 0.10),
         int(
             structure["Structure"]
             == "LONG"
@@ -1737,6 +1802,7 @@ def build_features(
             and minus > plus
         ),
         int(st_dir < 0),
+        int(np.isfinite(hm_signed) and hm_signed < -0.10),
         int(
             structure["Structure"]
             == "SHORT"
@@ -1846,6 +1912,12 @@ def build_features(
         "MinusDI": minus,
 
         "SuperTrendDirection": st_dir,
+        "HilegaMilegaRSI9": hm_rsi9,
+        "HilegaMilegaWMA21": hm_wma21,
+        "HilegaMilegaEMA3": hm_ema3,
+        "HilegaMilegaSigned": hm_signed,
+        "HilegaMilegaDirection": ("LONG" if np.isfinite(hm_signed) and hm_signed > 0.10 else "SHORT" if np.isfinite(hm_signed) and hm_signed < -0.10 else "NEUTRAL"),
+        "HistoricalDataSource": str(df.attrs.get("source", "UNKNOWN_REAL_SOURCE")),
 
         **structure,
 
@@ -2807,6 +2879,8 @@ def score_candidates(
             direction,
         )
 
+        hilega = hilega_milega_score(row, direction)
+
         relative = (
             relative_strength_score(
                 row,
@@ -2880,15 +2954,18 @@ def score_candidates(
                 - catalyst
             )
 
+        # Hilega-Milega is a momentum confirmation, so momentum is reduced
+        # slightly to avoid double-counting the same information.
         score = (
             trend * 0.20
-            + momentum * 0.15
+            + momentum * 0.12
+            + hilega * 0.05
             + relative * 0.20
             + sector * 0.10
             + volume * 0.10
             + volatility * 0.08
             + catalyst * 0.07
-            + setup * 0.10
+            + setup * 0.08
         )
 
         # Quality multiplier.
@@ -2970,6 +3047,7 @@ def score_candidates(
 
                 "TrendScore": trend,
                 "MomentumScore": momentum,
+                "HilegaMilegaScore": hilega,
                 "RelativeStrengthScore": relative,
                 "SectorScore": sector,
                 "VolumeScore": volume,
@@ -3845,6 +3923,31 @@ def capture_kotak_day_ahead_snapshot(symbols: List[str]) -> Dict[str, Dict[str, 
         return {}
 
 
+def capture_kotak_premarket_snapshot(symbols: List[str]) -> Dict[str, Dict[str, Any]]:
+    """Capture a real Kotak quote during the Indian pre-open window when available."""
+    adapter = get_kotak_adapter()
+    if adapter is None or not adapter.connected:
+        LOGGER.warning("[PREMARKET] Kotak unavailable; pre-market mood cannot be inferred safely")
+        return {}
+    current = now_ist()
+    if current.hour < 9 or (current.hour == 9 and current.minute < 0):
+        return {}
+    if current.hour > 9 or (current.hour == 9 and current.minute > 14):
+        # Too late to call the current quote a pre-market observation.
+        return {}
+    out = {}
+    for symbol in symbols:
+        try:
+            row = adapter.quote(symbol)
+            if row:
+                row["raw_source"] = "KOTAK_NEO_PREMARKET_REAL"
+                out[symbol] = row
+                write_shared_raw(symbol, [row])
+        except Exception:
+            LOGGER.exception("[PREMARKET] quote failed for %s", symbol)
+    return out
+
+
 def capture_kotak_opening_window(symbols: List[str]) -> None:
     """Capture 09:15-09:20 raw quotes for only the current TOP 5.
 
@@ -3875,19 +3978,32 @@ def capture_kotak_opening_window(symbols: List[str]) -> None:
 # ============================================================================
 
 def fetch_intraday(symbol: str) -> Optional[pd.DataFrame]:
-    """Kotak-first intraday source; Yahoo only as explicit fallback."""
+    """
+    Live/morning intraday data is REAL-DATA ONLY.
+
+    Priority: Kotak Neo -> shared raw cache. There is deliberately NO Yahoo
+    1-minute fallback here because a delayed/alternate feed can invalidate the
+    Thesis -> Reality gate. If real Kotak/shared raw data is unavailable, the
+    candidate is marked DATA_NOT_READY / NO_TRADE instead of being fabricated.
+    """
     kotak = get_kotak_adapter()
     if kotak is not None and kotak.connected:
         try:
-            return kotak.get_intraday_capture(symbol)
-        except Exception:
-            pass
+            live = kotak.get_intraday_capture(symbol)
+            if live is not None and not live.empty:
+                live.attrs["source"] = "KOTAK_NEO_REAL"
+                live.attrs["synthetic"] = False
+                return live
+        except Exception as exc:
+            LOGGER.warning("[REAL-DATA] Kotak intraday failed for %s: %s", symbol, exc)
 
     shared = read_shared_raw_intraday(symbol)
     if shared is not None and not shared.empty:
+        shared.attrs["source"] = "SHARED_RAW_REAL"
+        shared.attrs["synthetic"] = False
         return shared
 
-    return fetch_yahoo_chart(f"{symbol}.NS", days=1, interval="1m")
+    return None
 
 
 def normalize_intraday(
@@ -4052,25 +4168,22 @@ def intraday_vwap(
 # ============================================================================
 
 def market_gap(ticker: str) -> float:
-    # For NIFTY opening gap, use Kotak raw quote when available.
-    if ticker == NIFTY_TICKER:
-        adapter = get_kotak_adapter()
-        if adapter is not None and adapter.connected:
-            q = adapter.quote("Nifty 50")
-            if q:
-                previous_close = safe_float(q.get("close"))
-                open_price = safe_float(q.get("open"))
-                if np.isfinite(previous_close) and previous_close != 0 and np.isfinite(open_price):
-                    return (open_price / previous_close - 1.0) * 100.0
-
-    df = fetch_yahoo_chart(ticker, days=5, interval="1d")
-    if df is None or len(df) < 2:
+    """Return a REAL current-session opening gap only; never substitute Yahoo."""
+    adapter = get_kotak_adapter()
+    if adapter is None or not adapter.connected:
+        LOGGER.warning("[REAL-DATA] market gap unavailable: Kotak Neo is not connected")
         return np.nan
-    previous_close = safe_float(df["Close"].iloc[-2])
-    today_open = safe_float(df["Open"].iloc[-1])
-    if not np.isfinite(previous_close) or previous_close == 0 or not np.isfinite(today_open):
-        return np.nan
-    return (today_open / previous_close - 1.0) * 100.0
+    try:
+        q = adapter.quote("Nifty 50" if ticker == NIFTY_TICKER else ticker)
+        if not q:
+            return np.nan
+        previous_close = safe_float(q.get("close"))
+        open_price = safe_float(q.get("open"))
+        if np.isfinite(previous_close) and previous_close != 0 and np.isfinite(open_price):
+            return (open_price / previous_close - 1.0) * 100.0
+    except Exception:
+        LOGGER.exception("[REAL-DATA] market gap quote failed for %s", ticker)
+    return np.nan
 
 
 def confirm_candidate(
@@ -4787,8 +4900,8 @@ def append_outcome(
 import contextlib
 
 V7_VERSION = "FINAL_V7_FULL_MTF_MACRO_RISK_AUDIT"
-V7_BASKET_SIZE = max(10, int(os.getenv("NEXT_DAY_V7_BASKET_SIZE", "30")))
-V7_MAX_STOCKS_PER_SECTOR = max(1, int(os.getenv("NEXT_DAY_V7_MAX_PER_SECTOR", "4")))
+V7_BASKET_SIZE = max(TOP15_COUNT, int(os.getenv("NEXT_DAY_V7_BASKET_SIZE", "30")))
+V7_MAX_STOCKS_PER_SECTOR = max(1, int(os.getenv("NEXT_DAY_V7_MAX_PER_SECTOR", "5")))
 V7_MTF_MIN_SCORE = float(os.getenv("NEXT_DAY_V7_MTF_MIN_SCORE", "62"))
 V7_MIN_RR = max(1.0, float(os.getenv("NEXT_DAY_V7_MIN_RR", "1.5")))
 V7_RR_TARGET_MULT = max(1.5, float(os.getenv("NEXT_DAY_V7_RR_TARGET_MULT", "2.0")))
@@ -5112,21 +5225,51 @@ def _v7_enrich_basket(basket: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows).sort_values("V7Score", ascending=False).reset_index(drop=True)
 
 
-def _v7_select_final5(enriched: pd.DataFrame) -> pd.DataFrame:
-    if enriched.empty: return enriched
+def _v7_select_final15(enriched: pd.DataFrame) -> pd.DataFrame:
+    """Select the TOP-15 overnight opportunity pool.
+
+    Same-sector names are allowed. Diversification is a soft preference,
+    not a hard exclusion, because the next morning performs the actual
+    market/sector/stock confirmation and can legitimately retain 2-3
+    exceptional names from one sector.
+    """
+    if enriched.empty:
+        return enriched
     x = enriched.copy()
-    # Hard exclusions: no direction, no structural RR, or invalidation too close.
     x = x[x["Direction"].isin(["LONG", "SHORT"])].copy()
     x = x[x["hard_rr_pass"] == True].copy()
-    if x.empty: return x
+    if x.empty:
+        return x
+
+    x["NightSelectionScore"] = pd.to_numeric(
+        x["V7Score"], errors="coerce"
+    ).fillna(0.0)
+
     selected, sector_count = [], {}
-    for _, row in x.sort_values("V7Score", ascending=False).iterrows():
+    remaining = x.sort_values("NightSelectionScore", ascending=False).copy()
+
+    while not remaining.empty and len(selected) < TOP15_COUNT:
+        best_idx, best_adjusted = None, -np.inf
+        for idx, row in remaining.iterrows():
+            sector = str(row.get("SectorBucket", "UNKNOWN"))
+            count = sector_count.get(sector, 0)
+            # Small soft penalty only; never hard-reject a strong sector cluster.
+            adjusted = safe_float(row.get("NightSelectionScore"), 0.0) - min(9.0, 3.0 * count)
+            if adjusted > best_adjusted:
+                best_adjusted, best_idx = adjusted, idx
+        if best_idx is None:
+            break
+        row = remaining.loc[best_idx].copy()
+        row["SelectionScore"] = round(float(best_adjusted), 4)
         sector = str(row.get("SectorBucket", "UNKNOWN"))
-        if sector_count.get(sector, 0) >= 2: continue
         selected.append(row)
         sector_count[sector] = sector_count.get(sector, 0) + 1
-        if len(selected) >= TOP5_COUNT: break
+        remaining = remaining.drop(index=best_idx)
+
     return pd.DataFrame(selected).reset_index(drop=True)
+
+# Legacy helper name retained so older UI/tests do not break.
+_v7_select_final5 = _v7_select_final15
 
 
 def _v7_risk_profile(row: Dict[str, Any], vix: Dict[str, Any]) -> Dict[str, Any]:
@@ -5254,55 +5397,55 @@ def _nd8_scan_from_row(row: Dict[str, Any]) -> List[Tuple[str,str,float]]:
     # Scores are directional by construction; SHORT uses the negative of the
     # same evidence orientation, so the decision layer remains symmetric.
     return [
-      ("TREND_RIDER","TREND",_nd8_clip(.45*T+.35*A+.20*S)),
-      ("TREND_ACCELERATION","TREND",_nd8_clip(.55*T+.25*M+.20*A)),
-      ("TREND_PERSISTENCE","TREND",_nd8_clip(.50*T+.30*A+.20*R)),
-      ("TREND_SECTOR_ALIGNMENT","TREND",_nd8_clip(.50*T+.30*S+.20*R)),
-      ("MOMENTUM_SURGE","MOMENTUM",_nd8_clip(.55*M+.25*V+.20*A)),
-      ("MOMENTUM_CONFIRMATION","MOMENTUM",_nd8_clip(.45*M+.35*R+.20*T)),
-      ("MOMENTUM_VOLUME_EXPANSION","MOMENTUM",_nd8_clip(.55*M+.45*V)),
-      ("MOMENTUM_EXHAUSTION","MOMENTUM",_nd8_clip(-.60*M-.25*T+.15*VV)),
-      ("RELATIVE_STRENGTH_LEADER","RELATIVE_STRENGTH",_nd8_clip(.65*R+.20*S+.15*T)),
-      ("RELATIVE_STRENGTH_BREAK","RELATIVE_STRENGTH",_nd8_clip(.45*R+.35*M+.20*V)),
-      ("RELATIVE_STRENGTH_DIVERGENCE","RELATIVE_STRENGTH",_nd8_clip(.60*R-.40*T)),
-      ("SECTOR_LEADERSHIP","SECTOR",_nd8_clip(.65*S+.20*R+.15*T)),
-      ("SECTOR_MOMENTUM","SECTOR",_nd8_clip(.55*S+.45*M)),
-      ("SECTOR_CONFIRMATION","SECTOR",_nd8_clip(.50*S+.30*A+.20*R)),
-      ("VOLUME_PARTICIPATION","FLOW",_nd8_clip(.65*V+.35*M)),
-      ("VOLUME_BREAKOUT","FLOW",_nd8_clip(.50*V+.30*M+.20*T)),
-      ("ACCUMULATION_PROXY","FLOW",_nd8_clip(.35*T+.30*V+.20*R+.15*S)),
-      ("DISTRIBUTION_PROXY","FLOW",_nd8_clip(-.35*T-.30*V-.20*R-.15*S)),
-      ("VOLATILITY_EXPANSION","VOLATILITY",_nd8_clip(.55*VV+.30*M+.15*V)),
-      ("VOLATILITY_COMPRESSION","VOLATILITY",_nd8_clip(-.55*VV+.30*T-.15*V)),
-      ("VOLATILITY_TREND_ALIGNMENT","VOLATILITY",_nd8_clip(.50*VV+.30*T+.20*M)),
-      ("MTF_ALIGNMENT","LOCATION",_nd8_clip(.70*A+.20*T+.10*S)),
-      ("MTF_PULLBACK_CONTINUATION","LOCATION",_nd8_clip(.45*A+.35*T-.20*M)),
-      ("STRUCTURAL_BREAKOUT","BREAKOUT",_nd8_clip(.40*T+.25*M+.20*V+.15*A)),
-      ("BREAKOUT_BLITZ","BREAKOUT",_nd8_clip(.35*T+.30*M+.20*V+.15*R)),
-      ("FAILED_BREAKOUT","BREAKOUT",_nd8_clip(-.45*T-.30*M+.15*VV-.10*V)),
-      ("BREAKOUT_SECTOR_CONFIRM","BREAKOUT",_nd8_clip(.35*T+.25*M+.25*S+.15*V)),
-      ("BREAKOUT_RELATIVE_STRENGTH","BREAKOUT",_nd8_clip(.40*T+.35*R+.25*M)),
-      ("CATALYST_ALIGNMENT","CATALYST",_nd8_clip(.55*C+.25*T+.20*S)),
-      ("CATALYST_MOMENTUM","CATALYST",_nd8_clip(.50*C+.30*M+.20*V)),
-      ("CATALYST_CONTRADICTION","CATALYST",_nd8_clip(-.55*C+.30*T+.15*R)),
-      ("RISK_REWARD_QUALITY","RISK",_nd8_clip(.70*Q+.20*T+.10*M)),
-      ("STRUCTURAL_RISK_CONFIRM","RISK",_nd8_clip(.55*Q+.25*A+.20*S)),
-      ("TREND_MOMENTUM_COMBO","STRATEGY",_nd8_clip(.45*T+.35*M+.20*A)),
-      ("BREAKOUT_MOMENTUM_COMBO","STRATEGY",_nd8_clip(.35*T+.30*M+.20*V+.15*A)),
-      ("MEAN_REVERSION_SETUP","STRATEGY",_nd8_clip(-.55*T-.25*M+.20*VV)),
-      ("REVERSAL_RISK","STRATEGY",_nd8_clip(-.50*T-.25*A-.25*M)),
-      ("TREND_INVERTER","STRATEGY",_nd8_clip(-.50*T-.30*M+.20*VV)),
-      ("DECAY_ENVIRONMENT","STRATEGY",_nd8_clip(-.35*M-.25*VV+.25*Q-.15*V)),
-      ("INSTITUTIONAL_ALIGNMENT","STRATEGY",_nd8_clip(.25*T+.20*M+.20*R+.20*S+.15*V)),
-      ("QUALITY_CONFLUENCE","STRATEGY",_nd8_clip(.20*T+.15*M+.15*R+.15*S+.15*V+.10*A+.10*Q)),
-      ("TREND_WITH_RISK_FILTER","STRATEGY",_nd8_clip(.45*T+.25*M+.30*Q)),
-      ("SECTOR_RELATIVE_COMBO","STRATEGY",_nd8_clip(.45*S+.35*R+.20*M)),
-      ("PARTICIPATION_BREAKOUT","STRATEGY",_nd8_clip(.45*V+.30*M+.25*T)),
-      ("DEFENSIVE_SHORT_SETUP","STRATEGY",_nd8_clip(-.45*T-.30*M-.25*R)),
-      ("HIGH_CONVICTION_ALIGNMENT","STRATEGY",_nd8_clip(.40*T+.20*M+.15*R+.10*S+.15*Q)),
-      ("CROWDING_EXHAUSTION","STRATEGY",_nd8_clip(.45*T-.35*M+.20*VV)),
-      ("RANGE_TO_TREND_TRANSITION","STRATEGY",_nd8_clip(.35*T+.25*M+.20*V+.20*VV)),
-      ("RISK_ADJUSTED_LEADERSHIP","STRATEGY",_nd8_clip(.35*R+.30*T+.20*S+.15*Q)),
+      ("TREND_RIDER","TREND",d*_nd8_clip(.45*T+.35*A+.20*S)),
+      ("TREND_ACCELERATION","TREND",d*_nd8_clip(.55*T+.25*M+.20*A)),
+      ("TREND_PERSISTENCE","TREND",d*_nd8_clip(.50*T+.30*A+.20*R)),
+      ("TREND_SECTOR_ALIGNMENT","TREND",d*_nd8_clip(.50*T+.30*S+.20*R)),
+      ("MOMENTUM_SURGE","MOMENTUM",d*_nd8_clip(.55*M+.25*V+.20*A)),
+      ("MOMENTUM_CONFIRMATION","MOMENTUM",d*_nd8_clip(.45*M+.35*R+.20*T)),
+      ("MOMENTUM_VOLUME_EXPANSION","MOMENTUM",d*_nd8_clip(.55*M+.45*V)),
+      ("MOMENTUM_EXHAUSTION","MOMENTUM",d*_nd8_clip(-.60*M-.25*T+.15*VV)),
+      ("RELATIVE_STRENGTH_LEADER","RELATIVE_STRENGTH",d*_nd8_clip(.65*R+.20*S+.15*T)),
+      ("RELATIVE_STRENGTH_BREAK","RELATIVE_STRENGTH",d*_nd8_clip(.45*R+.35*M+.20*V)),
+      ("RELATIVE_STRENGTH_DIVERGENCE","RELATIVE_STRENGTH",d*_nd8_clip(.60*R-.40*T)),
+      ("SECTOR_LEADERSHIP","SECTOR",d*_nd8_clip(.65*S+.20*R+.15*T)),
+      ("SECTOR_MOMENTUM","SECTOR",d*_nd8_clip(.55*S+.45*M)),
+      ("SECTOR_CONFIRMATION","SECTOR",d*_nd8_clip(.50*S+.30*A+.20*R)),
+      ("VOLUME_PARTICIPATION","FLOW",d*_nd8_clip(.65*V+.35*M)),
+      ("VOLUME_BREAKOUT","FLOW",d*_nd8_clip(.50*V+.30*M+.20*T)),
+      ("ACCUMULATION_PROXY","FLOW",d*_nd8_clip(.35*T+.30*V+.20*R+.15*S)),
+      ("DISTRIBUTION_PROXY","FLOW",d*_nd8_clip(-.35*T-.30*V-.20*R-.15*S)),
+      ("VOLATILITY_EXPANSION","VOLATILITY",d*_nd8_clip(.55*VV+.30*M+.15*V)),
+      ("VOLATILITY_COMPRESSION","VOLATILITY",d*_nd8_clip(-.55*VV+.30*T-.15*V)),
+      ("VOLATILITY_TREND_ALIGNMENT","VOLATILITY",d*_nd8_clip(.50*VV+.30*T+.20*M)),
+      ("MTF_ALIGNMENT","LOCATION",d*_nd8_clip(.70*A+.20*T+.10*S)),
+      ("MTF_PULLBACK_CONTINUATION","LOCATION",d*_nd8_clip(.45*A+.35*T-.20*M)),
+      ("STRUCTURAL_BREAKOUT","BREAKOUT",d*_nd8_clip(.40*T+.25*M+.20*V+.15*A)),
+      ("BREAKOUT_BLITZ","BREAKOUT",d*_nd8_clip(.35*T+.30*M+.20*V+.15*R)),
+      ("FAILED_BREAKOUT","BREAKOUT",d*_nd8_clip(-.45*T-.30*M+.15*VV-.10*V)),
+      ("BREAKOUT_SECTOR_CONFIRM","BREAKOUT",d*_nd8_clip(.35*T+.25*M+.25*S+.15*V)),
+      ("BREAKOUT_RELATIVE_STRENGTH","BREAKOUT",d*_nd8_clip(.40*T+.35*R+.25*M)),
+      ("CATALYST_ALIGNMENT","CATALYST",d*_nd8_clip(.55*C+.25*T+.20*S)),
+      ("CATALYST_MOMENTUM","CATALYST",d*_nd8_clip(.50*C+.30*M+.20*V)),
+      ("CATALYST_CONTRADICTION","CATALYST",d*_nd8_clip(-.55*C+.30*T+.15*R)),
+      ("RISK_REWARD_QUALITY","RISK",d*_nd8_clip(.70*Q+.20*T+.10*M)),
+      ("STRUCTURAL_RISK_CONFIRM","RISK",d*_nd8_clip(.55*Q+.25*A+.20*S)),
+      ("TREND_MOMENTUM_COMBO","STRATEGY",d*_nd8_clip(.45*T+.35*M+.20*A)),
+      ("BREAKOUT_MOMENTUM_COMBO","STRATEGY",d*_nd8_clip(.35*T+.30*M+.20*V+.15*A)),
+      ("MEAN_REVERSION_SETUP","STRATEGY",d*_nd8_clip(-.55*T-.25*M+.20*VV)),
+      ("REVERSAL_RISK","STRATEGY",d*_nd8_clip(-.50*T-.25*A-.25*M)),
+      ("TREND_INVERTER","STRATEGY",d*_nd8_clip(-.50*T-.30*M+.20*VV)),
+      ("DECAY_ENVIRONMENT","STRATEGY",d*_nd8_clip(-.35*M-.25*VV+.25*Q-.15*V)),
+      ("INSTITUTIONAL_ALIGNMENT","STRATEGY",d*_nd8_clip(.25*T+.20*M+.20*R+.20*S+.15*V)),
+      ("QUALITY_CONFLUENCE","STRATEGY",d*_nd8_clip(.20*T+.15*M+.15*R+.15*S+.15*V+.10*A+.10*Q)),
+      ("TREND_WITH_RISK_FILTER","STRATEGY",d*_nd8_clip(.45*T+.25*M+.30*Q)),
+      ("SECTOR_RELATIVE_COMBO","STRATEGY",d*_nd8_clip(.45*S+.35*R+.20*M)),
+      ("PARTICIPATION_BREAKOUT","STRATEGY",d*_nd8_clip(.45*V+.30*M+.25*T)),
+      ("DEFENSIVE_SHORT_SETUP","STRATEGY",d*_nd8_clip(-.45*T-.30*M-.25*R)),
+      ("HIGH_CONVICTION_ALIGNMENT","STRATEGY",d*_nd8_clip(.40*T+.20*M+.15*R+.10*S+.15*Q)),
+      ("CROWDING_EXHAUSTION","STRATEGY",d*_nd8_clip(.45*T-.35*M+.20*VV)),
+      ("RANGE_TO_TREND_TRANSITION","STRATEGY",d*_nd8_clip(.35*T+.25*M+.20*V+.20*VV)),
+      ("RISK_ADJUSTED_LEADERSHIP","STRATEGY",d*_nd8_clip(.35*R+.30*T+.20*S+.15*Q)),
     ]
 
 def _nd8_load_learning() -> Dict[str, Dict[str,float]]:
@@ -5464,7 +5607,7 @@ def _nd8_resolve_pending() -> None:
         except Exception: pass
 
 def _v7_build_day_ahead_watchlist() -> Dict[str, Any]:
-    """V7 orchestration: original 500 scan -> 30 bet basket -> expensive MTF -> final 5."""
+    """V7 orchestration: ~500 scan -> 30 deep basket -> expensive MTF -> TOP 15 overnight watchlist -> morning FINAL 2."""
     started = time.monotonic()
     LOGGER.info("[DAY-AHEAD] START")
     _nd8_resolve_pending()
@@ -5488,7 +5631,15 @@ def _v7_build_day_ahead_watchlist() -> Dict[str, Any]:
         if features is not None: rows.append(features)
     if not rows: raise RuntimeError("No usable stock data available")
     LOGGER.info("[DAY-AHEAD] feature rows usable: %d", len(rows))
-    frame=add_sector_features(pd.DataFrame(rows)); scored=score_candidates(frame)
+    frame=add_sector_features(pd.DataFrame(rows))
+    # Current completed session volume-shocker evidence versus prior baselines.
+    frame["VolumeShocker20"] = pd.to_numeric(frame.get("VolumeRatio20"), errors="coerce")
+    frame["VolumeShocker5"] = pd.to_numeric(frame.get("VolumeRatio5"), errors="coerce")
+    frame["VolumeShockerScore"] = (
+        0.65 * frame["VolumeShocker20"].clip(lower=0).fillna(0)
+        + 0.35 * frame["VolumeShocker5"].clip(lower=0).fillna(0)
+    )
+    scored=score_candidates(frame)
     LOGGER.info("[DAY-AHEAD] scored symbols: %d; >= minimum: %d", len(scored), int((pd.to_numeric(scored.get("DayAheadScore", pd.Series(dtype=float)), errors="coerce") >= DAY_AHEAD_MIN_SCORE).sum()))
     basket=_v7_preselect_30(scored)
     LOGGER.info("[DAY-AHEAD] preselected basket: %d", len(basket))
@@ -5499,11 +5650,11 @@ def _v7_build_day_ahead_watchlist() -> Dict[str, Any]:
     vix=_v7_vix_context()
     if not enriched.empty:
         enriched["MacroVIXRegime"] = vix.get("regime","UNAVAILABLE")
-    top5=_v7_select_final5(enriched)
-    LOGGER.info("[DAY-AHEAD] TOP-5 selected: %d", len(top5))
-    kotak_snapshot=capture_kotak_day_ahead_snapshot([str(x).upper() for x in top5["Symbol"].tolist()] if not top5.empty else [])
+    top15=_v7_select_final15(enriched)
+    LOGGER.info("[DAY-AHEAD] TOP-15 selected: %d", len(top15))
+    kotak_snapshot=capture_kotak_day_ahead_snapshot([str(x).upper() for x in top15["Symbol"].tolist()] if not top15.empty else [])
     candidates=[]
-    for rank,(_,row) in enumerate(top5.iterrows(),start=1):
+    for rank,(_,row) in enumerate(top15.iterrows(),start=1):
         d=row.to_dict(); sym=str(row["Symbol"]); q=kotak_snapshot.get(sym,{})
         if np.isfinite(safe_float(q.get("ltp"))): d["LTP"]=safe_float(q.get("ltp"))
         d["sector_bucket"]=_v7_sector_bucket(d.get("Industry")); d["risk_profile"]=_v7_risk_profile(d,vix)
@@ -5511,7 +5662,7 @@ def _v7_build_day_ahead_watchlist() -> Dict[str, Any]:
             "rank":rank,"symbol":sym,"industry":str(d.get("Industry","UNKNOWN")),"sector_bucket":d["sector_bucket"],"direction":str(d.get("Direction")),
             "day_ahead_score":round(safe_float(d.get("DayAheadScore"),0),2),"v7_score":round(safe_float(d.get("V7Score"),0),2),
             "selection_score":round(safe_float(d.get("V7Score"),0),2),"setup_type":str(d.get("SetupType","UNKNOWN")),
-            "trend_score":round(safe_float(d.get("TrendScore"),50),2),"momentum_score":round(safe_float(d.get("MomentumScore"),50),2),
+            "trend_score":round(safe_float(d.get("TrendScore"),50),2),"momentum_score":round(safe_float(d.get("MomentumScore"),50),2),"hilega_milega_score":round(safe_float(d.get("HilegaMilegaScore"),50),2),"supertrend_direction":int(safe_float(d.get("SuperTrendDirection"),0)),
             "relative_strength_score":round(safe_float(d.get("RelativeStrengthScore"),50),2),"sector_score":round(safe_float(d.get("SectorScore"),50),2),
             "volume_score":round(safe_float(d.get("VolumeScore"),50),2),"volatility_score":round(safe_float(d.get("VolatilityScore"),50),2),
             "catalyst_score":round(safe_float(d.get("CatalystScoreFinal"),50),2),"anti_false_positive_score":round(safe_float(d.get("AntiFalsePositiveScore"),50),2),
@@ -5526,10 +5677,10 @@ def _v7_build_day_ahead_watchlist() -> Dict[str, Any]:
     basket_records=[]
     for _,row in enriched.iterrows():
         basket_records.append({"symbol":str(row["Symbol"]),"sector_bucket":str(row.get("SectorBucket",_v7_sector_bucket(row.get("Industry")))),"direction":str(row.get("Direction")),"day_ahead_score":round(safe_float(row.get("DayAheadScore"),0),2),"v7_score":round(safe_float(row.get("V7Score"),0),2),"mtf_score":round(safe_float(row.get("mtf_score"),50),2),"rr":round(safe_float(row.get("rr"),np.nan),3),"hard_rr_pass":bool(row.get("hard_rr_pass",False)),"scanner_score":round(safe_float(row.get("ScannerScore"),0),5),"scanner_strategy_score":round(safe_float(row.get("ScannerStrategyScore"),0.5),5),"scanner_confidence":round(safe_float(row.get("ScannerConfidence"),0),5),"scanner_family":str(row.get("ScannerFamily","NO_EDGE"))})
-    result={"engine":"NEXT_DAY_ALPHA_ENGINE","version":V7_VERSION,"generated_at":timestamp.isoformat(),"data_as_of":timestamp.strftime("%Y-%m-%d"),"architecture":{"nifty_3min_engine_modified":False,"shared_raw_data_allowed":True,"shared_calculated_features":False,"shared_scores":False,"shared_regime_decisions":False,"shared_decisions":False,"shared_labels":False,"shared_predictions":False,"shared_raw_fields_only":True,"next_day_can_write_to_nifty_engine":False,"next_day_can_read_nifty_calculations":False},"macro_regime":vix,"day_ahead":{"universe_size":len(symbols),"usable_symbols":len(frame),"scored_symbols":len(scored),"bet_basket_size":len(basket_records),"bet_basket_30":basket_records,"top5_count":len(candidates),"top5":candidates},"morning_confirmation":{"status":"PENDING","final":[]},"probability_note":"Quality scores are not win probabilities. VIX is not a directional predictor. Historical calibration is required before any probability claim.","quality_controls":{"hard_rr_gate":V7_MIN_RR,"max_invalidation_atr":V7_MAX_INVALIDATION_DISTANCE_ATR,"mtf_timeframes":["W","D","4H","1H","15M"],"sector_basket_max_per_sector":V7_MAX_STOCKS_PER_SECTOR,"no_trade_allowed":True}}
+    result={"engine":"NEXT_DAY_ALPHA_ENGINE","version":V7_VERSION,"generated_at":timestamp.isoformat(),"data_as_of":timestamp.strftime("%Y-%m-%d"),"architecture":{"nifty_3min_engine_modified":False,"shared_raw_data_allowed":True,"shared_calculated_features":False,"shared_scores":False,"shared_regime_decisions":False,"shared_decisions":False,"shared_labels":False,"shared_predictions":False,"shared_raw_fields_only":True,"next_day_can_write_to_nifty_engine":False,"next_day_can_read_nifty_calculations":False},"macro_regime":vix,"day_ahead":{"universe_size":len(symbols),"usable_symbols":len(frame),"scored_symbols":len(scored),"bet_basket_size":len(basket_records),"bet_basket_30":basket_records,"top15_count":len(candidates),"top15":candidates,"top5_count":len(candidates),"top5":candidates},"morning_confirmation":{"status":"PENDING","final":[]},"probability_note":"Quality scores are not win probabilities. VIX is not a directional predictor. Historical calibration is required before any probability claim.","quality_controls":{"hard_rr_gate":V7_MIN_RR,"max_invalidation_atr":V7_MAX_INVALIDATION_DISTANCE_ATR,"mtf_timeframes":["W","D","4H","1H","15M"],"sector_basket_max_per_sector":V7_MAX_STOCKS_PER_SECTOR,"no_trade_allowed":True}}
     _nd8_record_predictions(candidates)
     _atomic_write_text(CACHE_JSON,json.dumps(result,ensure_ascii=False,indent=2,default=str))
-    LOGGER.info("[DAY-AHEAD] COMPLETE: top5=%d elapsed=%.2fs", len(candidates), time.monotonic()-started)
+    LOGGER.info("[DAY-AHEAD] COMPLETE: top15=%d elapsed=%.2fs | REAL_DATA_ONLY", len(candidates), time.monotonic()-started)
     return result
 
 
@@ -5537,15 +5688,38 @@ def _v7_build_day_ahead_watchlist() -> Dict[str, Any]:
 build_day_ahead_watchlist = _v7_build_day_ahead_watchlist
 
 
+def _real_premarket_mood(symbol: str, previous_close: float) -> Dict[str, Any]:
+    """Read pre-market mood from saved/live Kotak raw data only."""
+    df = fetch_intraday(symbol)
+    if df is None or df.empty:
+        return {"status":"DATA_NOT_READY","direction":"UNKNOWN","gap_pct":np.nan,"score":0.0}
+    x = normalize_intraday(df)
+    if x.empty:
+        return {"status":"DATA_NOT_READY","direction":"UNKNOWN","gap_pct":np.nan,"score":0.0}
+    today = now_ist().date()
+    start = datetime(today.year,today.month,today.day,9,0,tzinfo=IST)
+    end = datetime(today.year,today.month,today.day,9,15,tzinfo=IST)
+    pm = x[(x["DateTime"] >= start) & (x["DateTime"] < end)].copy()
+    if pm.empty:
+        return {"status":"DATA_NOT_READY","direction":"UNKNOWN","gap_pct":np.nan,"score":0.0}
+    last = safe_float(pm["Close"].iloc[-1], np.nan)
+    if not np.isfinite(last) or not np.isfinite(previous_close) or previous_close == 0:
+        return {"status":"DATA_NOT_READY","direction":"UNKNOWN","gap_pct":np.nan,"score":0.0}
+    gap = (last / previous_close - 1.0) * 100.0
+    direction = "UP" if gap > 0.15 else "DOWN" if gap < -0.15 else "FLAT"
+    score = clip(50.0 + gap * 12.0, 0.0, 100.0)
+    return {"status":"READY","direction":direction,"gap_pct":round(gap,3),"score":round(score,2),"source":"KOTAK_NEO_OR_SHARED_RAW_REAL"}
+
+
 def _v7_run_morning_confirmation() -> Dict[str, Any]:
     latest=load_latest()
     if not latest: return {"status":"NO_DAY_AHEAD_DATA","final":[]}
-    candidates=latest.get("day_ahead",{}).get("top5",[])
+    candidates=latest.get("day_ahead",{}).get("top15",latest.get("day_ahead",{}).get("top5",[]))
     if not candidates: return {"status":"NO_CANDIDATES","final":[],"confirmations":[]}
     nifty_gap=market_gap(NIFTY_TICKER)
     vix=latest.get("macro_regime",{})
     # Morning sector regime is calculated from the 30-stock raw basket first.
-    basket=latest.get("day_ahead",{}).get("bet_basket_30",[])
+    basket=latest.get("day_ahead",{}).get("top15",latest.get("day_ahead",{}).get("top5",[]))
     regimes=_v7_sector_regimes(basket)
     confirmations=[]
     for c in candidates:
@@ -5553,6 +5727,21 @@ def _v7_run_morning_confirmation() -> Dict[str, Any]:
         sector_ret=safe_float(regimes.get(sec,{}).get("return_5m_pct"),np.nan)
         conf=confirm_candidate(c,nifty_gap,sector_ret)
         item=asdict(conf); item["sector_bucket"]=sec; item["sector_live_regime"]=regimes.get(sec,{}).get("regime","UNKNOWN"); item["vix_regime"]=vix.get("regime","UNKNOWN")
+        pm=_real_premarket_mood(str(c["symbol"]), safe_float(item.get("prev_close"), np.nan))
+        item["premarket_mood"]=pm
+        # Explicit Thesis -> Reality ledger. The overnight direction is only a
+        # thesis; morning market/sector/stock observations can invalidate it.
+        item["thesis_direction"] = str(c.get("direction", "NEUTRAL")).upper()
+        item["reality_market"] = ("UP" if safe_float(nifty_gap, 0.0) > 0.10 else "DOWN" if safe_float(nifty_gap, 0.0) < -0.10 else "FLAT")
+        item["reality_sector"] = str(item.get("sector_live_regime", "UNKNOWN"))
+        item["reality_stock"] = ("STRONG" if safe_float(item.get("confirmation_score"), 0.0) >= MORNING_WATCH_SCORE and (item.get("acceptance") or item.get("breakout")) else "WEAK")
+        item["thesis_reality"] = {
+            "thesis": item["thesis_direction"],
+            "premarket": item.get("premarket_mood",{}).get("direction","UNKNOWN"),
+            "market": item["reality_market"],
+            "sector": item["reality_sector"],
+            "stock": item["reality_stock"],
+        }
         ok, circuit_reason=_v7_circuit_gate(str(c["symbol"]),pd.DataFrame()); item["circuit_gate"]=circuit_reason
         if not ok: item["status"]="REJECTED"; item["reason"]=circuit_reason; item["confirmation_score"]=0.0
         confirmations.append(item)
@@ -5571,9 +5760,29 @@ def _v7_run_morning_confirmation() -> Dict[str, Any]:
             score=min(99.0, score + 4.0*scanner_strategy)
         else:
             score=max(0.0, score - 8.0)
+        pm_dir=str(item.get("premarket_mood",{}).get("direction","UNKNOWN")).upper()
+        if (direction=="LONG" and pm_dir=="UP") or (direction=="SHORT" and pm_dir=="DOWN"):
+            score=min(99.0, score + 3.0)
+            item["premarket_alignment"]="ALIGNED"
+        elif (direction=="LONG" and pm_dir=="DOWN") or (direction=="SHORT" and pm_dir=="UP"):
+            score=max(0.0, score - 5.0)
+            item["premarket_alignment"]="CONTRADICTED"
+        else:
+            item["premarket_alignment"]="NEUTRAL_OR_UNAVAILABLE"
         item["scanner_gate"]="PASS" if scanner_dir_ok and scanner_strategy>=0.55 else "CAUTION"
         item["scanner_family"]=scanner_family
         sector_ok=item.get("sector_live_alignment") is True
+        thesis = str(item.get("thesis_direction", direction)).upper()
+        reality_market = str(item.get("reality_market", "FLAT")).upper()
+        reality_sector = str(item.get("reality_sector", "UNKNOWN")).upper()
+        reality_stock = str(item.get("reality_stock", "WEAK")).upper()
+        # Core rule: thesis is never allowed to override reality.
+        if ((thesis == "LONG" and reality_market == "DOWN" and reality_sector == "BEARISH" and reality_stock == "WEAK") or
+            (thesis == "SHORT" and reality_market == "UP" and reality_sector == "BULLISH" and reality_stock == "WEAK")):
+            item["status"] = "REJECTED"
+            item["reason"] = "Thesis contradicted by market + sector + stock reality"
+            item["confirmation_score"] = 0.0
+            continue
         # In neutral sectors the original confirmation may still stand; opposite live sectors are hard rejection.
         if item.get("sector_live_regime") in ("BULLISH","BEARISH") and not sector_ok:
             item["status"]="REJECTED"; item["reason"]="Live sector regime contradicts thesis"
@@ -5584,18 +5793,21 @@ def _v7_run_morning_confirmation() -> Dict[str, Any]:
         else:
             item["status"]="REJECTED"
     confirmed.sort(key=lambda x:(safe_float(x.get("confirmation_score"),0),safe_float(x.get("previous_day_score"),0)),reverse=True)
-    # FINAL-2 correlation gate: avoid two same-sector names unless market breadth is exceptionally strong.
+    # FINAL-2 sector gate: diversity is preferred. A same-sector pair is allowed
+    # only when live sector breadth is strong and both names align with that regime.
     final=[]; sector_used={}
     for item in confirmed:
         sec=item.get("sector_bucket","UNKNOWN")
-        if sector_used.get(sec,0)>=1: continue
+        if sector_used.get(sec,0)>=1:
+            reg=regimes.get(sec,{})
+            breadth=safe_float(reg.get("breadth"),0.0)
+            regime=str(reg.get("regime","NEUTRAL"))
+            direction=str(item.get("direction","")).upper()
+            aligned=(regime=="BULLISH" and direction=="LONG") or (regime=="BEARISH" and direction=="SHORT")
+            if not (breadth >= 0.70 and aligned and item.get("sector_live_alignment") is True):
+                continue
         final.append(item); sector_used[sec]=sector_used.get(sec,0)+1
         if len(final)>=2: break
-    if len(final)<2:
-        for item in confirmed:
-            if item in final: continue
-            final.append(item)
-            if len(final)>=2: break
     status="FINAL_2" if len(final)>=2 else ("FINAL_1" if len(final)==1 else "NO_TRADE")
     result={"status":status,"generated_at":now_ist().isoformat(),"required_confirmation_score":required,"vix_regime":vix,"sector_regimes":regimes,"final":final,"confirmations":confirmations,"no_trade_reason":"No candidate satisfied thesis, sector, circuit, R:R and morning confirmation gates." if not final else ""}
     latest["morning_confirmation"]=result
@@ -5687,23 +5899,16 @@ class NextDayAlphaEngine:
             run_morning_confirmation()
         )
 
-    def live_top5(
-        self,
-    ) -> List[Dict[str, Any]]:
-
+    def live_top5(self) -> List[Dict[str, Any]]:
+        # Legacy API name retained; returns the full overnight TOP-15 watchlist.
         latest = load_latest()
+        day_ahead = latest.get("day_ahead", {})
+        return day_ahead.get("top15", day_ahead.get("top5", []))
 
-        return (
-            latest
-            .get(
-                "day_ahead",
-                {},
-            )
-            .get(
-                "top5",
-                [],
-            )
-        )
+    def live_top15(self) -> List[Dict[str, Any]]:
+        latest = load_latest()
+        day_ahead = latest.get("day_ahead", {})
+        return day_ahead.get("top15", day_ahead.get("top5", []))
 
     def live_basket30(self) -> List[Dict[str, Any]]:
         latest = load_latest()
@@ -5745,11 +5950,21 @@ class NextDayAlphaEngine:
 
                 current = now_ist()
 
-                # Capture raw opening-window quotes for TOP 5 using Kotak.
+                # Capture raw pre-market quotes for TOP15. Only raw fields are
+                # written to the shared cache; no calculated opinion crosses the boundary.
+                if current.hour == 9 and 0 <= current.minute < 15:
+                    try:
+                        basket_now = self.live_top15()
+                        symbols_now = [str(x.get("symbol", "")) for x in basket_now if x.get("symbol")]
+                        capture_kotak_premarket_snapshot(symbols_now)
+                    except Exception:
+                        LOGGER.exception("[NEXT-DAY PREMARKET] capture failed")
+
+                # Capture raw opening-window quotes for TOP15 using Kotak.
                 # Only raw fields are written to the shared cache.
                 if current.hour == 9 and 15 <= current.minute < 20:
                     try:
-                        basket_now = self.live_basket30()
+                        basket_now = self.live_top15()
                         symbols_now = [str(x.get("symbol", "")) for x in basket_now if x.get("symbol")]
                         adapter = get_kotak_adapter()
                         if adapter is not None and adapter.connected:
