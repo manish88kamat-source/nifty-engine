@@ -794,6 +794,7 @@ class KotakMarketDataSource:
 
     def authenticate(
         self,
+        totp_override: Optional[str] = None,
     ) -> bool:
 
         if NeoAPI is None:
@@ -840,9 +841,20 @@ class KotakMarketDataSource:
             self.on_open
         )
 
-        totp = (
-            self.credentials.totp
-        )
+        totp = str(
+            totp_override
+            or self.credentials.totp
+            or ""
+        ).strip()
+
+        if (
+            not totp.isdigit()
+            or len(totp) != 6
+        ):
+
+            raise RuntimeError(
+                "Current Kotak TOTP must be a 6-digit code."
+            )
 
         step1 = (
             self.client.totp_login(
