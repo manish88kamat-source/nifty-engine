@@ -15,16 +15,20 @@ ROOT = Path(__file__).resolve().parent
 
 st.set_page_config(page_title="Next-Day Alpha | TOP 15", layout="wide")
 st.title("NEXT-DAY INTRADAY STOCK ALPHA")
-st.caption("Standalone UI â€¢ Raw-data sharing only â€¢ app.py / NIFTY / GSR untouched")
+st.caption("Standalone UI • Raw-data sharing only • app.py / NIFTY / GSR untouched")
 
 engine = NextDayAlphaEngine()
+try:
+    engine.run_if_due()
+except Exception as exc:
+    st.error(f"Engine startup/auto-run failed: {exc}")
 result = engine.latest()
 day = result.get("day_ahead", {}) if isinstance(result, dict) else {}
 morning = result.get("morning_confirmation", {}) if isinstance(result, dict) else {}
 candidates = day.get("top15", day.get("top5", []))
 
 if not result:
-    st.warning("No day-ahead result yet. Run: python next_day_alpha_engine.py --day-ahead")
+    st.info("No saved day-ahead snapshot yet. The dashboard will automatically start the day-ahead scan after 15:31 IST; no manual terminal command is required.")
     st.stop()
 
 macro = result.get("macro_regime", {})
@@ -43,11 +47,12 @@ if candidates:
             "Stock": x.get("symbol"),
             "Sector": x.get("sector_bucket"),
             "Thesis": x.get("direction"),
-            "Score": x.get("day_ahead_score"),
+            "Night Score": x.get("night_deep_dive_score", x.get("v7_score")),
             "MTF": x.get("mtf_score"),
-            "Volume": x.get("volume_score"),
-            "Catalyst": x.get("catalyst_score"),
-            "Scanner": x.get("scanner_family"),
+            "Volume Shock": x.get("volume_shock_score", x.get("volume_score")),
+            "7D Vol": x.get("volume_ratio_7"),
+            "Catalyst": x.get("event_direction", x.get("catalyst_score")),
+            "NSE/BSE Events": f"{x.get('nse_event_count',0)}/{x.get('bse_event_count',0)}",
             "R:R": x.get("rr"),
         })
     st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
@@ -55,7 +60,7 @@ else:
     st.info("NO QUALIFIED CANDIDATE")
 
 # Detailed thesis/reality view for the shortlist.
-st.subheader("THESIS â†’ MORNING REALITY")
+st.subheader("THESIS → MORNING REALITY")
 if candidates:
     detail=[]
     for x in candidates:
@@ -68,11 +73,11 @@ if candidates:
             "Invalidation": x.get("invalidation"),
             "Target": x.get("target"),
             "R:R": x.get("rr"),
-            "Catalyst": x.get("scanner_family", "NO_EDGE"),
+            "Catalyst": x.get("event_direction", x.get("scanner_family", "NO_EDGE")),
         })
     st.dataframe(pd.DataFrame(detail), use_container_width=True, hide_index=True)
 
-st.subheader("09:15â€“09:20 CONFIRMATION")
+st.subheader("09:15–09:20 CONFIRMATION")
 confirmations = morning.get("confirmations", [])
 if confirmations:
     st.dataframe(pd.DataFrame(confirmations), use_container_width=True, hide_index=True)
@@ -84,6 +89,6 @@ if final:
     st.success("FINAL TRADE CANDIDATES")
     st.dataframe(pd.DataFrame(final), use_container_width=True, hide_index=True)
 else:
-    st.info("NO TRADE â€” engine never forces two trades.")
+    st.info("NO TRADE — engine never forces two trades.")
 
 st.caption("Quality scores are ranking scores, not win probabilities. Historical calibration is required before any probability claim.")
