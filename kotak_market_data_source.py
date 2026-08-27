@@ -923,15 +923,29 @@ class KotakMarketDataSource:
             totp=totp,
         )
 
-        if (
+                if (
             isinstance(
                 step1,
                 dict,
             )
             and step1.get("error")
         ):
+            safe_response = dict(step1)
+
+            for key in (
+                "token",
+                "access_token",
+                "refresh_token",
+                "session_token",
+                "authorization",
+                "auth_token",
+            ):
+                if key in safe_response:
+                    safe_response[key] = "***REDACTED***"
+
             raise RuntimeError(
-                "Kotak TOTP login failed."
+                "Kotak TOTP login failed | "
+                f"response={safe_response}"
             )
 
         # ----------------------------------------------------
