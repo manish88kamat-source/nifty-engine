@@ -1,15 +1,49 @@
 """
 Kotak Neo -> Market Data Hub
-Version: MDH_KOTAK_1.0.0
+============================
 
-Independent raw market-data producer.
-No strategy, alpha, regime, or BUY/SELL logic.
+Version:
+    MDH_KOTAK_1.0.1
+
+Purpose:
+    Independent raw market-data producer for the common
+    Market Data Hub.
+
+Architecture:
+
+    Kotak Neo
+        |
+        v
+    KotakMarketDataSource
+        |
+        v
+    MarketDataHub
+        |
+        +---- NIFTY Engine
+        +---- GSR
+        +---- Next-Day Alpha
+
+IMPORTANT:
+    - No strategy logic.
+    - No BUY/SELL decisions.
+    - No regime classification.
+    - No alpha scoring.
+    - Only raw market-data ingestion.
+    - Credentials are loaded through kotak_credentials.py.
+    - Credentials are never printed.
+
+FIXES IN 1.0.1:
+    1. NIFTY 50 is explicitly subscribed with isIndex=True.
+    2. WebSocket ACK/control messages are NOT counted as ticks.
+    3. Nested/list WebSocket payloads are handled.
+    4. More Kotak field aliases are supported.
+    5. Safe rejection diagnostics are exposed without credentials.
+    6. Duplicate return True removed.
 """
 
 from __future__ import annotations
 
 import argparse
-import inspect
 import json
 import threading
 import time
@@ -21,14 +55,19 @@ try:
 except ImportError:
     NeoAPI = None
 
-from kotak_credentials import KotakCredentials, load_kotak_credentials
+from kotak_credentials import (
+    KotakCredentials,
+    load_kotak_credentials,
+)
+
 from market_data_hub import MarketDataHub
 
 
-VERSION = "1.0.0"
+VERSION = "1.0.1"
+
 KOTAK_ENVIRONMENT = "prod"
+
 DEFAULT_MAX_TICK_AGE_SECONDS = 30.0
-DEFAULT_HEARTBEAT_SECONDS = 5.0
 DEFAULT_RECONNECT_SECONDS = 5.0
 
 
@@ -47,21 +86,30 @@ def utc_now_iso() -> str:
 def safe_float(value: Any) -> Optional[float]:
     try:
         result = float(value)
+
         if result != result:
             return None
+
         if result in (float("inf"), float("-inf")):
             return None
+
         return result
+
     except (TypeError, ValueError):
         return None
 
 
-def first_value(record: Dict[str, Any], keys: Iterable[str]) -> Any:
+def first_value(
+    record: Dict[str, Any],
+    keys: Iterable[str],
+) -> Any:
     for key in keys:
         if key in record:
             value = record.get(key)
+
             if value is not None:
                 return value
+
     return None
 
 
@@ -72,11 +120,65 @@ def first_float(
     return safe_float(first_value(record, keys))
 
 
+def lower_key_map(record: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Case-insensitive helper.
+
+    Kotak payloads can differ slightly between SDK/feed versions.
+    We preserve the original dictionary and use this only for
+    tolerant field discovery.
+    """
+    result: Dict[str, Any] = {}
+
+    for key, value in record.items():
+        result[str(key).lower()] = value
+
+    return result
+
+
+def first_value_tolerant(
+    record: Dict[str, Any],
+    keys: Iterable[str],
+) -> Any:
+    value = first_value(record, keys)
+
+    if value is not None:
+        return value
+
+    lowered = lower_key_map(record)
+
+    for key in keys:
+        value = lowered.get(str(key).lower())
+
+        if value is not None:
+            return value
+
+    return None
+
+
+def first_float_tolerant(
+    record: Dict[str, Any],
+    keys: Iterable[str],
+) -> Optional[float]:
+    return safe_float(
+        first_value_tolerant(record, keys)
+    )
+
+
 # ============================================================
 # TIMESTAMP
 # ============================================================
 
-def parse_timestamp(record: Dict[str, Any]) -> datetime:
+def parse_timestamp(
+    record: Dict[str, Any],
+) -> datetime:
+    """
+    Extract source timestamp from a Kotak raw tick.
+
+    Source timestamp is deliberately required.
+    Receive time is NOT silently substituted.
+    """
+
     keys = (
         "lstup_time",
         "ft",
@@ -88,27 +190,38 @@ def parse_timestamp(record: Dict[str, Any]) -> datetime:
         "last_traded_time",
         "lastTradedTime",
         "time",
+        "lastUpdateTime",
     )
 
-    value = first_value(record, keys)
+    value = first_value_tolerant(record, keys)
 
     if value is None:
-        raise ValueError("Kotak tick has no source timestamp")
+        raise ValueError(
+            "tick has no source timestamp"
+        )
 
     if isinstance(value, datetime):
         dt = value
 
     elif isinstance(value, (int, float)):
         numeric = float(value)
+
+        # Epoch milliseconds.
         if numeric > 10_000_000_000:
             numeric /= 1000.0
-        dt = datetime.fromtimestamp(numeric, tz=timezone.utc)
+
+        dt = datetime.fromtimestamp(
+            numeric,
+            tz=timezone.utc,
+        )
 
     else:
         text = str(value).strip()
 
         if not text:
-            raise ValueError("Empty Kotak source timestamp")
+            raise ValueError(
+                "empty source timestamp"
+            )
 
         if text.endswith("Z"):
             text = text[:-1] + "+00:00"
@@ -119,19 +232,23 @@ def parse_timestamp(record: Dict[str, Any]) -> datetime:
         except ValueError:
             try:
                 numeric = float(text)
+
                 if numeric > 10_000_000_000:
                     numeric /= 1000.0
+
                 dt = datetime.fromtimestamp(
                     numeric,
                     tz=timezone.utc,
                 )
+
             except Exception as exc:
                 raise ValueError(
-                    "Unsupported Kotak timestamp: " + text
+                    "unsupported Kotak timestamp"
                 ) from exc
 
     if dt.tzinfo is None:
         from zoneinfo import ZoneInfo
+
         dt = dt.replace(
             tzinfo=ZoneInfo("Asia/Kolkata")
         )
@@ -143,8 +260,10 @@ def parse_timestamp(record: Dict[str, Any]) -> datetime:
 # SYMBOL / TOKEN
 # ============================================================
 
-def extract_token(record: Dict[str, Any]) -> str:
-    value = first_value(
+def extract_token(
+    record: Dict[str, Any],
+) -> str:
+    value = first_value_tolerant(
         record,
         (
             "instrument_token",
@@ -153,13 +272,20 @@ def extract_token(record: Dict[str, Any]) -> str:
             "tk",
             "exchange_token",
             "exchangeToken",
+            "pSymbol",
         ),
     )
-    return "" if value is None else str(value).strip()
+
+    if value is None:
+        return ""
+
+    return str(value).strip()
 
 
-def extract_symbol(record: Dict[str, Any]) -> str:
-    value = first_value(
+def extract_symbol(
+    record: Dict[str, Any],
+) -> str:
+    value = first_value_tolerant(
         record,
         (
             "display_symbol",
@@ -171,13 +297,20 @@ def extract_symbol(record: Dict[str, Any]) -> str:
             "symbol",
             "name",
             "scrip",
+            "pSymbolName",
         ),
     )
-    return "" if value is None else str(value).strip()
+
+    if value is None:
+        return ""
+
+    return str(value).strip()
 
 
-def extract_exchange_segment(record: Dict[str, Any]) -> str:
-    value = first_value(
+def extract_exchange_segment(
+    record: Dict[str, Any],
+) -> str:
+    value = first_value_tolerant(
         record,
         (
             "exchange_segment",
@@ -185,17 +318,24 @@ def extract_exchange_segment(record: Dict[str, Any]) -> str:
             "exchange",
             "exch_seg",
             "es",
+            "pExchSeg",
         ),
     )
-    return "" if value is None else str(value).strip()
+
+    if value is None:
+        return ""
+
+    return str(value).strip()
 
 
 # ============================================================
 # MARKET FIELDS
 # ============================================================
 
-def extract_ltp(record: Dict[str, Any]) -> Optional[float]:
-    return first_float(
+def extract_ltp(
+    record: Dict[str, Any],
+) -> Optional[float]:
+    return first_float_tolerant(
         record,
         (
             "ltp",
@@ -207,35 +347,67 @@ def extract_ltp(record: Dict[str, Any]) -> Optional[float]:
             "LTP",
             "price",
             "close",
+            "lastTradedPrice",
         ),
     )
 
 
-def extract_open(record: Dict[str, Any]) -> Optional[float]:
-    return first_float(record, ("open", "o", "Open"))
-
-
-def extract_high(record: Dict[str, Any]) -> Optional[float]:
-    return first_float(record, ("high", "h", "High"))
-
-
-def extract_low(record: Dict[str, Any]) -> Optional[float]:
-    return first_float(record, ("low", "l", "Low"))
-
-
-def extract_close(record: Dict[str, Any]) -> Optional[float]:
-    return first_float(record, ("close", "c", "Close"))
-
-
-def extract_volume(record: Dict[str, Any]) -> Optional[float]:
-    return first_float(
+def extract_open(
+    record: Dict[str, Any],
+) -> Optional[float]:
+    return first_float_tolerant(
         record,
-        ("volume", "vol", "v", "Volume"),
+        ("open", "o", "Open"),
     )
 
 
-def extract_oi(record: Dict[str, Any]) -> Optional[float]:
-    return first_float(
+def extract_high(
+    record: Dict[str, Any],
+) -> Optional[float]:
+    return first_float_tolerant(
+        record,
+        ("high", "h", "High"),
+    )
+
+
+def extract_low(
+    record: Dict[str, Any],
+) -> Optional[float]:
+    return first_float_tolerant(
+        record,
+        ("low", "l", "Low"),
+    )
+
+
+def extract_close(
+    record: Dict[str, Any],
+) -> Optional[float]:
+    return first_float_tolerant(
+        record,
+        ("close", "c", "Close"),
+    )
+
+
+def extract_volume(
+    record: Dict[str, Any],
+) -> Optional[float]:
+    return first_float_tolerant(
+        record,
+        (
+            "volume",
+            "vol",
+            "v",
+            "Volume",
+            "last_volume",
+            "lastVolume",
+        ),
+    )
+
+
+def extract_oi(
+    record: Dict[str, Any],
+) -> Optional[float]:
+    return first_float_tolerant(
         record,
         (
             "oi",
@@ -245,6 +417,82 @@ def extract_oi(record: Dict[str, Any]) -> Optional[float]:
             "oI",
         ),
     )
+
+
+# ============================================================
+# MESSAGE NORMALIZATION
+# ============================================================
+
+def normalize_message_records(
+    message: Any,
+) -> List[Dict[str, Any]]:
+    """
+    Convert a Kotak websocket callback payload into candidate
+    dictionaries.
+
+    Control/ACK payloads are allowed through this layer, but are
+    filtered later because they do not contain a valid LTP.
+    """
+
+    if isinstance(message, str):
+        text = message.strip()
+
+        if not text:
+            return []
+
+        try:
+            message = json.loads(text)
+
+        except Exception:
+            return []
+
+    if isinstance(message, dict):
+        records: List[Dict[str, Any]] = [message]
+
+        # Some SDK/feed versions wrap data in "data".
+        nested = message.get("data")
+
+        if isinstance(nested, dict):
+            records.append(nested)
+
+        elif isinstance(nested, list):
+            records.extend(
+                item
+                for item in nested
+                if isinstance(item, dict)
+            )
+
+        # Some payloads use "data" as a JSON string.
+        elif isinstance(nested, str):
+            try:
+                parsed = json.loads(nested)
+
+                if isinstance(parsed, dict):
+                    records.append(parsed)
+
+                elif isinstance(parsed, list):
+                    records.extend(
+                        item
+                        for item in parsed
+                        if isinstance(item, dict)
+                    )
+
+            except Exception:
+                pass
+
+        return records
+
+    if isinstance(message, list):
+        records: List[Dict[str, Any]] = []
+
+        for item in message:
+            records.extend(
+                normalize_message_records(item)
+            )
+
+        return records
+
+    return []
 
 
 # ============================================================
@@ -260,25 +508,45 @@ class KotakMarketDataSource:
         environment: str = KOTAK_ENVIRONMENT,
     ):
         self.hub = hub
+
         self.credentials = (
             credentials
             if credentials is not None
             else load_kotak_credentials()
         )
+
         self.environment = environment
+
         self.client = None
+
         self.authenticated = False
+
         self.stream_state = "DISCONNECTED"
+
         self.last_error = ""
 
+        self.last_rejection_reason = ""
+
+        self.last_message_type = ""
+
+        self.last_raw_keys: List[str] = []
+
         self.last_source_timestamp: Optional[datetime] = None
+
         self.last_receive_timestamp: Optional[datetime] = None
+
         self.last_symbol = ""
+
         self.last_ltp: Optional[float] = None
+
+        # IMPORTANT:
+        # ticks_received counts actual market-data ticks only.
+        self.messages_received = 0
 
         self.ticks_received = 0
         self.ticks_accepted = 0
         self.ticks_rejected = 0
+
         self.subscription_count = 0
 
         self._stop_event = threading.Event()
@@ -288,18 +556,27 @@ class KotakMarketDataSource:
     # CALLBACKS
     # --------------------------------------------------------
 
-    def on_open(self, message: Any = None) -> None:
+    def on_open(
+        self,
+        message: Any = None,
+    ) -> None:
         with self._lock:
             self.stream_state = "OPEN"
 
-    def on_error(self, error: Any = None) -> None:
+    def on_error(
+        self,
+        error: Any = None,
+    ) -> None:
         with self._lock:
             self.last_error = str(
                 error if error is not None else ""
             )
             self.stream_state = "ERROR"
 
-    def on_close(self, message: Any = None) -> None:
+    def on_close(
+        self,
+        message: Any = None,
+    ) -> None:
         with self._lock:
             self.stream_state = "CLOSED"
 
@@ -307,27 +584,45 @@ class KotakMarketDataSource:
     # RAW MESSAGE CALLBACK
     # --------------------------------------------------------
 
-    def on_message(self, message: Any) -> None:
-        try:
-            if isinstance(message, str):
-                try:
-                    message = json.loads(message)
-                except Exception:
-                    return
+    def on_message(
+        self,
+        message: Any,
+    ) -> None:
+        """
+        Receive raw Kotak websocket payload.
 
-            records = (
-                message
-                if isinstance(message, list)
-                else [message]
-            )
+        ACK/control messages are NOT treated as market ticks.
+        """
+
+        receive_time = utc_now()
+
+        with self._lock:
+            self.messages_received += 1
+            self.last_receive_timestamp = receive_time
+            self.last_message_type = type(message).__name__
+
+        try:
+            records = normalize_message_records(message)
+
+            if not records:
+                with self._lock:
+                    self.last_rejection_reason = (
+                        "websocket message was not a supported "
+                        "dict/list/JSON payload"
+                    )
+                return
 
             for record in records:
-                if isinstance(record, dict):
-                    self._process_raw_tick(record)
+                if not isinstance(record, dict):
+                    continue
+
+                self._process_raw_tick(record)
 
         except Exception as exc:
             with self._lock:
-                self.last_error = f"on_message: {exc}"
+                self.last_error = (
+                    f"on_message: {type(exc).__name__}: {exc}"
+                )
 
     # --------------------------------------------------------
     # RAW TICK PROCESSING
@@ -337,11 +632,31 @@ class KotakMarketDataSource:
         self,
         record: Dict[str, Any],
     ) -> None:
-        receive_time = utc_now()
+        with self._lock:
+            self.last_raw_keys = [
+                str(key)
+                for key in list(record.keys())[:40]
+            ]
 
+        # ----------------------------------------------------
+        # FIRST GATE:
+        # A control/ACK message normally has no LTP.
+        # Therefore it is NOT a tick.
+        # ----------------------------------------------------
+
+        ltp = extract_ltp(record)
+
+        if ltp is None:
+            with self._lock:
+                self.last_rejection_reason = (
+                    "non-market websocket message / ACK "
+                    "(no valid LTP)"
+                )
+            return
+
+        # This is an actual market-data candidate.
         with self._lock:
             self.ticks_received += 1
-            self.last_receive_timestamp = receive_time
 
         token = extract_token(record)
         symbol = extract_symbol(record)
@@ -350,174 +665,100 @@ class KotakMarketDataSource:
             if token:
                 symbol = f"TOKEN_{token}"
             else:
-                with self._lock:
-                    self.ticks_rejected += 1
-                return
+                # For index feed variants the instrument name can
+                # be absent. Keep a safe logical symbol rather than
+                # throwing away an otherwise valid LTP tick.
+                symbol = "NIFTY_50"
 
         try:
             source_timestamp = parse_timestamp(record)
+
         except Exception as exc:
             with self._lock:
                 self.ticks_rejected += 1
-                self.last_error = f"timestamp: {exc}"
+                self.last_rejection_reason = (
+                    f"timestamp: {exc}"
+                )
+                self.last_error = (
+                    f"timestamp: {exc}"
+                )
             return
 
-        ltp = extract_ltp(record)
+        exchange_segment = (
+            extract_exchange_segment(record)
+            or "nse_cm"
+        )
 
-        if ltp is None:
-            with self._lock:
-                self.ticks_rejected += 1
-                self.last_error = "tick has no valid LTP"
-            return
-
-        exchange_segment = extract_exchange_segment(record)
         mapping = dict(record)
+
+        # Canonical fields for MarketDataHub.
         mapping["ltp"] = ltp
 
-        values = {
-            "open": extract_open(record),
-            "high": extract_high(record),
-            "low": extract_low(record),
-            "close": extract_close(record),
-            "volume": extract_volume(record),
-            "oi": extract_oi(record),
-        }
+        open_price = extract_open(record)
+        high_price = extract_high(record)
+        low_price = extract_low(record)
+        close_price = extract_close(record)
+        volume = extract_volume(record)
+        oi = extract_oi(record)
 
-        for key, value in values.items():
-            if value is not None:
-                mapping[key] = value
+        if open_price is not None:
+            mapping["open"] = open_price
 
-        accepted = self.hub.ingest_mapping(
-            mapping=mapping,
-            source="KOTAK_NEO",
-            symbol=symbol,
-            timestamp=source_timestamp,
-            instrument_token=token,
-            exchange_segment=exchange_segment,
-        )
+        if high_price is not None:
+            mapping["high"] = high_price
+
+        if low_price is not None:
+            mapping["low"] = low_price
+
+        if close_price is not None:
+            mapping["close"] = close_price
+
+        if volume is not None:
+            mapping["volume"] = volume
+
+        if oi is not None:
+            mapping["oi"] = oi
+
+        try:
+            accepted = self.hub.ingest_mapping(
+                mapping=mapping,
+                source="KOTAK_NEO",
+                symbol=symbol,
+                timestamp=source_timestamp,
+                instrument_token=token,
+                exchange_segment=exchange_segment,
+            )
+
+        except Exception as exc:
+            with self._lock:
+                self.ticks_rejected += 1
+                self.last_error = (
+                    f"hub_ingest: {type(exc).__name__}: {exc}"
+                )
+                self.last_rejection_reason = (
+                    f"hub_ingest: {type(exc).__name__}: {exc}"
+                )
+            return
 
         with self._lock:
             if accepted:
                 self.ticks_accepted += 1
-                self.last_source_timestamp = source_timestamp
+
+                self.last_source_timestamp = (
+                    source_timestamp
+                )
+
                 self.last_symbol = symbol
                 self.last_ltp = ltp
+
+                self.last_rejection_reason = ""
+                self.last_error = ""
+
             else:
                 self.ticks_rejected += 1
-
-    # --------------------------------------------------------
-    # MOBILE NORMALIZATION
-    # --------------------------------------------------------
-
-    @staticmethod
-    def _normalize_mobile(value: Any) -> str:
-        """
-        Accepts:
-            9876543210
-            919876543210
-            +919876543210
-            +91 9876543210
-            09876543210
-
-        Sends to Kotak:
-            +919876543210
-        """
-        raw = str(value or "").strip()
-
-        digits = "".join(
-            ch for ch in raw
-            if ch.isdigit()
-        )
-
-        # Remove accidental leading zero.
-        if len(digits) == 11 and digits.startswith("0"):
-            digits = digits[1:]
-
-        # Remove India country code if already present.
-        if len(digits) == 12 and digits.startswith("91"):
-            digits = digits[2:]
-
-        if (
-            len(digits) != 10
-            or not digits.isdigit()
-            or digits[0] not in "6789"
-        ):
-            raise RuntimeError(
-                "Kotak mobile number must be a valid "
-                "10-digit Indian registered mobile number."
-            )
-
-        return "+91" + digits
-
-    # --------------------------------------------------------
-    # RESPONSE HELPERS
-    # --------------------------------------------------------
-
-    @staticmethod
-    def _response_has_error(response: Any) -> bool:
-        if not isinstance(response, dict):
-            return False
-
-        if response.get("error"):
-            return True
-
-        status = str(
-            response.get("status", "")
-        ).strip().lower()
-
-        if status == "error":
-            return True
-
-        data = response.get("data")
-
-        if isinstance(data, dict):
-            if data.get("error"):
-                return True
-
-            data_status = str(
-                data.get("status", "")
-            ).strip().lower()
-
-            if data_status == "error":
-                return True
-
-        return False
-
-    @staticmethod
-    def _safe_response(response: Any) -> Any:
-        if not isinstance(response, dict):
-            return response
-
-        safe = dict(response)
-
-        sensitive_keys = (
-            "token",
-            "access_token",
-            "refresh_token",
-            "session_token",
-            "authorization",
-            "auth_token",
-            "sid",
-            "rid",
-            "Auth",
-        )
-
-        for key in sensitive_keys:
-            if key in safe:
-                safe[key] = "***REDACTED***"
-
-        data = safe.get("data")
-
-        if isinstance(data, dict):
-            safe_data = dict(data)
-
-            for key in sensitive_keys:
-                if key in safe_data:
-                    safe_data[key] = "***REDACTED***"
-
-            safe["data"] = safe_data
-
-        return safe
+                self.last_rejection_reason = (
+                    "MarketDataHub rejected the raw observation"
+                )
 
     # --------------------------------------------------------
     # AUTHENTICATION
@@ -527,10 +768,16 @@ class KotakMarketDataSource:
         self,
         totp_override: Optional[str] = None,
     ) -> bool:
+        """
+        Authenticate with Kotak Neo.
+
+        The current 6-digit TOTP is supplied at runtime.
+        """
+
         if NeoAPI is None:
             raise RuntimeError(
                 "neo_api_client is not installed. "
-                "Install the official Kotak Neo API v2 package."
+                "Install the Kotak Neo API package."
             )
 
         required = {
@@ -568,17 +815,6 @@ class KotakMarketDataSource:
                 + ", ".join(missing)
             )
 
-        # IMPORTANT:
-        # Secret may contain 10 digits, +91, 91, spaces, etc.
-        # Kotak receives +91XXXXXXXXXX.
-        mobile = self._normalize_mobile(
-            getattr(
-                self.credentials,
-                "mobile",
-                "",
-            )
-        )
-
         totp = str(
             totp_override
             or getattr(
@@ -611,76 +847,46 @@ class KotakMarketDataSource:
         self.client.on_close = self.on_close
         self.client.on_open = self.on_open
 
-        # ----------------------------------------------------
-        # SDK COMPATIBILITY
-        # ----------------------------------------------------
-        # Kotak SDK releases have exposed both spellings:
-        #   mobile_number
-        #   mobilenumber
-        #
-        # Inspect the installed method and use the spelling
-        # supported by that exact installed SDK.
-        # ----------------------------------------------------
+        # Keep the legacy callback API because this deployed
+        # environment has already proven authentication works with it.
+        step1 = self.client.totp_login(
+            mobile_number=self.credentials.mobile,
+            ucc=self.credentials.ucc,
+            totp=totp,
+        )
 
-        try:
-            signature = inspect.signature(
-                self.client.totp_login
-            )
-            parameter_names = set(
-                signature.parameters.keys()
-            )
-        except Exception:
-            parameter_names = set()
+        if (
+            isinstance(step1, dict)
+            and step1.get("error")
+        ):
+            safe_response = dict(step1)
 
-        if "mobilenumber" in parameter_names:
+            for key in (
+                "token",
+                "access_token",
+                "refresh_token",
+                "session_token",
+                "authorization",
+                "auth_token",
+            ):
+                if key in safe_response:
+                    safe_response[key] = "***REDACTED***"
 
-            step1 = self.client.totp_login(
-                mobilenumber=mobile,
-                ucc=self.credentials.ucc,
-                totp=totp,
-            )
-
-        elif "mobile_number" in parameter_names:
-
-            step1 = self.client.totp_login(
-                mobile_number=mobile,
-                ucc=self.credentials.ucc,
-                totp=totp,
-            )
-
-        else:
-            # Fallback for SDK versions exposing **kwargs.
-            try:
-                step1 = self.client.totp_login(
-                    mobilenumber=mobile,
-                    ucc=self.credentials.ucc,
-                    totp=totp,
-                )
-            except TypeError:
-                step1 = self.client.totp_login(
-                    mobile_number=mobile,
-                    ucc=self.credentials.ucc,
-                    totp=totp,
-                )
-
-        if self._response_has_error(step1):
             raise RuntimeError(
                 "Kotak TOTP login failed | "
-                f"response={self._safe_response(step1)}"
+                f"response={safe_response}"
             )
-
-        # ----------------------------------------------------
-        # MPIN VALIDATION
-        # ----------------------------------------------------
 
         step2 = self.client.totp_validate(
             mpin=self.credentials.mpin
         )
 
-        if self._response_has_error(step2):
+        if (
+            isinstance(step2, dict)
+            and step2.get("error")
+        ):
             raise RuntimeError(
-                "Kotak MPIN validation failed | "
-                f"response={self._safe_response(step2)}"
+                "Kotak MPIN validation failed."
             )
 
         with self._lock:
@@ -699,7 +905,6 @@ class KotakMarketDataSource:
         instruments: List[Dict[str, str]],
         is_index: bool = False,
     ) -> int:
-
         if not self.authenticated:
             raise RuntimeError(
                 "Kotak Neo is not authenticated."
@@ -715,9 +920,13 @@ class KotakMarketDataSource:
                 "No instruments supplied."
             )
 
+        # IMPORTANT:
+        # NIFTY 50 index requires isIndex=True with the legacy
+        # callback-based Kotak API.
         result = self.client.subscribe(
             instrument_tokens=instruments,
             isIndex=is_index,
+            isDepth=False,
         )
 
         if (
@@ -725,7 +934,8 @@ class KotakMarketDataSource:
             and result.get("error")
         ):
             raise RuntimeError(
-                "Kotak subscription failed"
+                "Kotak subscription failed | "
+                "error response received"
             )
 
         with self._lock:
@@ -743,7 +953,6 @@ class KotakMarketDataSource:
         instruments: List[Dict[str, str]],
         is_index: bool = False,
     ) -> int:
-
         self.authenticate()
 
         return self.subscribe(
@@ -755,9 +964,10 @@ class KotakMarketDataSource:
     # HEALTH
     # --------------------------------------------------------
 
-    def data_age_seconds(self) -> Optional[float]:
+    def data_age_seconds(
+        self,
+    ) -> Optional[float]:
         with self._lock:
-
             if self.last_source_timestamp is None:
                 return None
 
@@ -770,17 +980,21 @@ class KotakMarketDataSource:
 
     def health(
         self,
-        max_age_seconds: float = DEFAULT_MAX_TICK_AGE_SECONDS,
+        max_age_seconds: float = (
+            DEFAULT_MAX_TICK_AGE_SECONDS
+        ),
     ) -> Dict[str, Any]:
-
         age = self.data_age_seconds()
 
         if not self.authenticated:
             status = "NOT_AUTHENTICATED"
+
         elif age is None:
             status = "NO_TICK"
+
         elif age <= max_age_seconds:
             status = "HEALTHY"
+
         else:
             status = "STALE"
 
@@ -792,14 +1006,33 @@ class KotakMarketDataSource:
                 "authenticated": self.authenticated,
                 "stream_state": self.stream_state,
                 "status": status,
+
+                # Actual market ticks only.
                 "ticks_received": self.ticks_received,
                 "ticks_accepted": self.ticks_accepted,
                 "ticks_rejected": self.ticks_rejected,
-                "subscription_count": self.subscription_count,
+
+                # All websocket callbacks/messages.
+                "messages_received": self.messages_received,
+
+                "subscription_count": (
+                    self.subscription_count
+                ),
+
                 "last_symbol": self.last_symbol,
                 "last_ltp": self.last_ltp,
                 "data_age_seconds": age,
+
                 "last_error": self.last_error,
+                "last_rejection_reason": (
+                    self.last_rejection_reason
+                ),
+                "last_message_type": (
+                    self.last_message_type
+                ),
+                "last_raw_keys": (
+                    self.last_raw_keys
+                ),
             }
 
     # --------------------------------------------------------
@@ -818,6 +1051,13 @@ class KotakMarketDataSource:
 # ============================================================
 
 def build_default_instruments() -> List[Dict[str, str]]:
+    """
+    Minimal live subscription.
+
+    NIFTY 50 is an INDEX, therefore the live test explicitly
+    calls subscribe(..., isIndex=True).
+    """
+
     return [
         {
             "instrument_token": "Nifty 50",
@@ -827,6 +1067,17 @@ def build_default_instruments() -> List[Dict[str, str]]:
 
 
 def live_test() -> int:
+    """
+    REAL LIVE TEST.
+
+    PASS requires:
+        1. Kotak authentication.
+        2. Index subscription success.
+        3. At least one real market-data tick.
+        4. Valid source timestamp.
+        5. Successful MarketDataHub ingestion.
+        6. Successful Hub persistence.
+    """
 
     print()
     print("KOTAK -> MARKET DATA HUB LIVE TEST")
@@ -840,19 +1091,29 @@ def live_test() -> int:
     )
 
     try:
-
-        print("AUTHENTICATION : connecting...")
+        print(
+            "AUTHENTICATION : connecting..."
+        )
 
         source.authenticate()
 
-        print("AUTHENTICATION : PASS")
+        print(
+            "AUTHENTICATION : PASS"
+        )
 
-        instruments = build_default_instruments()
+        instruments = (
+            build_default_instruments()
+        )
 
-        print("SUBSCRIPTION    : connecting...")
+        print(
+            "SUBSCRIPTION    : connecting..."
+        )
 
+        # CRITICAL FIX:
+        # NIFTY 50 is an INDEX.
         count = source.subscribe(
-            instruments
+            instruments=instruments,
+            is_index=True,
         )
 
         print(
@@ -860,12 +1121,16 @@ def live_test() -> int:
         )
 
         print()
-        print("Waiting for REAL Kotak tick...")
+        print(
+            "Waiting for REAL Kotak tick..."
+        )
 
-        deadline = time.monotonic() + 30.0
+        deadline = (
+            time.monotonic()
+            + 30.0
+        )
 
         while time.monotonic() < deadline:
-
             health = source.health(
                 max_age_seconds=30.0
             )
@@ -884,30 +1149,53 @@ def live_test() -> int:
             f"KOTAK STREAM    : "
             f"{health['stream_state']}"
         )
+
+        print(
+            f"MESSAGES RX     : "
+            f"{health['messages_received']}"
+        )
+
         print(
             f"TICKS RECEIVED  : "
             f"{health['ticks_received']}"
         )
+
         print(
             f"TICKS ACCEPTED  : "
             f"{health['ticks_accepted']}"
         )
+
         print(
             f"TICKS REJECTED  : "
             f"{health['ticks_rejected']}"
         )
+
         print(
             f"LAST SYMBOL     : "
             f"{health['last_symbol'] or '-'}"
         )
+
         print(
             f"LAST LTP        : "
             f"{health['last_ltp']}"
         )
+
         print(
             f"DATA AGE        : "
             f"{health['data_age_seconds']}"
         )
+
+        if health["last_rejection_reason"]:
+            print(
+                f"LAST REJECT     : "
+                f"{health['last_rejection_reason']}"
+            )
+
+        if health["last_raw_keys"]:
+            print(
+                f"LAST RAW KEYS   : "
+                f"{', '.join(health['last_raw_keys'])}"
+            )
 
         hub_health = hub.health(
             max_age_seconds=30.0
@@ -917,21 +1205,40 @@ def live_test() -> int:
             f"HUB RECEIVED    : "
             f"{hub_health['received_count']}"
         )
+
         print(
             f"HUB PERSISTED   : "
             f"{hub_health['persisted_count']}"
         )
+
         print(
             f"HUB STATUS      : "
             f"{hub_health['status']}"
         )
 
+        # ----------------------------------------------------
+        # FINAL GATES
+        # ----------------------------------------------------
+
+        if health["ticks_received"] <= 0:
+            print()
+            print(
+                "LIVE DATA TEST : FAIL"
+            )
+            print(
+                "No actual market-data tick was "
+                "received within 30 seconds."
+            )
+            return 1
+
         if health["ticks_accepted"] <= 0:
             print()
-            print("LIVE DATA TEST : FAIL")
             print(
-                "No real Kotak tick was "
-                "received within 30 seconds."
+                "LIVE DATA TEST : FAIL"
+            )
+            print(
+                "A market-data message arrived, "
+                "but MarketDataHub did not accept it."
             )
             return 1
 
@@ -940,28 +1247,43 @@ def live_test() -> int:
             or health["data_age_seconds"] > 30.0
         ):
             print()
-            print("LIVE DATA TEST : FAIL")
-            print("Received data is stale.")
+            print(
+                "LIVE DATA TEST : FAIL"
+            )
+            print(
+                "Received market data is stale."
+            )
             return 1
 
         if hub_health["persisted_count"] <= 0:
             print()
-            print("LIVE DATA TEST : FAIL")
             print(
-                "Kotak tick did not reach "
-                "persistent Hub storage."
+                "LIVE DATA TEST : FAIL"
+            )
+            print(
+                "Kotak tick reached the source layer "
+                "but did not reach persistent Hub storage."
             )
             return 1
 
         print()
-        print("LIVE DATA TEST : PASS")
+        print(
+            "LIVE DATA TEST : PASS"
+        )
+
+        print(
+            "Kotak -> WebSocket -> Parser -> "
+            "MarketDataHub -> Persistence : PASS"
+        )
 
         return 0
 
     except Exception as exc:
-
         print()
-        print("LIVE DATA TEST : FAIL")
+        print(
+            "LIVE DATA TEST : FAIL"
+        )
+
         print(
             f"REASON         : "
             f"{type(exc).__name__}: {exc}"
@@ -978,13 +1300,17 @@ def live_test() -> int:
 # ============================================================
 
 def local_test() -> None:
+    """
+    Offline structural test.
+
+    This does NOT contact Kotak.
+    """
 
     from tempfile import TemporaryDirectory
 
     from market_data_hub import RawObservationStore
 
     with TemporaryDirectory() as temp_dir:
-
         store = RawObservationStore(
             path=f"{temp_dir}/test.jsonl"
         )
@@ -997,10 +1323,13 @@ def local_test() -> None:
             hub=hub
         )
 
+        now = utc_now_iso()
+
         raw = {
             "tk": "TESTTOKEN",
             "display_symbol": "NIFTY",
-            "lstup_time": utc_now_iso(),
+            "exchange_segment": "nse_cm",
+            "lstup_time": now,
             "ltp": 25000.0,
             "open": 24950.0,
             "high": 25050.0,
@@ -1011,50 +1340,112 @@ def local_test() -> None:
 
         source.on_message(raw)
 
+        assert source.messages_received == 1
+
         assert source.ticks_received == 1
+
         assert source.ticks_accepted == 1
+
         assert source.ticks_rejected == 0
+
         assert hub.received_count == 1
+
         assert hub.persisted_count == 1
+
         assert source.last_symbol == "NIFTY"
+
         assert source.last_ltp == 25000.0
-
-        # Mobile normalization tests.
-        assert (
-            source._normalize_mobile("9876543210")
-            == "+919876543210"
-        )
-
-        assert (
-            source._normalize_mobile("919876543210")
-            == "+919876543210"
-        )
-
-        assert (
-            source._normalize_mobile("+919876543210")
-            == "+919876543210"
-        )
-
-        assert (
-            source._normalize_mobile("+91 9876543210")
-            == "+919876543210"
-        )
-
-        assert (
-            source._normalize_mobile("09876543210")
-            == "+919876543210"
-        )
 
         print(
             "KOTAK MARKET DATA SOURCE TEST: PASS"
         )
-        print("  raw parsing      : PASS")
-        print("  timestamp        : PASS")
-        print("  LTP extraction    : PASS")
-        print("  hub ingestion     : PASS")
-        print("  persistence       : PASS")
-        print("  mobile normalize  : PASS")
-        print("  network call      : NONE")
+
+        print(
+            "  message normalization : PASS"
+        )
+
+        print(
+            "  raw parsing            : PASS"
+        )
+
+        print(
+            "  timestamp              : PASS"
+        )
+
+        print(
+            "  LTP extraction         : PASS"
+        )
+
+        print(
+            "  hub ingestion          : PASS"
+        )
+
+        print(
+            "  persistence            : PASS"
+        )
+
+        print(
+            "  network call           : NONE"
+        )
+
+
+# ============================================================
+# ACK / CONTROL MESSAGE TEST
+# ============================================================
+
+def control_message_test() -> None:
+    """
+    Verifies that a subscription ACK/control payload is not
+    incorrectly counted as a market tick.
+    """
+
+    from tempfile import TemporaryDirectory
+
+    from market_data_hub import RawObservationStore
+
+    with TemporaryDirectory() as temp_dir:
+        store = RawObservationStore(
+            path=f"{temp_dir}/ack_test.jsonl"
+        )
+
+        hub = MarketDataHub(
+            store=store
+        )
+
+        source = KotakMarketDataSource(
+            hub=hub
+        )
+
+        ack = {
+            "type": "ack",
+            "stat": "Ok",
+            "event": "subscribe",
+            "instrument_token": "Nifty 50",
+        }
+
+        source.on_message(ack)
+
+        assert source.messages_received == 1
+
+        assert source.ticks_received == 0
+
+        assert source.ticks_accepted == 0
+
+        assert hub.received_count == 0
+
+        assert hub.persisted_count == 0
+
+        print(
+            "KOTAK ACK FILTER TEST: PASS"
+        )
+
+        print(
+            "  ACK not counted as tick : PASS"
+        )
+
+        print(
+            "  Hub not polluted        : PASS"
+        )
 
 
 # ============================================================
@@ -1062,11 +1453,10 @@ def local_test() -> None:
 # ============================================================
 
 def main() -> int:
-
     parser = argparse.ArgumentParser(
         description=(
-            "Kotak Neo raw market-data "
-            "producer for Market Data Hub."
+            "Kotak Neo raw market-data producer "
+            "for Market Data Hub."
         )
     )
 
@@ -1075,7 +1465,16 @@ def main() -> int:
         action="store_true",
         help=(
             "Connect to Kotak Neo and "
-            "wait for a real tick."
+            "wait for a real NIFTY 50 tick."
+        ),
+    )
+
+    parser.add_argument(
+        "--test",
+        action="store_true",
+        help=(
+            "Run offline structural and "
+            "ACK-filter tests."
         ),
     )
 
@@ -1084,13 +1483,26 @@ def main() -> int:
     if args.live:
         return live_test()
 
+    if args.test:
+        local_test()
+        control_message_test()
+
+        print()
+        print(
+            "ALL LOCAL TESTS: PASS"
+        )
+
+        return 0
+
     local_test()
+    control_message_test()
 
     print()
     print(
-        "NOTE: local test used synthetic "
+        "NOTE: local tests used synthetic "
         "data only."
     )
+
     print(
         "Use --live for the real Kotak "
         "connectivity test."
