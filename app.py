@@ -1061,6 +1061,39 @@ class FeatureEngine:
         reasoning_input = {**basket_input, "data_quality_score": float(max(0.0, 1.0 - penalty)),
                            "prev_high": self.sess.prev_high, "prev_low": self.sess.prev_low}
         reasoning_res = self.reasoning.compute(candle, prev, reasoning_input)
+
+        # Explicit causal aliases for the V9/V10 state machine. The underlying
+        # reasoning engine already computes these SMC events; older layers were
+        # reading generic keys that were never populated.
+        _d_sweep = int(reasoning_res.get("demand_liquidity_sweep", 0))
+        _s_sweep = int(reasoning_res.get("supply_liquidity_sweep", 0))
+        _d_reclaim = int(reasoning_res.get("demand_reclaim", 0))
+        _s_reject = int(reasoning_res.get("supply_rejection", 0))
+        _bos = safe_int(reasoning_res.get("bos_signal", advanced_res.get("bos_signal", 0)))
+        _choch = 1 if (_d_sweep and _bos > 0) else (-1 if (_s_sweep and _bos < 0) else 0)
+        reasoning_res["liquidity_sweep_signal"] = _d_sweep - _s_sweep
+        reasoning_res["liquidity_reclaim_signal"] = _d_reclaim - _s_reject
+        reasoning_res["choch_signal"] = _choch
+
+        _prev_close = safe_float(prev[-1].fut_c, np.nan) if prev else np.nan
+        _vwap_now = safe_float(reasoning_input.get("fut_vwap"), np.nan)
+        _vwap_reclaim = 0
+        if is_valid_number(_prev_close) and is_valid_number(_vwap_now):
+            if _prev_close <= _vwap_now < candle.fut_c:
+                _vwap_reclaim = 1
+            elif _prev_close >= _vwap_now > candle.fut_c:
+                _vwap_reclaim = -1
+        reasoning_res["vwap_reclaim_signal"] = _vwap_reclaim
+
+        _support_prox = safe_float(reasoning_res.get("nearest_support_atr"), np.nan)
+        _resistance_prox = safe_float(reasoning_res.get("nearest_resistance_atr"), np.nan)
+        _sr_signal = 0
+        if is_valid_number(_support_prox) and _support_prox <= 0.70:
+            _sr_signal = 1
+        if is_valid_number(_resistance_prox) and _resistance_prox <= 0.70:
+            _sr_signal = -1
+        reasoning_res["support_resistance_signal"] = _sr_signal
+
         basket_res = self.baskets.score(basket_input)
 
         now_ts = now_ist()
@@ -2863,7 +2896,7 @@ if st is not None:
 #   7) Bounded learned multipliers; missing calibration => neutral multiplier.
 # ============================================================================
 
-V9_PART3_VERSION = "V9.0-PART3"
+V9_PART3_VERSION = "V9.1-PART3-EXPLICIT-SMC-STATE"
 V9_CALIBRATION_FILE = Path(CONFIG.get("dataset_path", "./nifty_3min_dataset")) / "interaction_mining" / "interaction_weight_profile.json"
 
 _V9_ORIGINAL_DECIDE = DecisionEngine.decide
@@ -3133,7 +3166,15 @@ def _v9_reason(e):
         if abs(value) >= 0.15:
             side = "CE" if value > 0 else "PE"
             parts.append(f"{name}â†’{side}({value:+.2f})")
-    return " | ".join(parts[:5]) if parts else "No dominant evidence"
+    if e.get("demand_sweep"):
+        parts.append("Demand sweep")
+    if e.get("demand_reclaim"):
+        parts.append("Demand reclaim")
+    if e.get("supply_sweep"):
+        parts.append("Supply sweep")
+    if e.get("supply_rejection"):
+        parts.append("Supply rejection")
+    return " | ".join(parts[:6]) if parts else "No dominant evidence"
 
 def _v9_patch_decision(self, feats):
     d = _V9_ORIGINAL_DECIDE(self, feats)
@@ -3154,6 +3195,12 @@ def _v9_patch_decision(self, feats):
     feats["v9_state"] = e["state"]
     feats["v9_reasoning"] = _v9_reason(e)
     feats["v9_calibration_source"] = e["calibration_source"]
+    feats["v9_demand_sweep"] = int(_v9_bool(feats, "demand_liquidity_sweep"))
+    feats["v9_demand_reclaim"] = int(_v9_bool(feats, "demand_reclaim"))
+    feats["v9_supply_sweep"] = int(_v9_bool(feats, "supply_liquidity_sweep"))
+    feats["v9_supply_rejection"] = int(_v9_bool(feats, "supply_rejection"))
+    feats["v9_bos"] = _v9_num(feats, "bos_signal")
+    feats["v9_choch"] = _v9_num(feats, "choch_signal")
 
     # Part-3 is a bounded gate: it can prevent an unsupported trade, but never
     # manufacture a CE/PE trade against the original engine.
@@ -3476,6 +3523,172 @@ KotakNeoAdapter._process_delayed_labels=_process_labels_with_scanner_learning
 
 
 # ============================================================================
+# HUMAN-READABLE MARKET DECISION MAP
+# ============================================================================
+# Presentation/audit layer only. It translates the existing causal evidence
+# into: LOCATION -> WHAT HAPPENED -> CURRENT REACTION -> CONFIRMATION -> INVALIDATION.
+# It never manufactures a trade and never changes the execution/label contract.
+# ============================================================================
+
+HUMAN_MAP_VERSION = "1.0"
+
+def _human_num(f, key, default=0.0):
+    try:
+        x = float(f.get(key, default))
+        return x if np.isfinite(x) else default
+    except Exception:
+        return default
+
+def build_human_market_map(feats, v10_state=None):
+    price = _human_num(feats, "fut_c", _human_num(feats, "spot_c", 0.0))
+    d_low = _human_num(feats, "demand_zone_low", np.nan)
+    d_high = _human_num(feats, "demand_zone_high", np.nan)
+    s_low = _human_num(feats, "supply_zone_low", np.nan)
+    s_high = _human_num(feats, "supply_zone_high", np.nan)
+    d_sweep = int(_human_num(feats, "demand_liquidity_sweep", 0) > 0.5)
+    d_reclaim = int(_human_num(feats, "demand_reclaim", 0) > 0.5)
+    s_sweep = int(_human_num(feats, "supply_liquidity_sweep", 0) > 0.5)
+    s_reject = int(_human_num(feats, "supply_rejection", 0) > 0.5)
+
+    loc = _human_num(feats, "v9_location_evidence", 0.0)
+    mom = _human_num(feats, "v9_momentum_evidence", 0.0)
+    struct = _human_num(feats, "v9_structure_evidence", 0.0)
+    ce = _human_num(feats, "v10_ce_evidence", _human_num(feats, "v9_ce_score", 50.0))
+    pe = _human_num(feats, "v10_pe_evidence", _human_num(feats, "v9_pe_score", 50.0))
+    edge = ce - pe
+    rsi = _human_num(feats, "rsi_14", 50.0)
+    macd = _human_num(feats, "macd_hist", _human_num(feats, "macd", 0.0))
+    slope = _human_num(feats, "stretch_slope_3", 0.0)
+    kalman = _human_num(feats, "kalman_stretch", 0.0)
+    breadth = _human_num(feats, "breadth_10", 0.5)
+    slp = _human_num(feats, "slp_top5_pressure", 0.0)
+    pcr = _human_num(feats, "pcr_oi", 1.0)
+    bos = _human_num(feats, "bos_signal", 0.0)
+    choch = _human_num(feats, "choch_signal", 0.0)
+
+    if d_sweep and d_reclaim:
+        location_state = "DEMAND SWEPT + RECLAIMED"
+    elif d_sweep:
+        location_state = "DEMAND SWEPT â€” RECLAIM PENDING"
+    elif is_valid_number(d_low) and is_valid_number(d_high) and d_low <= price <= d_high:
+        location_state = "PRICE INSIDE DEMAND"
+    elif is_valid_number(d_low) and price < d_low:
+        location_state = "DEMAND FAILED"
+    elif is_valid_number(d_high) and price > d_high:
+        location_state = "ABOVE DEMAND"
+    else:
+        location_state = "NO ACTIVE DEMAND CONTEXT"
+
+    if d_sweep and d_reclaim and ce > pe and mom >= -0.05:
+        if (bos > 0 or choch > 0) and mom >= 0.05:
+            setup_state = "CE CONFIRMED â€” STRUCTURE + MOMENTUM"
+            setup_stage = "CONFIRMED"
+        else:
+            setup_state = "CE EARLY REVERSAL â€” BUILDING"
+            setup_stage = "EARLY"
+    elif d_sweep and not d_reclaim:
+        setup_state = "CE WATCH â€” WAIT FOR DEMAND RECLAIM"
+        setup_stage = "WAIT_RECLAIM"
+    elif is_valid_number(d_low) and price < d_low:
+        setup_state = "PE RISK â€” DEMAND INVALIDATED"
+        setup_stage = "INVALIDATED"
+    elif s_sweep and s_reject and pe > ce:
+        setup_state = "PE EARLY REVERSAL â€” BUILDING"
+        setup_stage = "PE_EARLY"
+    elif edge >= 8:
+        setup_state = "CE BIAS â€” NO CLEAN LOCATION TRIGGER"
+        setup_stage = "BIAS"
+    elif edge <= -8:
+        setup_state = "PE BIAS â€” NO CLEAN LOCATION TRIGGER"
+        setup_stage = "BIAS"
+    else:
+        setup_state = "CONFLICTED / NO EDGE"
+        setup_stage = "WAIT"
+
+    if setup_stage == "EARLY":
+        if bos > 0 or choch > 0:
+            next_trigger = "Structure break is present; monitor continuation."
+        else:
+            next_trigger = "Next: break the nearest minor swing high; momentum must stay >= neutral."
+    elif setup_stage == "WAIT_RECLAIM":
+        next_trigger = "Next: close back above the demand zone and hold."
+    elif setup_stage == "INVALIDATED":
+        next_trigger = "PE activates only after decisive close below demand + failed reclaim."
+    elif setup_stage == "PE_EARLY":
+        next_trigger = "Next: bearish structure continuation while supply remains defended."
+    elif setup_stage == "CONFIRMED":
+        next_trigger = "CE confirmed; next risk is nearby resistance / loss of demand."
+    else:
+        next_trigger = "Wait for location + momentum + structure to align."
+
+    if is_valid_number(d_low) and is_valid_number(d_high):
+        invalidation = f"CE invalidation: decisive close below {d_low:.2f}"
+    else:
+        invalidation = "No engine-detected demand zone available"
+
+    supporters = []
+    blockers = []
+    if d_sweep:
+        supporters.append("Demand liquidity sweep")
+    if d_reclaim:
+        supporters.append("Demand reclaimed")
+    if rsi >= 50:
+        supporters.append(f"RSI-14 {rsi:.1f} >= 50")
+    elif rsi < 45:
+        blockers.append(f"RSI-14 {rsi:.1f} < 45")
+    if macd > 0:
+        supporters.append(f"MACD histogram {macd:+.2f} > 0")
+    else:
+        blockers.append(f"MACD histogram {macd:+.2f} <= 0")
+    if slope > 0:
+        supporters.append(f"3-bar slope {slope:+.2f} improving")
+    else:
+        blockers.append(f"3-bar slope {slope:+.2f} still negative")
+    if bos > 0 or choch > 0:
+        supporters.append("Bullish structure shift")
+    if breadth < 0.45:
+        blockers.append(f"Weak breadth {breadth:.2f}")
+    if slp < 0:
+        blockers.append(f"Top-5 pressure {slp:+.2f}")
+    if pe > ce:
+        blockers.append(f"PE evidence leads {pe:.0f} vs CE {ce:.0f}")
+    if abs(kalman) >= 1.25:
+        supporters.append(f"Stretched state {kalman:+.2f}")
+
+    return {
+        "version": HUMAN_MAP_VERSION,
+        "price": price,
+        "demand_low": d_low,
+        "demand_high": d_high,
+        "supply_low": s_low,
+        "supply_high": s_high,
+        "location_state": location_state,
+        "setup_state": setup_state,
+        "setup_stage": setup_stage,
+        "next_trigger": next_trigger,
+        "invalidation": invalidation,
+        "ce_evidence": ce,
+        "pe_evidence": pe,
+        "edge": edge,
+        "location": loc,
+        "momentum": mom,
+        "structure": struct,
+        "rsi": rsi,
+        "macd": macd,
+        "slope": slope,
+        "kalman_stretch": kalman,
+        "breadth": breadth,
+        "slp": slp,
+        "pcr": pcr,
+        "demand_sweep": d_sweep,
+        "demand_reclaim": d_reclaim,
+        "supply_sweep": s_sweep,
+        "supply_rejection": s_reject,
+        "supporters": supporters[:6],
+        "blockers": blockers[:6],
+    }
+
+# ============================================================================
 # V10 OPTION-CENTRIC MARKET STATE + IMPULSE ENGINE
 # ============================================================================
 # Strict isolation:
@@ -3692,6 +3905,15 @@ def _v10_apply_to_decision(feats, decision, previous_state=None):
     feats["v10_reversal_state"] = state["reversal_state"]
     feats["v10_components_json"] = json.dumps(state["components"], sort_keys=True)
 
+    # Human-readable market map: presentation/audit only; never changes the
+    # underlying decision or execution contract.
+    _human_map = build_human_market_map(feats, state)
+    feats["human_market_map_json"] = json.dumps(_human_map, sort_keys=True, ensure_ascii=False)
+    feats["human_setup_state"] = _human_map["setup_state"]
+    feats["human_setup_stage"] = _human_map["setup_stage"]
+    feats["human_next_trigger"] = _human_map["next_trigger"]
+    feats["human_invalidation"] = _human_map["invalidation"]
+
     # V10 remains a gate, not a signal factory.
     if decision.action in ("CE", "PE"):
         side_score = state["ce_evidence"] if decision.action == "CE" else state["pe_evidence"]
@@ -3731,7 +3953,7 @@ def main():
         print("Streamlit not installed.")
         return
 
-    st.set_page_config(page_title="NIFTY 3M | Micro Engine v8.0 Integrated Reasoning", page_icon="[LIVE]", layout="wide", initial_sidebar_state="expanded")
+    st.set_page_config(page_title="NIFTY 3M | Micro Engine v8.1 Human Decision Map", page_icon="[LIVE]", layout="wide", initial_sidebar_state="expanded")
     inject_custom_css()
 
     adapter: KotakNeoAdapter = get_global_adapter()
@@ -3794,7 +4016,7 @@ def main():
         st.markdown("---")
         if st.button("Run Unit Tests", key="btn_tests"):
             try:
-                st.success("Engine Verification Passed (v8.0)" if run_unit_tests() else "Test Failed")
+                st.success("Engine Verification Passed (v8.1)" if run_unit_tests() else "Test Failed")
             except Exception as exc:
                 st.error(str(exc))
 
@@ -3933,7 +4155,7 @@ def main():
                 f2.markdown(f"**Slope (3-Bar)**<br>{get_colored_text(val_slope, 'stretch_slope_3')}", unsafe_allow_html=True)
                 
                 val_pcr = latest_row.get("pcr_oi", 1.0)
-                f3.markdown(f"**PCR (OI)**<br>{get_colored_text(val_pcr, 'pcr_oi')}", unsafe_allow_html=True)
+                f3.markdown(f"**PCR (OI) â€” Local Â±5 Strikes (11)**<br>{get_colored_text(val_pcr, 'pcr_oi')}", unsafe_allow_html=True)
                 
                 val_breadth = latest_row.get("breadth_10", 0.5)
                 f4.markdown(f"**Breadth (10)**<br>{get_colored_text(val_breadth, 'breadth_10')}", unsafe_allow_html=True)
@@ -3960,6 +4182,73 @@ def main():
                     st.json(latest_row)
             else:
                 st.caption("Feature extraction initializing...")
+
+    # Human-readable decision board: first panel to read before the raw matrices.
+    if latest_row:
+        st.markdown('<div class="terminal-card">', unsafe_allow_html=True)
+        st.markdown("### MARKET DECISION MAP â€” WHAT THE DATA IS SAYING")
+        try:
+            _hm = json.loads(latest_row.get("human_market_map_json", "{}"))
+        except Exception:
+            _hm = build_human_market_map(latest_row)
+
+        _stage = str(_hm.get("setup_state", "NO CLEAN SETUP"))
+        if _stage.upper().startswith("CE"):
+            _stage_cls = "badge-ce"
+        elif _stage.upper().startswith("PE"):
+            _stage_cls = "badge-pe"
+        else:
+            _stage_cls = "badge-neutral"
+
+        hm1, hm2, hm3, hm4 = st.columns([2.2, 1.2, 1.2, 1.2])
+        with hm1:
+            st.caption("CURRENT MARKET SETUP")
+            st.markdown(f'<div class="{_stage_cls}">{_stage}</div>', unsafe_allow_html=True)
+        with hm2:
+            st.metric("CE Evidence", f"{safe_float(_hm.get('ce_evidence'),50):.0f}")
+        with hm3:
+            st.metric("PE Evidence", f"{safe_float(_hm.get('pe_evidence'),50):.0f}")
+        with hm4:
+            st.metric("CEâ†”PE Edge", f"{safe_float(_hm.get('edge'),0):+.1f}")
+
+        hm_a, hm_b = st.columns(2)
+        with hm_a:
+            dlow = safe_float(_hm.get("demand_low"), np.nan)
+            dhigh = safe_float(_hm.get("demand_high"), np.nan)
+            if is_valid_number(dlow) and is_valid_number(dhigh):
+                st.write(f"**Demand Zone:** `{dlow:.2f} â€“ {dhigh:.2f}`")
+            else:
+                st.write("**Demand Zone:** `Not detected`")
+            st.write(f"**Liquidity Event:** `{_hm.get('location_state','-')}`")
+            st.write(
+                f"**Sweep:** `{'DONE âœ“' if _hm.get('demand_sweep') else 'NO'}`  |  "
+                f"**Reclaim:** `{'DONE âœ“' if _hm.get('demand_reclaim') else 'PENDING'}`"
+            )
+            st.write(f"**Stage:** `{_hm.get('setup_stage','WAIT')}`")
+        with hm_b:
+            st.write(f"**NEXT CONFIRMATION:** {_hm.get('next_trigger','-')}")
+            st.write(f"**INVALIDATION:** {_hm.get('invalidation','-')}")
+            st.write(
+                f"**Momentum:** `{safe_float(_hm.get('momentum'),0):+.2f}` | "
+                f"**Structure:** `{safe_float(_hm.get('structure'),0):+.2f}` | "
+                f"**RSI-14:** `{safe_float(_hm.get('rsi'),50):.1f}`"
+            )
+
+        st.markdown("**WHY THE SETUP IS DEVELOPING**")
+        sup = _hm.get("supporters") or []
+        blk = _hm.get("blockers") or []
+        if sup:
+            st.write("ðŸŸ¢ " + "  \\nðŸŸ¢ ".join(str(x) for x in sup))
+        else:
+            st.write("ðŸŸ¢ No strong positive driver detected yet.")
+        if blk:
+            st.write("ðŸ”´ " + "  \\nðŸ”´ ".join(str(x) for x in blk))
+
+        st.caption(
+            "Reading order: LOCATION â†’ LIQUIDITY EVENT â†’ MOMENTUM â†’ STRUCTURE â†’ FLOW/OPTIONS. "
+            "PCR is contextual; it is not a standalone CE/PE trigger. Evidence is not probability."
+        )
+        st.markdown('</div>', unsafe_allow_html=True)
 
     st.markdown("### Integrated Market Reasoning â€” NIFTY Only")
     if latest_row:
