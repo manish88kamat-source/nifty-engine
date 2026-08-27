@@ -68,8 +68,8 @@ def to_ist(dt: datetime) -> datetime:
 # =========================================================
 
 CONFIG = {
-    "app_version": "v8.0_integrated_market_reasoning",
-    "feature_version": "v6.0_bucket_smc_volume_profile",
+    "app_version": "v8.2_option_centric_decision_map",
+    "feature_version": "v6.1_spot_smc_option_execution",
     "label_version": "TB_v3.0_clean",
     "schema_version": "5.0",
     "weight_version": "NIFTY_STATIC_2025Q1",
@@ -110,6 +110,13 @@ CONFIG = {
     "max_daily_loss_pts": 120.0,
     "risk_free_rate": 0.065,
     "default_atm_iv": 0.135,
+    "option_rsi_ideal_low": 50.0,
+    "option_rsi_ideal_high": 70.0,
+    "option_sr_max_distance_pct": 0.08,
+    "option_target_atr_mult": 1.25,
+    "option_stop_atr_mult": 0.80,
+    "option_min_target_pct": 0.10,
+    "option_min_stop_pct": 0.06,
     "dq_weights": {
         "missing_future": 0.25,
         "missing_spot": 0.20,
@@ -341,7 +348,7 @@ def token_from_record(record):
 def extract_tick_price(tick: Dict[str, Any]) -> float:
     if not isinstance(tick, dict):
         return np.nan
-    for k in ("ltp", "lp", "last_price", "last_traded_price", "c", "close", "lastPrice", "iv"):
+    for k in ("ltp", "lp", "last_price", "last_traded_price", "c", "close", "lastPrice"):
         val = safe_float(tick.get(k))
         if is_valid_number(val) and val > 0:
             return val
@@ -712,7 +719,13 @@ class OptionChainEngine:
             "atm_strike", "ce_pe_oi_imbalance", "atm_oi_imbalance", "pcr_oi_delta",
             "pcr_velocity", "days_to_expiry", "minutes_to_expiry", "expiry_day_flag",
             "gex_proxy", "zero_dte_intensity", "gex_x_0dte", "atm_gamma_imbalance",
-            "dealer_vanna_flow", "dealer_charm_flow"
+            "dealer_vanna_flow", "dealer_charm_flow",
+            "ce_option_ltp", "ce_option_oi", "ce_option_oi_change", "ce_option_volume",
+            "ce_option_iv", "ce_option_vwap", "ce_option_rsi", "ce_option_slope3",
+            "ce_option_atr3", "ce_option_support", "ce_option_resistance", "ce_option_delta", "ce_option_strike",
+            "pe_option_ltp", "pe_option_oi", "pe_option_oi_change", "pe_option_volume",
+            "pe_option_iv", "pe_option_vwap", "pe_option_rsi", "pe_option_slope3",
+            "pe_option_atr3", "pe_option_support", "pe_option_resistance", "pe_option_delta", "pe_option_strike",
         ]
         if not chain:
             out = {k: np.nan for k in keys}
@@ -795,8 +808,11 @@ class OptionChainEngine:
             "gex_x_0dte": gex_x_0dte,
             "atm_gamma_imbalance": atm_gamma_imb,
             "dealer_vanna_flow": dealer_vanna_flow,
-            "dealer_charm_flow": dealer_charm_flow
+            "dealer_charm_flow": dealer_charm_flow,
         }
+        for _k in keys:
+            if _k.startswith(("ce_option_", "pe_option_")):
+                raw_metrics[_k] = chain.get(_k, np.nan)
 
         for key in keys:
             val = raw_metrics.get(key, np.nan)
@@ -868,6 +884,43 @@ class HeavyweightEngine:
         }
 
 
+class SpotTacticalEngine:
+    """Causal NIFTY-SPOT tactical context. FUT is not used here."""
+    def __init__(self, maxlen=150):
+        self.closes=deque(maxlen=maxlen); self.highs=deque(maxlen=maxlen); self.lows=deque(maxlen=maxlen)
+        self.prev_pivot_high=np.nan; self.prev_pivot_low=np.nan
+    def reset(self):
+        self.closes.clear(); self.highs.clear(); self.lows.clear(); self.prev_pivot_high=np.nan; self.prev_pivot_low=np.nan
+    @staticmethod
+    def _ema(values,period):
+        vals=[float(x) for x in values if is_valid_number(x)]
+        if len(vals)<period:return np.nan
+        a=2.0/(period+1.0); e=vals[0]
+        for x in vals[1:]:e=a*x+(1-a)*e
+        return float(e)
+    @staticmethod
+    def _rsi(values,period=14):
+        vals=np.asarray([x for x in values if is_valid_number(x)],dtype=float)
+        if len(vals)<period+1:return np.nan
+        d=np.diff(vals[-(period+1):]);g=np.mean(np.maximum(d,0));l=np.mean(np.maximum(-d,0))
+        return 100.0 if l==0 else float(100.0-100.0/(1.0+g/l))
+    def compute(self,candle):
+        c=float(candle.spot_c);h=float(candle.spot_h);l=float(candle.spot_l)
+        self.closes.append(c);self.highs.append(h);self.lows.append(l)
+        closes=list(self.closes);highs=list(self.highs);lows=list(self.lows)
+        e12=self._ema(closes,12);e26=self._ema(closes,26)
+        macd=e12-e26 if is_valid_number(e12) and is_valid_number(e26) else np.nan
+        rsi=self._rsi(closes,14);slope=calc_3bar_slope(closes);bos=0
+        if len(closes)>=3:
+            ph=highs[-2];pl=lows[-2]
+            if not is_valid_number(self.prev_pivot_high) or ph>self.prev_pivot_high:self.prev_pivot_high=ph
+            if not is_valid_number(self.prev_pivot_low) or pl<self.prev_pivot_low:self.prev_pivot_low=pl
+            if is_valid_number(self.prev_pivot_high) and c>self.prev_pivot_high:bos=1
+            elif is_valid_number(self.prev_pivot_low) and c<self.prev_pivot_low:bos=-1
+        hh_hl=1 if len(closes)>=2 and c>highs[-2] else (-1 if len(closes)>=2 and c<lows[-2] else 0)
+        return {"spot_rsi_14":rsi,"spot_macd_hist":macd,"spot_slope_3":slope,"spot_bos_signal":bos,"spot_hh_hl_signal":hh_hl,"spot_ema20":self._ema(closes,20),"spot_ema50":self._ema(closes,50)}
+
+
 class FeatureEngine:
     def __init__(self, maxlen=150):
         self.vwap_pv = self.vwap_vol = 0.0
@@ -889,6 +942,7 @@ class FeatureEngine:
         self.advanced = AdvancedStructureEngine(maxlen=maxlen)
         self.baskets = SignalBasketEngine()
         self.reasoning = IntegratedMarketReasoningEngine(maxlen=maxlen)
+        self.spot_tactical = SpotTacticalEngine(maxlen=maxlen)
 
     def reset_session(self):
         self.vwap_pv = self.vwap_vol = 0.0
@@ -909,6 +963,7 @@ class FeatureEngine:
         self.hm.reset()
         self.advanced.reset()
         self.reasoning.reset()
+        self.spot_tactical.reset()
 
     def preload_warmup(self, historical_closes: List[float], historical_trs: List[float]):
         if historical_closes:
@@ -956,6 +1011,7 @@ class FeatureEngine:
         atr = atr_prev
 
         kalman_price, kalman_velocity = self.kalman.update(candle.fut_c)
+        spot_tactical = self.spot_tactical.compute(candle)
 
         all_closes = list(self.preloaded_closes) + [c.spot_c for c in prev]
         all_closes.append(candle.spot_c)
@@ -1055,7 +1111,7 @@ class FeatureEngine:
                         "oi_short_buildup": oi_short_buildup, "twc": hw_res.get("twc",0.0),
                         "breadth_10": hw_res.get("breadth_10",0.5), "fut_volume": candle.fut_volume,
                         "atr_14_prev": atr, "fut_vwap": fut_vwap, "kalman_velocity": kalman_velocity,
-                        "volume_zscore": volume_zscore}
+                        "volume_zscore": volume_zscore, **spot_tactical}
         # Integrated reasoning is evaluated before basket/decision persistence and is
         # strictly causal: it sees the current completed bar and prior bars only.
         reasoning_input = {**basket_input, "data_quality_score": float(max(0.0, 1.0 - penalty)),
@@ -1085,14 +1141,8 @@ class FeatureEngine:
                 _vwap_reclaim = -1
         reasoning_res["vwap_reclaim_signal"] = _vwap_reclaim
 
-        _support_prox = safe_float(reasoning_res.get("nearest_support_atr"), np.nan)
-        _resistance_prox = safe_float(reasoning_res.get("nearest_resistance_atr"), np.nan)
-        _sr_signal = 0
-        if is_valid_number(_support_prox) and _support_prox <= 0.70:
-            _sr_signal = 1
-        if is_valid_number(_resistance_prox) and _resistance_prox <= 0.70:
-            _sr_signal = -1
-        reasoning_res["support_resistance_signal"] = _sr_signal
+        # Tactical CE/PE S/R comes from the option premium, never from FUT levels.
+        reasoning_res["support_resistance_signal"] = 0
 
         basket_res = self.baskets.score(basket_input)
 
@@ -1140,6 +1190,7 @@ class FeatureEngine:
             **hw_res,
             "dispersion_10": safe_float(hw_res.get("dispersion_index"), 0.0),
             "volume_zscore": volume_zscore,
+            **spot_tactical,
             "atm_iv": atm_iv_obs,
             "iv_change": iv_change,
             **or_res,
@@ -1538,18 +1589,18 @@ class IntegratedMarketReasoningEngine:
         body = abs(prev["c"] - prev["o"])
         displacement = body / max(atr, 1e-9)
         # Demand: bearish/neutral candle base followed by upward displacement.
-        if candle.fut_c > prev["h"] and displacement >= 0.45:
+        if candle.spot_c > prev["h"] and displacement >= 0.45:
             z = {"low": float(prev["l"]), "high": float(max(prev["o"], prev["c"])),
                  "created": candle.timestamp, "kind": "DEMAND", "strength": float(min(1.0, 0.5 + 0.25*displacement + 0.10*max(volume_z,0)))}
             self.demand_zones.append(z)
         # Supply: upward/neutral candle base followed by downward displacement.
-        if candle.fut_c < prev["l"] and displacement >= 0.45:
+        if candle.spot_c < prev["l"] and displacement >= 0.45:
             z = {"low": float(min(prev["o"], prev["c"])), "high": float(prev["h"]),
                  "created": candle.timestamp, "kind": "SUPPLY", "strength": float(min(1.0, 0.5 + 0.25*displacement + 0.10*max(volume_z,0)))}
             self.supply_zones.append(z)
         # Remove clearly invalidated zones. Keep this causal and conservative.
-        self.demand_zones = deque([z for z in self.demand_zones if candle.fut_c >= z["low"] - 0.35*atr], maxlen=12)
-        self.supply_zones = deque([z for z in self.supply_zones if candle.fut_c <= z["high"] + 0.35*atr], maxlen=12)
+        self.demand_zones = deque([z for z in self.demand_zones if candle.spot_c >= z["low"] - 0.35*atr], maxlen=12)
+        self.supply_zones = deque([z for z in self.supply_zones if candle.spot_c <= z["high"] + 0.35*atr], maxlen=12)
 
     def _zone_state(self, price, candle, atr):
         demand = None; supply = None
@@ -1564,17 +1615,18 @@ class IntegratedMarketReasoningEngine:
         demand_dist = np.nan; supply_dist = np.nan
         if demand:
             demand_dist = min(abs(price-demand["low"]), abs(price-demand["high"])) / max(atr,1e-9)
-            demand_sweep = int(candle.fut_l < demand["low"] and candle.fut_c > demand["low"])
-            demand_reclaim = int(candle.fut_c >= demand["high"] or (candle.fut_c > demand["low"] and candle.fut_c > candle.fut_o))
+            demand_sweep = int(candle.spot_l < demand["low"] and candle.spot_c > demand["low"])
+            demand_reclaim = int(candle.spot_c >= demand["high"] or (candle.spot_c > demand["low"] and candle.spot_c > candle.spot_o))
         if supply:
             supply_dist = min(abs(price-supply["low"]), abs(price-supply["high"])) / max(atr,1e-9)
-            supply_sweep = int(candle.fut_h > supply["high"] and candle.fut_c < supply["high"])
-            supply_reject = int(candle.fut_c <= supply["low"] or (candle.fut_c < candle.fut_o and candle.fut_c < supply["high"]))
+            supply_sweep = int(candle.spot_h > supply["high"] and candle.spot_c < supply["high"])
+            supply_reject = int(candle.spot_c <= supply["low"] or (candle.spot_c < candle.spot_o and candle.spot_c < supply["high"]))
         return demand, supply, demand_sweep, supply_sweep, demand_reclaim, supply_reject, demand_dist, supply_dist
 
     def compute(self, candle, prev, f):
-        price = self._safe(candle.fut_c, 0.0)
-        atr = max(self._safe(f.get("atr_14_prev"), max(candle.fut_h-candle.fut_l, 1.0)), 1e-9)
+        price = self._safe(candle.spot_c, 0.0)
+        spot_range = max(candle.spot_h-candle.spot_l, 1.0)
+        atr = max(self._safe(f.get("spot_atr_14"), spot_range), 1e-9)
         rsi = self._safe(f.get("rsi_14"), 50.0)
         macd = self._safe(f.get("macd"), 0.0)
         stoch = self._safe(f.get("stoch_14"), 50.0)
@@ -1607,10 +1659,10 @@ class IntegratedMarketReasoningEngine:
         pdh = self._safe(getattr(getattr(f, "get", None), "__call__", lambda *_: np.nan)("prev_high", np.nan), np.nan)
         pdl = self._safe(getattr(getattr(f, "get", None), "__call__", lambda *_: np.nan)("prev_low", np.nan), np.nan)
 
-        if not is_valid_number(self.session_high): self.session_high = candle.fut_h
-        else: self.session_high = max(self.session_high, candle.fut_h)
-        if not is_valid_number(self.session_low): self.session_low = candle.fut_l
-        else: self.session_low = min(self.session_low, candle.fut_l)
+        if not is_valid_number(self.session_high): self.session_high = candle.spot_h
+        else: self.session_high = max(self.session_high, candle.spot_h)
+        if not is_valid_number(self.session_low): self.session_low = candle.spot_l
+        else: self.session_low = min(self.session_low, candle.spot_l)
 
         self._update_zones(candle, atr, volz, adx)
         demand, supply, d_sweep, s_sweep, d_reclaim, s_reject, d_dist, s_dist = self._zone_state(price, candle, atr)
@@ -1625,11 +1677,12 @@ class IntegratedMarketReasoningEngine:
                 fvg_bear = 1; fvg_mid = (b2["h"] + b1["l"]) / 2.0
 
         # Support/resistance proximity from causal reference levels.
+        # FUT contributes only FUT VWAP. All CE/PE premium S/R is calculated
+        # separately from the selected option contract.
         levels = []
-        for name, level in (("VWAP",vwap),("POC",vp_poc),("VAH",vp_vah),("VAL",vp_val),("ORH",orh),("ORL",orl),
-                            ("PDH",pdh),("PDL",pdl),("SESSION_HIGH",self.session_high),("SESSION_LOW",self.session_low)):
-            if is_valid_number(level):
-                levels.append((name,float(level),abs(price-float(level))/atr))
+        if is_valid_number(vwap) and is_valid_number(f.get("fut_c")):
+            fut_atr=max(self._safe(f.get("atr_14_prev"),1.0),1e-9)
+            levels.append(("FUT_VWAP_REFERENCE",float(vwap),abs(float(f.get("fut_c"))-float(vwap))/fut_atr))
         supports = sorted([x for x in levels if x[1] <= price], key=lambda x:x[2])
         resistances = sorted([x for x in levels if x[1] >= price], key=lambda x:x[2])
         nearest_support = supports[0] if supports else ("",np.nan,np.nan)
@@ -1660,10 +1713,7 @@ class IntegratedMarketReasoningEngine:
         if s_reject: location_pe += 0.35
         if resistance_prox > 0.70 and price < nearest_resistance[1]: location_pe += 0.20
         if support_prox > 0.70 and price > nearest_support[1]: location_ce += 0.20
-        if is_valid_number(vwap):
-            vrel=(price-vwap)/atr
-            if vrel < -0.45: location_ce += 0.25
-            if vrel > 0.45: location_pe += 0.25
+        # Do not compare SPOT price with FUT VWAP; they are different instruments.
         if is_valid_number(vp_val) and price < vp_val: location_ce += 0.10
         if is_valid_number(vp_vah) and price > vp_vah: location_pe += 0.10
         location_ce = min(1.0, location_ce); location_pe=min(1.0,location_pe)
@@ -1736,7 +1786,7 @@ class IntegratedMarketReasoningEngine:
         contradictions = contradictions[:3]
 
         # Store causal bar AFTER all current calculations; never use it to decide itself later.
-        self.bars.append({"t":candle.timestamp,"o":candle.fut_o,"h":candle.fut_h,"l":candle.fut_l,"c":candle.fut_c,"v":candle.fut_volume})
+        self.bars.append({"t":candle.timestamp,"o":candle.spot_o,"h":candle.spot_h,"l":candle.spot_l,"c":candle.spot_c,"v":candle.fut_volume})
         self.feature_rows.append(dict(f))
         self.last_state=state; self.last_ce=ce_score; self.last_pe=pe_score
 
@@ -1848,6 +1898,13 @@ class TradeDecision:
     ce_evidence_score: float = 50.0
     pe_evidence_score: float = 50.0
     net_ce_pe_edge: float = 0.0
+    option_strike: float = np.nan
+    option_entry_estimate: float = np.nan
+    option_target_price: float = np.nan
+    option_stop_price: float = np.nan
+    option_support: float = np.nan
+    option_resistance: float = np.nan
+    option_premium_atr: float = np.nan
 
 
 class DecisionEngine:
@@ -2042,9 +2099,11 @@ class PaperTradingDesk:
                 "effective_delta": decision.effective_delta,
                 "size": decision.size_factor,
                 "regime": decision.regime,
+                "option_entry_estimate": decision.option_entry_estimate,
+                "option_strike": decision.option_strike,
             }
 
-    def on_bar_open_fill(self, candle: Candle3Min, atr: float):
+    def on_bar_open_fill(self, candle: Candle3Min, atr: float, option_quotes: Optional[Dict[str,float]]=None):
         self.check_and_reset_new_day(candle.timestamp)
         if self.pending_order and to_ist(candle.timestamp) >= to_ist(self.pending_order["target_fill_time"]):
             if self.check_total_risk_limit():
@@ -2058,13 +2117,16 @@ class PaperTradingDesk:
             slippage = CONFIG["base_slippage_pts"] * vol_factor * direction
             fill_price = candle.fut_o + slippage
 
-            dynamic_atm_baseline = round(max(80.0, (fill_price * CONFIG["default_atm_iv"] * math.sqrt(1.0 / 252.0)) * 2.2), 2)
-
+            option_quotes=option_quotes or {};side_key="CE" if direction==1 else "PE"
+            observed=safe_float(option_quotes.get(side_key),np.nan);staged=safe_float(order.get("option_entry_estimate"),np.nan)
+            option_entry=observed if is_valid_number(observed) and observed>0 else staged
+            if not is_valid_number(option_entry) or option_entry<=0:
+                self.pending_order=None;return
             self.active_position = PaperPosition(
                 entry_time=candle.timestamp,
                 direction=direction,
                 entry_future_price=round(fill_price, 2),
-                entry_option_price=dynamic_atm_baseline,
+                entry_option_price=round(option_entry,2),
                 option_target=order["option_target"],
                 option_stop=order["option_stop"],
                 effective_delta=order["effective_delta"],
@@ -2074,7 +2136,7 @@ class PaperTradingDesk:
             )
             self.pending_order = None
 
-    def on_bar_update_and_exit_eval(self, candle: Candle3Min, decision: Optional[TradeDecision]=None, feats: Optional[Dict[str,Any]]=None, is_session_end: bool=False):
+    def on_bar_update_and_exit_eval(self, candle: Candle3Min, decision: Optional[TradeDecision]=None, feats: Optional[Dict[str,Any]]=None, is_session_end: bool=False, option_quotes: Optional[Dict[str,float]]=None):
         if self.active_position is None:
             self.unrealized_pnl_pts=0.0; self.check_total_risk_limit(); return
         pos=self.active_position; pos.bars_held+=1
@@ -2082,7 +2144,12 @@ class PaperTradingDesk:
             high_move=candle.fut_h-pos.entry_future_price; low_move=pos.entry_future_price-candle.fut_l; close_move=candle.fut_c-pos.entry_future_price
         else:
             high_move=pos.entry_future_price-candle.fut_l; low_move=candle.fut_h-pos.entry_future_price; close_move=pos.entry_future_price-candle.fut_c
-        option_high=high_move*pos.effective_delta; option_low=-(low_move*pos.effective_delta); option_close=close_move*pos.effective_delta
+        option_quotes=option_quotes or {};side_key="CE" if pos.direction==1 else "PE"
+        live_option=safe_float(option_quotes.get(side_key),np.nan)
+        if is_valid_number(live_option) and live_option>0 and is_valid_number(pos.entry_option_price):
+            option_close=live_option-pos.entry_option_price;option_high=option_close;option_low=option_close
+        else:
+            option_high=high_move*pos.effective_delta;option_low=-(low_move*pos.effective_delta);option_close=close_move*pos.effective_delta
         self.unrealized_pnl_pts=round(option_close*pos.size,2)
         pos.peak_pnl_pts=max(pos.peak_pnl_pts,self.unrealized_pnl_pts)
         hit_stop=option_low<=-pos.option_stop
@@ -2169,6 +2236,8 @@ class KotakNeoAdapter:
         self._last_tick_wall = None
         self._last_cum_volume: Optional[float] = None
         self._unlabeled_decisions = deque(maxlen=150)
+        self.option_bar_history = defaultdict(lambda: deque(maxlen=80))
+        self.option_prev_oi = {}
 
         self._watchdog_stop = threading.Event()
         self._watchdog_thread: Optional[threading.Thread] = None
@@ -2382,7 +2451,7 @@ class KotakNeoAdapter:
         try:
             tokens_to_poll = [
                 {"instrument_token": str(tok), "exchange_segment": "nse_fo"}
-                for tok in self.pcr_tokens[:25]
+                for tok in self.pcr_tokens
             ]
             res = self.client.quotes(instrument_tokens=tokens_to_poll, quote_type="all")
             recs = record_list(res)
@@ -2416,7 +2485,7 @@ class KotakNeoAdapter:
         for tok in self.heavy_tokens.values():
             tokens_to_poll.append({"instrument_token": str(tok), "exchange_segment": "nse_cm"})
             
-        for tok in self.pcr_tokens[:20]:
+        for tok in self.pcr_tokens:
             tokens_to_poll.append({"instrument_token": str(tok), "exchange_segment": "nse_fo"})
         
         try:
@@ -2556,6 +2625,73 @@ class KotakNeoAdapter:
         if completed_records:
             self.dataset_manager.write_parquet(pd.DataFrame(completed_records), name="labeled_features_3min")
 
+    @staticmethod
+    def _option_rsi(closes, period=14):
+        vals=[float(x) for x in closes if is_valid_number(x)]
+        if len(vals)<period+1:return np.nan
+        d=np.diff(vals[-(period+1):]);g=np.mean(np.maximum(d,0));l=np.mean(np.maximum(-d,0))
+        return 100.0 if l==0 else float(100.0-100.0/(1.0+g/l))
+
+    @staticmethod
+    def _option_atr(history):
+        if len(history)<3:return np.nan
+        trs=[];prev=np.nan
+        for b in history:
+            tr=b["h"]-b["l"] if not is_valid_number(prev) else max(b["h"]-b["l"],abs(b["h"]-prev),abs(b["l"]-prev))
+            trs.append(tr);prev=b["c"]
+        return float(np.mean(trs[-14:])) if trs else np.nan
+
+    @staticmethod
+    def _option_sr(history,current):
+        bars=list(history)[-30:]
+        if not bars or not is_valid_number(current):return np.nan,np.nan
+        su=[];re=[]
+        for i in range(1,len(bars)-1):
+            if bars[i]["l"]<=bars[i-1]["l"] and bars[i]["l"]<=bars[i+1]["l"] and bars[i]["l"]<current:su.append(bars[i]["l"])
+            if bars[i]["h"]>=bars[i-1]["h"] and bars[i]["h"]>=bars[i+1]["h"] and bars[i]["h"]>current:re.append(bars[i]["h"])
+        if not su:
+            x=[b["l"] for b in bars if b["l"]<current];su=[max(x)] if x else []
+        if not re:
+            x=[b["h"] for b in bars if b["h"]>current];re=[min(x)] if x else []
+        return (max(su) if su else np.nan),(min(re) if re else np.nan)
+
+    def _build_option_side(self, option_type, atm, ticks_source, bar_time):
+        candidates=[(str(tok),info) for tok,info in self.pcr_records.items() if info.get("option_type")==option_type and is_valid_number(info.get("strike")) and abs(float(info.get("strike"))-float(atm))<1e-6]
+        if not candidates:return {}
+        tok,info=candidates[0]
+        ticks=[t for t in ticks_source if str(token_from_record(t))==tok]
+        prices=[extract_tick_price(t) for t in ticks];prices=[x for x in prices if is_valid_number(x) and x>0]
+        latest=self.latest.get(tok,{})
+        current=prices[-1] if prices else extract_tick_price(latest)
+        if not is_valid_number(current):return {}
+        o=prices[0] if prices else current;h=max(prices) if prices else current;l=min(prices) if prices else current
+        hist=self.option_bar_history[tok]
+        support,resistance=self._option_sr(hist,current)
+        hist.append({"t":bar_time,"o":o,"h":h,"l":l,"c":current})
+        closes=[b["c"] for b in hist]
+        oi=self._extract_oi(latest);prev_oi=self.option_prev_oi.get(tok,np.nan)
+        oi_change=(oi-prev_oi) if is_valid_number(oi) and is_valid_number(prev_oi) else 0.0
+        if is_valid_number(oi):self.option_prev_oi[tok]=oi
+        iv=safe_float(latest.get("iv") or latest.get("implied_volatility") or latest.get("impliedVolatility"),np.nan)
+        ovwap=extract_quote_field(latest,("vwap","avp","averagePrice","average_price","a"))
+        if not is_valid_number(ovwap):ovwap=float(np.mean(closes[-min(14,len(closes)):]))
+        minutes=np.nan
+        if self.active_pcr_expiry:
+            exp_end=to_ist(self.active_pcr_expiry).replace(hour=15,minute=30,second=0,microsecond=0);minutes=max(0.0,(exp_end-to_ist(bar_time)).total_seconds()/60.0)
+        spot=extract_tick_price(self.latest.get("Nifty 50",{}));spot=spot if is_valid_number(spot) else float(atm)
+        ivg=iv if is_valid_number(iv) and iv>0 else CONFIG["default_atm_iv"]
+        g=GreeksEngine.compute_second_order_greeks(spot,float(atm),minutes if is_valid_number(minutes) else 375.0,iv=ivg,r=CONFIG["risk_free_rate"])
+        delta=norm_cdf(g["d1"]) if option_type=="CE" else norm_cdf(g["d1"])-1.0
+        return {"option_ltp":current,"option_oi":oi,"option_oi_change":oi_change,"option_volume":safe_float(latest.get("last_volume") or latest.get("v") or latest.get("volume"),0.0),"option_iv":iv,"option_vwap":ovwap,"option_rsi":self._option_rsi(closes),"option_slope3":calc_3bar_slope(closes),"option_atr3":self._option_atr(hist),"option_support":support,"option_resistance":resistance,"option_delta":delta,"option_strike":float(atm),"option_symbol":info.get("symbol",""),"option_expiry":info.get("expiry"),"option_token":tok}
+
+    def _option_side_chain(self, atm, ticks_source, bar_time):
+        ce=self._build_option_side("CE",atm,ticks_source,bar_time);pe=self._build_option_side("PE",atm,ticks_source,bar_time);out={}
+        for side,d in (("ce",ce),("pe",pe)):
+            for k,v in d.items():
+                if k.startswith("option_") and k not in ("option_symbol","option_expiry","option_token"):out[f"{side}_{k}"]=v
+            out[f"{side}_option_symbol"]=d.get("option_symbol","");out[f"{side}_option_expiry"]=d.get("option_expiry");out[f"{side}_option_token"]=d.get("option_token","")
+        return out
+
     def _close_bar(self, bar_time: datetime, is_session_end: bool = False):
         with self.lock:
             ticks_source = self.current_bar_ticks if self.current_bar_ticks else list(self.tick_buffer)
@@ -2655,6 +2791,7 @@ class KotakNeoAdapter:
                     if is_valid_number(iv_val) and iv_val > 0:
                         atm_iv_values.append(iv_val)
             observed_atm_iv = float(np.mean(atm_iv_values)) if atm_iv_values else np.nan
+            option_side = self._option_side_chain(atm, ticks_source, bar_time)
 
             pcr_chain = {
                 "pcr_oi": total_pe_oi / max(total_ce_oi, 1.0) if total_ce_oi > 0 else np.nan,
@@ -2666,6 +2803,7 @@ class KotakNeoAdapter:
                 "atm_iv": observed_atm_iv,
                 "ce_contracts_seen": sum(1 for t in self.pcr_tokens if self.pcr_records.get(t, {}).get("option_type") == "CE"),
                 "pe_contracts_seen": sum(1 for t in self.pcr_tokens if self.pcr_records.get(t, {}).get("option_type") == "PE"),
+                **option_side,
             }
 
             candle = Candle3Min(
@@ -2677,13 +2815,14 @@ class KotakNeoAdapter:
             feats = self.feature_engine.compute(candle, self.candles_3m)
             atr_v = safe_float(feats.get("atr_14_prev"), 15.0)
 
-            self.paper_desk.on_bar_open_fill(candle, atr_v)
+            option_quotes_now={"CE":safe_float(feats.get("ce_option_ltp"),np.nan),"PE":safe_float(feats.get("pe_option_ltp"),np.nan)}
+            self.paper_desk.on_bar_open_fill(candle, atr_v, option_quotes=option_quotes_now)
 
             self.candles_3m.append(candle)
 
             decision = self.decision_engine.decide(feats)
             self.last_decision = decision
-            self.paper_desk.on_bar_update_and_exit_eval(candle, decision=decision, feats=feats, is_session_end=is_session_end)
+            self.paper_desk.on_bar_update_and_exit_eval(candle, decision=decision, feats=feats, is_session_end=is_session_end, option_quotes=option_quotes_now)
             
             if not is_session_end:
                 next_t = bar_time + timedelta(minutes=CONFIG["bar_minutes"])
@@ -2853,6 +2992,10 @@ def run_unit_tests() -> bool:
     kf = KalmanPriceEngine()
     est, vel = kf.update(24050.0)
     assert is_valid_number(est)
+    assert not is_valid_number(extract_tick_price({"iv":0.25}))
+    ste=SpotTacticalEngine(maxlen=20)
+    tc=Candle3Min(now_ist().replace(hour=11,minute=30),24000,24020,23980,24010,24300,24320,24290,24310,1000,500)
+    assert "spot_rsi_14" in ste.compute(tc)
 
     ire = IntegratedMarketReasoningEngine(maxlen=20)
     test_c = Candle3Min(now_ist().replace(hour=11, minute=30), 24000, 24020, 23980, 24010, 24000, 24020, 23980, 24010, 1000, 500)
@@ -2867,7 +3010,9 @@ def run_unit_tests() -> bool:
     assert "ce_evidence_score" in rr and "pe_evidence_score" in rr
     assert 0.0 <= rr["ce_evidence_score"] <= 100.0
     assert 0.0 <= rr["pe_evidence_score"] <= 100.0
-    
+    vf={"data_quality_score":1.0,"demand_liquidity_sweep":1,"demand_reclaim":1,"supply_liquidity_sweep":0,"supply_rejection":0,"spot_rsi_14":55,"spot_macd_hist":1,"spot_slope_3":1,"spot_bos_signal":1,"ce_option_ltp":100,"ce_option_rsi":58,"ce_option_slope3":1,"ce_option_vwap":98,"ce_option_atr3":2,"ce_option_support":96,"ce_option_resistance":110,"ce_option_delta":0.52,"ce_option_strike":24000,"pe_option_ltp":70,"pe_option_rsi":42,"pe_option_slope3":-1,"pe_option_vwap":72,"pe_option_atr3":2,"pe_option_support":68,"pe_option_resistance":78,"pe_option_delta":-0.48,"pe_option_strike":24000,"fut_c":24310,"fut_vwap":24300}
+    vd,_=_v11_apply(DecisionEngine(),vf,TradeDecision())
+    assert vd.action in ("CE","PE","SKIP")
     return True
 
 
@@ -3948,12 +4093,69 @@ def _v10_decide(self, feats):
 
 DecisionEngine.decide = _v10_decide
 
+# ============================================================================
+# V11 OPTION-CENTRIC TACTICAL DECISION OVERLAY
+# ============================================================================
+# FUT contributes only FUT VWAP. Spot provides market location/structure.
+# CE/PE decisions use independent option-premium data and option-premium S/R.
+# ============================================================================
+
+def _v11_sig(x,scale=1.0):
+    try:return float(np.tanh(float(x)/max(float(scale),1e-9)))
+    except Exception:return 0.0
+
+def _v11_side_score(f,side):
+    p="ce" if side=="CE" else "pe"; sign=1 if side=="CE" else -1
+    rsi=safe_float(f.get(f"{p}_option_rsi"),50);slope=safe_float(f.get(f"{p}_option_slope3"),0)
+    ltp=safe_float(f.get(f"{p}_option_ltp"),np.nan);ovwap=safe_float(f.get(f"{p}_option_vwap"),np.nan)
+    atr=safe_float(f.get(f"{p}_option_atr3"),np.nan);sup=safe_float(f.get(f"{p}_option_support"),np.nan);res=safe_float(f.get(f"{p}_option_resistance"),np.nan)
+    spot_rsi=safe_float(f.get("spot_rsi_14"),50);spot_macd=safe_float(f.get("spot_macd_hist"),0);spot_slope=safe_float(f.get("spot_slope_3"),0);bos=safe_float(f.get("spot_bos_signal"),0)
+    dsw=safe_float(f.get("demand_liquidity_sweep"),0);drec=safe_float(f.get("demand_reclaim"),0);ssw=safe_float(f.get("supply_liquidity_sweep"),0);srej=safe_float(f.get("supply_rejection"),0)
+    loc=min(1.0,0.65*(dsw+drec if side=="CE" else ssw+srej))
+    opp=min(1.0,0.65*(ssw+srej if side=="CE" else dsw+drec))
+    sm=0.35*_v11_sig(sign*(spot_rsi-50),10)+0.30*_v11_sig(sign*spot_macd,1)+0.20*_v11_sig(sign*spot_slope,0.08)+0.15*(1 if bos==sign else 0)
+    pm=0.45*_v11_sig(sign*(rsi-50),10)+0.35*_v11_sig(sign*slope,max(0.5,(atr if is_valid_number(atr) else 1)*0.10))+0.20*(1 if is_valid_number(ltp) and is_valid_number(ovwap) and ltp>ovwap else -0.5)
+    room=0.0
+    if is_valid_number(ltp) and is_valid_number(res) and res>ltp:room=min(1,max(0,(res-ltp)/max(ltp*CONFIG["option_sr_max_distance_pct"],1e-6)))
+    support_room=0.0
+    if is_valid_number(ltp) and is_valid_number(sup) and ltp>sup:support_room=min(1,max(0,(ltp-sup)/max(ltp*CONFIG["option_sr_max_distance_pct"],1e-6)))
+    opt=0.60*pm+0.20*room+0.20*support_room
+    score=float(np.clip(0.35*loc+0.22*sm+0.28*opt-0.28*opp,0,1))
+    return score,{"rsi":rsi,"slope":slope,"ltp":ltp,"vwap":ovwap,"atr":atr,"support":sup,"resistance":res,"location":loc,"spot_momentum":sm,"option_momentum":pm}
+
+def _v11_apply(self,feats,d):
+    if safe_float(feats.get("data_quality_score"),0)<CONFIG["min_data_quality_to_trade"]:return d,{"state":"DATA_BAD"}
+    ce,cm=_v11_side_score(feats,"CE");pe,pm=_v11_side_score(feats,"PE")
+    ce_pct=100*ce/(ce+pe+1e-9);pe_pct=100-ce_pct;edge=(ce_pct-pe_pct)/100
+    ds=safe_int(feats.get("demand_liquidity_sweep"),0);dr=safe_int(feats.get("demand_reclaim"),0);ss=safe_int(feats.get("supply_liquidity_sweep"),0);sr=safe_int(feats.get("supply_rejection"),0)
+    ce_ready=(ds and dr and ce_pct>=55 and ce>0.46) or (not ds and not ss and ce_pct>=64 and ce>0.62)
+    pe_ready=(ss and sr and pe_pct>=55 and pe>0.46) or (not ds and not ss and pe_pct>=64 and pe>0.62)
+    action="CE" if ce_ready and not pe_ready else ("PE" if pe_ready and not ce_ready else "SKIP")
+    p="ce" if action=="CE" else ("pe" if action=="PE" else "")
+    entry=safe_float(feats.get(f"{p}_option_ltp"),np.nan) if p else np.nan;atr=safe_float(feats.get(f"{p}_option_atr3"),np.nan) if p else np.nan;support=safe_float(feats.get(f"{p}_option_support"),np.nan) if p else np.nan;res=safe_float(feats.get(f"{p}_option_resistance"),np.nan) if p else np.nan
+    delta=abs(safe_float(feats.get(f"{p}_option_delta"),CONFIG["base_delta"])) if p else CONFIG["base_delta"]
+    if action!="SKIP" and is_valid_number(entry):
+        ab=atr if is_valid_number(atr) and atr>0 else entry*0.05;target=max(ab*CONFIG["option_target_atr_mult"],entry*CONFIG["option_min_target_pct"]);stop=max(ab*CONFIG["option_stop_atr_mult"],entry*CONFIG["option_min_stop_pct"])
+        if is_valid_number(res) and res>entry:target=min(target,max(entry*0.04,res-entry))
+        stop=min(stop,entry*0.20)
+    else:target=stop=0.0
+    conf=min(0.95,max(0.25,0.50+0.45*abs(edge)+(0.08 if action in ("CE","PE") else 0)))
+    d.action=action;d.confidence=round(conf,3);d.ce_evidence_score=round(ce_pct,2);d.pe_evidence_score=round(pe_pct,2);d.net_ce_pe_edge=round(edge,4);d.effective_delta=round(delta,3);d.option_strike=safe_float(feats.get(f"{p}_option_strike"),np.nan) if p else np.nan;d.option_entry_estimate=entry;d.option_target_pts=round(target,2);d.option_stop_pts=round(stop,2);d.option_target_price=entry+target if action!="SKIP" and is_valid_number(entry) else np.nan;d.option_stop_price=entry-stop if action!="SKIP" and is_valid_number(entry) else np.nan;d.option_support=support;d.option_resistance=res;d.option_premium_atr=atr;d.reasoning_state="CE_OPTION_SETUP" if action=="CE" else "PE_OPTION_SETUP" if action=="PE" else "NO_CLEAN_OPTION_SETUP"
+    d.reason=(f"{action if action!='SKIP' else 'WAIT'} | CE {ce_pct:.0f} / PE {pe_pct:.0f} | "f"CE premium RSI {cm['rsi']:.1f} / PE premium RSI {pm['rsi']:.1f} | FUT VWAP only")
+    feats["v11_ce_option_score"]=ce_pct;feats["v11_pe_option_score"]=pe_pct;feats["v11_option_edge"]=edge;feats["v11_action"]=action;feats["v11_option_state"]=d.reasoning_state
+    return d,{"state":d.reasoning_state,"ce":ce_pct,"pe":pe_pct,"edge":edge}
+
+_V11_PREVIOUS_DECIDE=DecisionEngine.decide
+def _v11_decide(self,feats):
+    d=_V11_PREVIOUS_DECIDE(self,feats);d,_=_v11_apply(self,feats,d);return d
+DecisionEngine.decide=_v11_decide
+
 def main():
     if st is None:
         print("Streamlit not installed.")
         return
 
-    st.set_page_config(page_title="NIFTY 3M | Micro Engine v8.1 Human Decision Map", page_icon="[LIVE]", layout="wide", initial_sidebar_state="expanded")
+    st.set_page_config(page_title="NIFTY 3M | Option-Centric Decision Desk v8.2", page_icon="[LIVE]", layout="wide", initial_sidebar_state="expanded")
     inject_custom_css()
 
     adapter: KotakNeoAdapter = get_global_adapter()
@@ -4052,28 +4254,20 @@ def main():
     t4.metric("TICKS INGESTED", f"{ticks_count:,}")
 
     st.markdown('<div class="terminal-card">', unsafe_allow_html=True)
-    col_hud1, col_hud2, col_hud3, col_hud4, col_hud5 = st.columns([1.5, 1.2, 1.2, 1, 2])
-    
+    st.markdown("### TACTICAL DECISION")
     if adapter and adapter.last_decision:
-        d = adapter.last_decision
-        badge_cls = "badge-ce" if d.action == "CE" else ("badge-pe" if d.action == "PE" else "badge-neutral")
-        
-        with col_hud1:
-            st.caption("TACTICAL SIGNAL")
-            st.markdown(f'<div class="{badge_cls}">{d.action}</div>', unsafe_allow_html=True)
-        with col_hud2:
-            st.metric("Regime", d.regime)
-        with col_hud3:
-            st.metric("Option Target / SL", f"+{d.option_target_pts} / -{d.option_stop_pts} pt")
-            st.caption(f"**Effective Delta:** {d.effective_delta:.2f}")
-        with col_hud4:
-            st.metric("Confidence", f"{d.confidence * 100:.0f}%")
-        with col_hud5:
-            st.caption("Engine Rationale")
-            st.write(f"_{d.reason}_")
-    else:
-        st.info("Awaiting first completed 3-minute bar to establish baseline regime and signal...")
-    st.markdown('</div>', unsafe_allow_html=True)
+        d=adapter.last_decision;badge_cls="badge-ce" if d.action=="CE" else ("badge-pe" if d.action=="PE" else "badge-neutral")
+        a,b,c,e=st.columns(4)
+        with a: st.caption("SIGNAL");st.markdown(f'<div class="{badge_cls}">{d.action}</div>',unsafe_allow_html=True)
+        with b: st.metric("Confidence",f"{d.confidence*100:.0f}%")
+        with c: st.metric("CE / PE Evidence",f"{d.ce_evidence_score:.0f} / {d.pe_evidence_score:.0f}")
+        with e: st.metric("Edge",f"{d.net_ce_pe_edge:+.2f}")
+        if d.action in ("CE","PE"):
+            st.write(f"**{d.action} {d.option_strike:.0f}** Â· Entry `â‚¹{d.option_entry_estimate:.2f}` Â· Target `â‚¹{d.option_target_price:.2f}` Â· SL `â‚¹{d.option_stop_price:.2f}`")
+            st.caption(f"Option premium S/R: `{d.option_support:.2f}` / `{d.option_resistance:.2f}` Â· Premium ATR `{d.option_premium_atr:.2f}`")
+        st.success(d.reason) if d.action in ("CE","PE") else st.info(d.reason)
+    else: st.info("Waiting for first completed 3-minute bar.")
+    st.markdown('</div>',unsafe_allow_html=True)
 
     st.markdown('<div class="terminal-card">', unsafe_allow_html=True)
     st.markdown("**[LIVE] Live Option-Centric Paper Trading Desk & Journal**")
@@ -4160,7 +4354,7 @@ def main():
                 val_breadth = latest_row.get("breadth_10", 0.5)
                 f4.markdown(f"**Breadth (10)**<br>{get_colored_text(val_breadth, 'breadth_10')}", unsafe_allow_html=True)
                 
-                with st.expander(" Institutional MLOps & 2nd-Order Greeks Scorecard", expanded=False):
+                with st.expander(" Data Quality & Research Audit", expanded=False):
                     dq_val = latest_row.get("data_quality_score", 1.0)
                     st.write(f"**Overall DQ Score:** `{dq_val * 100:.0f}%`")
                     
@@ -4179,195 +4373,34 @@ def main():
                         st.write(f" | Minutes to Expiry: `{latest_row.get('minutes_to_expiry', 0.0):.0f} min`")
                         st.write(f" | Gap Points: `{latest_row.get('gap_points', 0.0):.1f} pt`")
                         st.write(f" | Causal Integrity Tag: `{'1 (VERIFIED)' if latest_row.get('is_causal') == 1 else '0 (INVALID)'}`")
-                    st.json(latest_row)
             else:
                 st.caption("Feature extraction initializing...")
 
-    # Human-readable decision board: first panel to read before the raw matrices.
     if latest_row:
-        st.markdown('<div class="terminal-card">', unsafe_allow_html=True)
-        st.markdown("### MARKET DECISION MAP â€” WHAT THE DATA IS SAYING")
-        try:
-            _hm = json.loads(latest_row.get("human_market_map_json", "{}"))
-        except Exception:
-            _hm = build_human_market_map(latest_row)
-
-        _stage = str(_hm.get("setup_state", "NO CLEAN SETUP"))
-        if _stage.upper().startswith("CE"):
-            _stage_cls = "badge-ce"
-        elif _stage.upper().startswith("PE"):
-            _stage_cls = "badge-pe"
-        else:
-            _stage_cls = "badge-neutral"
-
-        hm1, hm2, hm3, hm4 = st.columns([2.2, 1.2, 1.2, 1.2])
-        with hm1:
-            st.caption("CURRENT MARKET SETUP")
-            st.markdown(f'<div class="{_stage_cls}">{_stage}</div>', unsafe_allow_html=True)
-        with hm2:
-            st.metric("CE Evidence", f"{safe_float(_hm.get('ce_evidence'),50):.0f}")
-        with hm3:
-            st.metric("PE Evidence", f"{safe_float(_hm.get('pe_evidence'),50):.0f}")
-        with hm4:
-            st.metric("CEâ†”PE Edge", f"{safe_float(_hm.get('edge'),0):+.1f}")
-
-        hm_a, hm_b = st.columns(2)
-        with hm_a:
-            dlow = safe_float(_hm.get("demand_low"), np.nan)
-            dhigh = safe_float(_hm.get("demand_high"), np.nan)
-            if is_valid_number(dlow) and is_valid_number(dhigh):
-                st.write(f"**Demand Zone:** `{dlow:.2f} â€“ {dhigh:.2f}`")
-            else:
-                st.write("**Demand Zone:** `Not detected`")
-            st.write(f"**Liquidity Event:** `{_hm.get('location_state','-')}`")
-            st.write(
-                f"**Sweep:** `{'DONE âœ“' if _hm.get('demand_sweep') else 'NO'}`  |  "
-                f"**Reclaim:** `{'DONE âœ“' if _hm.get('demand_reclaim') else 'PENDING'}`"
-            )
-            st.write(f"**Stage:** `{_hm.get('setup_stage','WAIT')}`")
-        with hm_b:
-            st.write(f"**NEXT CONFIRMATION:** {_hm.get('next_trigger','-')}")
-            st.write(f"**INVALIDATION:** {_hm.get('invalidation','-')}")
-            st.write(
-                f"**Momentum:** `{safe_float(_hm.get('momentum'),0):+.2f}` | "
-                f"**Structure:** `{safe_float(_hm.get('structure'),0):+.2f}` | "
-                f"**RSI-14:** `{safe_float(_hm.get('rsi'),50):.1f}`"
-            )
-
-        st.markdown("**WHY THE SETUP IS DEVELOPING**")
-        sup = _hm.get("supporters") or []
-        blk = _hm.get("blockers") or []
-        if sup:
-            st.write("ðŸŸ¢ " + "  \\nðŸŸ¢ ".join(str(x) for x in sup))
-        else:
-            st.write("ðŸŸ¢ No strong positive driver detected yet.")
-        if blk:
-            st.write("ðŸ”´ " + "  \\nðŸ”´ ".join(str(x) for x in blk))
-
-        st.caption(
-            "Reading order: LOCATION â†’ LIQUIDITY EVENT â†’ MOMENTUM â†’ STRUCTURE â†’ FLOW/OPTIONS. "
-            "PCR is contextual; it is not a standalone CE/PE trigger. Evidence is not probability."
-        )
-        st.markdown('</div>', unsafe_allow_html=True)
-
-    st.markdown("### Integrated Market Reasoning â€” NIFTY Only")
-    if latest_row:
-        rr1, rr2, rr3, rr4 = st.columns(4)
-        rr1.metric("CE Evidence", f"{safe_float(latest_row.get('ce_evidence_score'),50):.0f}")
-        rr2.metric("PE Evidence", f"{safe_float(latest_row.get('pe_evidence_score'),50):.0f}")
-        rr3.metric("Net CEâ†”PE Edge", f"{safe_float(latest_row.get('net_ce_pe_edge'),0):+.2f}")
-        rr4.metric("Reasoning State", str(latest_row.get("reasoning_state","NEUTRAL")))
-        rca, rcb = st.columns(2)
-        with rca:
-            st.write(f"**Market regime:** `{latest_row.get('market_regime_reasoning','-')}` | **Volatility:** `{latest_row.get('volatility_regime_reasoning','-')}`")
-            st.write(f"**Support:** `{latest_row.get('nearest_support_name','-')}` @ `{safe_float(latest_row.get('nearest_support_price'),0):.2f}`")
-            st.write(f"**Resistance:** `{latest_row.get('nearest_resistance_name','-')}` @ `{safe_float(latest_row.get('nearest_resistance_price'),0):.2f}`")
-            st.write(f"**Demand:** `{safe_float(latest_row.get('demand_zone_low'),0):.2f}â€“{safe_float(latest_row.get('demand_zone_high'),0):.2f}` | Sweep `{latest_row.get('demand_liquidity_sweep',0)}` | Reclaim `{latest_row.get('demand_reclaim',0)}`")
-            st.write(f"**Supply:** `{safe_float(latest_row.get('supply_zone_low'),0):.2f}â€“{safe_float(latest_row.get('supply_zone_high'),0):.2f}` | Sweep `{latest_row.get('supply_liquidity_sweep',0)}` | Reject `{latest_row.get('supply_rejection',0)}`")
-        with rcb:
-            try: rr_reasons=json.loads(latest_row.get("reasoning_reasons_json","[]"))
-            except Exception: rr_reasons=[]
-            try: rr_conf=json.loads(latest_row.get("reasoning_contradictions_json","[]"))
-            except Exception: rr_conf=[]
-            st.write("**Live drivers:** " + (" Â· ".join(rr_reasons) if rr_reasons else "Mixed evidence"))
-            st.write("**Live contradictions:** " + (" Â· ".join(rr_conf) if rr_conf else "None material"))
-            st.write(f"**Adaptive oversold/overbought:** `{latest_row.get('adaptive_oversold',0)}` / `{latest_row.get('adaptive_overbought',0)}`")
-            st.write(f"**FVG:** bullish `{latest_row.get('fvg_bullish',0)}` | bearish `{latest_row.get('fvg_bearish',0)}` | mid `{safe_float(latest_row.get('fvg_mid'),0):.2f}`")
-    else:
-        st.caption("Integrated reasoning initializing...")
-
-    with grid_right:
-        st.markdown("**Top 5 Core Heavyweights Momentum & Live Impact**")
-        if adapter and adapter.heavy_tokens:
-            hw_list = []
-            with adapter.lock:
-                for sym, base_w in HEAVYWEIGHTS_TOP5.items():
-                    tok = str(adapter.heavy_tokens.get(sym))
-                    t = adapter.latest.get(tok, {})
-                    ltp = extract_tick_price(t)
-                    
-                    open_price = extract_quote_field(t, ("o", "open", "pOpen", "openPrice", "op"))
-                    if not is_valid_number(open_price) or open_price <= 0:
-                        open_price = ltp
-                    
-                    if is_valid_number(ltp) and is_valid_number(open_price) and open_price > 0:
-                        ret_pct = ((ltp - open_price) / open_price) * 100.0
-                        effective_impact = base_w * (ltp - open_price) / open_price * 100
-                    else:
-                        ret_pct = 0.0
-                        effective_impact = 0.0
-
-                    hw_list.append({
-                        "Symbol": sym,
-                        "LTP": f"Rs. {ltp:.2f}" if is_valid_number(ltp) else "-",
-                        "Change %": f"{ret_pct:+.2f}%" if is_valid_number(ret_pct) else "-",
-                        "Base Wt": f"{base_w*100:.1f}%",
-                        "Live Impact": f"{effective_impact:+.3f}"
-                    })
-            
-            df_hw = pd.DataFrame(hw_list)
-            st.dataframe(df_hw, height=210, hide_index=True)
-        else:
-            st.caption("Heavyweights mapping pending discovery... Click Discover Instruments in Sidebar.")
-
-
-    # V9 Part-3 live reasoning panel.
-    if latest_row:
-        st.markdown('<div class="terminal-card">', unsafe_allow_html=True)
-        st.markdown("### V9 Integrated Evidence Matrix")
-        v9_cols = st.columns(5)
-        labels = [
-            ("LOCATION", "v9_location_evidence"),
-            ("MOMENTUM", "v9_momentum_evidence"),
-            ("FLOW", "v9_flow_evidence"),
-            ("OPTIONS", "v9_options_evidence"),
-            ("STRUCTURE", "v9_structure_evidence"),
-        ]
-        for col, (label, key) in zip(v9_cols, labels):
-            val = safe_float(latest_row.get(key), 0.0)
-            side = "CE" if val > 0.08 else ("PE" if val < -0.08 else "NEUTRAL")
-            col.metric(label, f"{side} {val:+.2f}")
-        st.write(
-            f"**CE Evidence:** `{safe_float(latest_row.get('v9_ce_score'),50):.0f}`  |  "
-            f"**PE Evidence:** `{safe_float(latest_row.get('v9_pe_score'),50):.0f}`  |  "
-            f"**State:** `{latest_row.get('v9_state','NEUTRAL')}`"
-        )
-        st.caption(
-            f"Regime: `{latest_row.get('v9_trend_regime','-')}` / "
-            f"Volatility: `{latest_row.get('v9_volatility_regime','-')}`"
-        )
-        st.write(f"**Reasoning:** {latest_row.get('v9_reasoning','-')}")
-        st.caption(
-            "Evidence balance is not a probability. V9 is a bounded decision gate; "
-            "the original label/execution model remains authoritative."
-        )
-        st.markdown('</div>', unsafe_allow_html=True)
-
-
-    if latest_row and latest_row.get("v10_version"):
-        st.markdown('<div class="terminal-card">', unsafe_allow_html=True)
-        st.markdown("### V10 Option-Centric Direction & Impulse")
-        c1,c2,c3,c4,c5 = st.columns(5)
-        c1.metric("Direction", str(latest_row.get("v10_direction","NEUTRAL")))
-        c2.metric("CE Evidence", f"{safe_float(latest_row.get('v10_ce_evidence'),50):.0f}")
-        c3.metric("PE Evidence", f"{safe_float(latest_row.get('v10_pe_evidence'),50):.0f}")
-        c4.metric("Evidence Velocity", f"{safe_float(latest_row.get('v10_evidence_velocity'),0):+.1f}")
-        c5.metric("Acceleration", f"{safe_float(latest_row.get('v10_evidence_acceleration'),0):+.1f}")
-        st.write(
-            f"**Phase:** `{latest_row.get('v10_phase','-')}`  |  "
-            f"**Impulse:** `{latest_row.get('v10_impulse','-')}`  |  "
-            f"**V:** `{latest_row.get('v10_velocity_state','-')}`  |  "
-            f"**A:** `{latest_row.get('v10_acceleration_state','-')}`"
-        )
-        st.caption(
-            f"Trend regime: `{latest_row.get('v10_trend_regime','-')}` Â· "
-            f"Volatility regime: `{latest_row.get('v10_volatility_regime','-')}` Â· "
-            f"Reversal: `{latest_row.get('v10_reversal_state','NONE')}`"
-        )
-        st.caption(
-            "CE/PE Evidence is a directional evidence balance, not a calibrated probability."
-        )
-        st.markdown('</div>', unsafe_allow_html=True)
+        st.markdown('<div class="terminal-card">',unsafe_allow_html=True)
+        st.markdown("### CE vs PE â€” CURRENT DATA / IDEAL RANGE")
+        st.caption("FUT = VWAP reference only Â· Spot = location/structure Â· CE/PE = option-premium decision data")
+        rows=[]
+        for side,p in (("CE","ce"),("PE","pe")):
+            rows.append({"Side":side,"Strike":safe_float(latest_row.get(f"{p}_option_strike"),np.nan),"Premium":safe_float(latest_row.get(f"{p}_option_ltp"),np.nan),"Premium RSI":safe_float(latest_row.get(f"{p}_option_rsi"),np.nan),"3B Slope":safe_float(latest_row.get(f"{p}_option_slope3"),np.nan),"Option VWAP/Proxy":safe_float(latest_row.get(f"{p}_option_vwap"),np.nan),"OI":safe_float(latest_row.get(f"{p}_option_oi"),np.nan),"OI Î”":safe_float(latest_row.get(f"{p}_option_oi_change"),np.nan),"IV":safe_float(latest_row.get(f"{p}_option_iv"),np.nan),"Support":safe_float(latest_row.get(f"{p}_option_support"),np.nan),"Resistance":safe_float(latest_row.get(f"{p}_option_resistance"),np.nan),"Delta":safe_float(latest_row.get(f"{p}_option_delta"),np.nan)})
+        st.dataframe(pd.DataFrame(rows),use_container_width=True,hide_index=True)
+        ideal=pd.DataFrame([
+            {"Metric":"Premium RSI","CE":"50â€“70","PE":"50â€“70"},
+            {"Metric":"Premium 3-bar slope","CE":"> 0","PE":"> 0"},
+            {"Metric":"Premium vs option VWAP","CE":"Above","PE":"Above"},
+            {"Metric":"Premium S/R","CE":"Above support + room to resistance","PE":"Above support + room to resistance"},
+            {"Metric":"Location event","CE":"Demand sweep + reclaim","PE":"Supply sweep + rejection"},
+            {"Metric":"Future usage","CE":"VWAP only","PE":"VWAP only"},
+        ])
+        st.dataframe(ideal,use_container_width=True,hide_index=True)
+        x1,x2,x3,x4=st.columns(4)
+        x1.metric("NIFTY SPOT",f"â‚¹{safe_float(latest_row.get('spot_c'),0):.2f}")
+        x2.metric("DEMAND",f"{safe_float(latest_row.get('demand_zone_low'),0):.2f}â€“{safe_float(latest_row.get('demand_zone_high'),0):.2f}")
+        x3.metric("FUT VWAP",f"â‚¹{safe_float(latest_row.get('fut_vwap'),0):.2f}")
+        x4.metric("SPOT RSI",f"{safe_float(latest_row.get('spot_rsi_14'),50):.1f}")
+        st.markdown('</div>',unsafe_allow_html=True)
+        with st.expander("Research / Audit Details",expanded=False):
+            st.write({"V9 CE":latest_row.get("v9_ce_score"),"V9 PE":latest_row.get("v9_pe_score"),"V10 CE":latest_row.get("v10_ce_evidence"),"V10 PE":latest_row.get("v10_pe_evidence"),"PCR local Â±5":latest_row.get("pcr_oi"),"Breadth":latest_row.get("breadth_10"),"SLP":latest_row.get("slp_top5_pressure"),"OBI":latest_row.get("order_book_imbalance")})
 
     if is_streaming:
         time.sleep(CONFIG["ui_refresh_sec"])
