@@ -923,7 +923,7 @@ class KotakMarketDataSource:
             totp=totp,
         )
 
-                if (
+        if (
             isinstance(
                 step1,
                 dict,
