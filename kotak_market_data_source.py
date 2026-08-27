@@ -792,28 +792,99 @@ class KotakMarketDataSource:
     # AUTHENTICATION
     # --------------------------------------------------------
 
-    def authenticate(
+        def authenticate(
         self,
+        totp_override: Optional[str] = None,
     ) -> bool:
+        """
+        Authenticate with Kotak Neo.
+
+        TOTP handling:
+            - Streamlit Secret is NOT required for the live test.
+            - A current 6-digit TOTP may be supplied through
+              totp_override.
+            - Other credentials continue to come from
+              kotak_credentials.py.
+
+        This prevents an expiring 6-digit OTP from being
+        stored as a permanent secret.
+        """
 
         if NeoAPI is None:
-
             raise RuntimeError(
                 "neo_api_client is not installed. "
                 "Install the official Kotak Neo API v2 package."
             )
 
-        missing = (
-            self.credentials
-            .missing_fields()
-        )
+        # ----------------------------------------------------
+        # Credentials other than TOTP
+        # ----------------------------------------------------
+
+        required = {
+            "KOTAK_CONSUMER_KEY": getattr(
+                self.credentials,
+                "consumer_key",
+                "",
+            ),
+            "KOTAK_MOBILE": getattr(
+                self.credentials,
+                "mobile",
+                "",
+            ),
+            "KOTAK_UCC": getattr(
+                self.credentials,
+                "ucc",
+                "",
+            ),
+            "KOTAK_MPIN": getattr(
+                self.credentials,
+                "mpin",
+                "",
+            ),
+        }
+
+        missing = [
+            name
+            for name, value in required.items()
+            if not str(value or "").strip()
+        ]
 
         if missing:
-
             raise RuntimeError(
                 "Missing Kotak credentials: "
                 + ", ".join(missing)
             )
+
+        # ----------------------------------------------------
+        # TOTP
+        # ----------------------------------------------------
+
+        totp = str(
+            totp_override
+            or getattr(
+                self.credentials,
+                "totp",
+                "",
+            )
+            or ""
+        ).strip()
+
+        if not totp:
+            raise RuntimeError(
+                "Current 6-digit KOTAK TOTP is required."
+            )
+
+        if (
+            not totp.isdigit()
+            or len(totp) != 6
+        ):
+            raise RuntimeError(
+                "KOTAK TOTP must be the current 6-digit code."
+            )
+
+        # ----------------------------------------------------
+        # Create Kotak client
+        # ----------------------------------------------------
 
         self.client = NeoAPI(
             environment=self.environment,
@@ -840,20 +911,18 @@ class KotakMarketDataSource:
             self.on_open
         )
 
-        totp = (
-            self.credentials.totp
-        )
+        # ----------------------------------------------------
+        # TOTP login
+        # ----------------------------------------------------
 
-        step1 = (
-            self.client.totp_login(
-                mobile_number=(
-                    self.credentials.mobile
-                ),
-                ucc=(
-                    self.credentials.ucc
-                ),
-                totp=totp,
-            )
+        step1 = self.client.totp_login(
+            mobile_number=(
+                self.credentials.mobile
+            ),
+            ucc=(
+                self.credentials.ucc
+            ),
+            totp=totp,
         )
 
         if (
@@ -863,16 +932,17 @@ class KotakMarketDataSource:
             )
             and step1.get("error")
         ):
-
             raise RuntimeError(
-                "Kotak TOTP login failed"
+                "Kotak TOTP login failed."
             )
 
-        step2 = (
-            self.client.totp_validate(
-                mpin=(
-                    self.credentials.mpin
-                )
+        # ----------------------------------------------------
+        # MPIN validation
+        # ----------------------------------------------------
+
+        step2 = self.client.totp_validate(
+            mpin=(
+                self.credentials.mpin
             )
         )
 
@@ -883,9 +953,8 @@ class KotakMarketDataSource:
             )
             and step2.get("error")
         ):
-
             raise RuntimeError(
-                "Kotak TOTP validation failed"
+                "Kotak MPIN validation failed."
             )
 
         with self._lock:
@@ -897,6 +966,8 @@ class KotakMarketDataSource:
             )
 
             self.last_error = ""
+
+        return True
 
         return True
 
