@@ -2928,6 +2928,21 @@ def inject_custom_css():
             .color-green { color: #34d399 !important; font-weight: bold; font-size: 1.25rem; }
             .color-red { color: #f87171 !important; font-weight: bold; font-size: 1.25rem; }
             .color-brown { color: #d97706 !important; font-weight: bold; font-size: 1.25rem; }
+            .option-compare-card { background:#101722; border:1px solid #2b3545; border-radius:10px; padding:16px 18px; margin:8px 0; }
+            .option-side-title { font-size:2rem; font-weight:800; letter-spacing:.02em; margin-bottom:10px; }
+            .option-side-ce { color:#34d399 !important; }
+            .option-side-pe { color:#f87171 !important; }
+            .option-score { font-size:1.15rem; font-weight:700; margin-bottom:12px; }
+            .option-row { display:flex; justify-content:space-between; gap:12px; padding:7px 0; border-bottom:1px solid #202938; font-size:.98rem; }
+            .option-row:last-child { border-bottom:0; }
+            .option-label { color:#aeb8c7; }
+            .option-value { font-weight:700; text-align:right; }
+            .option-support { color:#34d399 !important; }
+            .option-against { color:#f87171 !important; }
+            .option-neutral { color:#e5e7eb !important; }
+            .option-note { color:#94a3b8; font-size:.82rem; margin-top:8px; }
+            .option-section-title { font-size:1.35rem; font-weight:800; margin-bottom:2px; }
+            .option-section-subtitle { color:#94a3b8; font-size:.88rem; margin-bottom:10px; }
             .status-pill {
                 padding: 3px 8px;
                 border-radius: 12px;
@@ -4377,29 +4392,92 @@ def main():
                 st.caption("Feature extraction initializing...")
 
     if latest_row:
-        st.markdown('<div class="terminal-card">',unsafe_allow_html=True)
-        st.markdown("### CE vs PE â€” CURRENT DATA / IDEAL RANGE")
-        st.caption("FUT = VWAP reference only Â· Spot = location/structure Â· CE/PE = option-premium decision data")
-        rows=[]
-        for side,p in (("CE","ce"),("PE","pe")):
-            rows.append({"Side":side,"Strike":safe_float(latest_row.get(f"{p}_option_strike"),np.nan),"Premium":safe_float(latest_row.get(f"{p}_option_ltp"),np.nan),"Premium RSI":safe_float(latest_row.get(f"{p}_option_rsi"),np.nan),"3B Slope":safe_float(latest_row.get(f"{p}_option_slope3"),np.nan),"Option VWAP/Proxy":safe_float(latest_row.get(f"{p}_option_vwap"),np.nan),"OI":safe_float(latest_row.get(f"{p}_option_oi"),np.nan),"OI Î”":safe_float(latest_row.get(f"{p}_option_oi_change"),np.nan),"IV":safe_float(latest_row.get(f"{p}_option_iv"),np.nan),"Support":safe_float(latest_row.get(f"{p}_option_support"),np.nan),"Resistance":safe_float(latest_row.get(f"{p}_option_resistance"),np.nan),"Delta":safe_float(latest_row.get(f"{p}_option_delta"),np.nan)})
-        st.dataframe(pd.DataFrame(rows),use_container_width=True,hide_index=True)
-        ideal=pd.DataFrame([
-            {"Metric":"Premium RSI","CE":"50â€“70","PE":"50â€“70"},
-            {"Metric":"Premium 3-bar slope","CE":"> 0","PE":"> 0"},
-            {"Metric":"Premium vs option VWAP","CE":"Above","PE":"Above"},
-            {"Metric":"Premium S/R","CE":"Above support + room to resistance","PE":"Above support + room to resistance"},
-            {"Metric":"Location event","CE":"Demand sweep + reclaim","PE":"Supply sweep + rejection"},
-            {"Metric":"Future usage","CE":"VWAP only","PE":"VWAP only"},
-        ])
-        st.dataframe(ideal,use_container_width=True,hide_index=True)
-        x1,x2,x3,x4=st.columns(4)
-        x1.metric("NIFTY SPOT",f"â‚¹{safe_float(latest_row.get('spot_c'),0):.2f}")
-        x2.metric("DEMAND",f"{safe_float(latest_row.get('demand_zone_low'),0):.2f}â€“{safe_float(latest_row.get('demand_zone_high'),0):.2f}")
-        x3.metric("FUT VWAP",f"â‚¹{safe_float(latest_row.get('fut_vwap'),0):.2f}")
-        x4.metric("SPOT RSI",f"{safe_float(latest_row.get('spot_rsi_14'),50):.1f}")
-        st.markdown('</div>',unsafe_allow_html=True)
-        with st.expander("Research / Audit Details",expanded=False):
+        st.markdown('<div class="terminal-card">', unsafe_allow_html=True)
+        st.markdown('<div class="option-section-title">CE vs PE â€” Current Data</div>', unsafe_allow_html=True)
+        st.markdown('<div class="option-section-subtitle">Option-premium decision view Â· green = supporting Â· red = against</div>', unsafe_allow_html=True)
+
+        def _opt_num(key, default=np.nan):
+            return safe_float(latest_row.get(key), default)
+
+        def _fmt_num(x, digits=2):
+            return f"{x:.{digits}f}" if is_valid_number(x) else "â€”"
+
+        def _metric_class(ok, available=True):
+            if not available:
+                return "option-neutral"
+            return "option-support" if ok else "option-against"
+
+        def _side_card(side, prefix, score, opposite_score):
+            premium = _opt_num(f"{prefix}_option_ltp")
+            strike = _opt_num(f"{prefix}_option_strike")
+            rsi = _opt_num(f"{prefix}_option_rsi")
+            slope = _opt_num(f"{prefix}_option_slope3")
+            vwap = _opt_num(f"{prefix}_option_vwap")
+            oi = _opt_num(f"{prefix}_option_oi")
+            oi_ch = _opt_num(f"{prefix}_option_oi_change")
+            iv = _opt_num(f"{prefix}_option_iv")
+            support = _opt_num(f"{prefix}_option_support")
+            resistance = _opt_num(f"{prefix}_option_resistance")
+            delta = _opt_num(f"{prefix}_option_delta")
+
+            rsi_ok = is_valid_number(rsi) and 50.0 <= rsi <= 70.0
+            slope_ok = is_valid_number(slope) and slope > 0.0
+            vwap_ok = is_valid_number(premium) and is_valid_number(vwap) and premium > vwap
+            sr_available = is_valid_number(premium) and is_valid_number(support) and is_valid_number(resistance)
+            sr_ok = sr_available and premium > support and premium < resistance
+            score_ok = is_valid_number(score) and is_valid_number(opposite_score) and score > opposite_score
+
+            if side == "CE":
+                loc_ok = bool(latest_row.get("demand_liquidity_sweep", 0)) and bool(latest_row.get("demand_reclaim", 0))
+                loc_text = "Demand sweep + reclaim"
+            else:
+                loc_ok = bool(latest_row.get("supply_liquidity_sweep", 0)) and bool(latest_row.get("supply_rejection", 0))
+                loc_text = "Supply sweep + rejection"
+            loc_available = bool(latest_row.get("demand_liquidity_sweep", 0) or latest_row.get("demand_reclaim", 0) or latest_row.get("supply_liquidity_sweep", 0) or latest_row.get("supply_rejection", 0))
+
+            title_cls = "option-side-ce" if side == "CE" else "option-side-pe"
+            rows = []
+            def add(label, value, cls="option-neutral"):
+                rows.append(f'<div class="option-row"><span class="option-label">{label}</span><span class="option-value {cls}">{value}</span></div>')
+
+            add("Strike", _fmt_num(strike, 0))
+            add("Premium", f"â‚¹{_fmt_num(premium)}")
+            add("Premium RSI", _fmt_num(rsi), _metric_class(rsi_ok, is_valid_number(rsi)))
+            add("3-Bar Slope", _fmt_num(slope), _metric_class(slope_ok, is_valid_number(slope)))
+            add("Premium vs VWAP", ("ABOVE" if vwap_ok else "BELOW") if is_valid_number(premium) and is_valid_number(vwap) else "â€”", _metric_class(vwap_ok, is_valid_number(premium) and is_valid_number(vwap)))
+            if sr_available:
+                room = resistance - premium
+                add("Premium S/R", f"â‚¹{premium:.2f} Â· room â‚¹{room:.2f}", _metric_class(sr_ok, True))
+            else:
+                add("Premium S/R", "Unavailable", "option-neutral")
+            add("OI", f"{oi:,.0f}" if is_valid_number(oi) else "â€”")
+            add("OI Î”", f"{oi_ch:+,.0f}" if is_valid_number(oi_ch) else "â€”")
+            add("IV", _fmt_num(iv, 3))
+            add("Delta", _fmt_num(delta, 3))
+            add("Evidence", f"{score:.0f} vs {opposite_score:.0f}", _metric_class(score_ok, is_valid_number(score) and is_valid_number(opposite_score)))
+            if loc_available:
+                add("Location", loc_text if loc_ok else "Event not complete", _metric_class(loc_ok, True))
+
+            return (f'<div class="option-compare-card">'
+                    f'<div class="option-side-title {title_cls}">{side}</div>'
+                    f'<div class="option-score {title_cls}">Evidence: {score:.0f} Â· ' + ("LEADING" if score_ok else "NOT LEADING") + '</div>'
+                    + ''.join(rows) + '<div class="option-note">Green = supports this side Â· Red = works against this side</div></div>')
+
+        ce_score = _opt_num("v10_ce_evidence", _opt_num("v9_ce_score", 50.0))
+        pe_score = _opt_num("v10_pe_evidence", _opt_num("v9_pe_score", 50.0))
+        c1, c2 = st.columns(2)
+        with c1:
+            st.markdown(_side_card("CE", "ce", ce_score, pe_score), unsafe_allow_html=True)
+        with c2:
+            st.markdown(_side_card("PE", "pe", pe_score, ce_score), unsafe_allow_html=True)
+
+        x1, x2, x3, x4 = st.columns(4)
+        x1.metric("NIFTY SPOT", f"â‚¹{_opt_num('spot_c', 0.0):.2f}")
+        x2.metric("DEMAND", f"{_opt_num('demand_zone_low', 0.0):.2f}â€“{_opt_num('demand_zone_high', 0.0):.2f}")
+        x3.metric("FUT VWAP", f"â‚¹{_opt_num('fut_vwap', 0.0):.2f}")
+        x4.metric("SPOT RSI", f"{_opt_num('spot_rsi_14', 50.0):.1f}")
+        st.markdown('</div>', unsafe_allow_html=True)
+        with st.expander("Research / Audit Details", expanded=False):
             st.write({"V9 CE":latest_row.get("v9_ce_score"),"V9 PE":latest_row.get("v9_pe_score"),"V10 CE":latest_row.get("v10_ce_evidence"),"V10 PE":latest_row.get("v10_pe_evidence"),"PCR local Â±5":latest_row.get("pcr_oi"),"Breadth":latest_row.get("breadth_10"),"SLP":latest_row.get("slp_top5_pressure"),"OBI":latest_row.get("order_book_imbalance")})
 
     if is_streaming:
