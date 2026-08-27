@@ -3,7 +3,7 @@ Kotak Neo -> Market Data Hub
 ============================
 
 Version:
-    MDH_KOTAK_1.0.1
+    MDH_KOTAK_1.0.2
 
 Purpose:
     Independent raw market-data producer for the common
@@ -63,7 +63,7 @@ from kotak_credentials import (
 from market_data_hub import MarketDataHub
 
 
-VERSION = "1.0.1"
+VERSION = "1.0.2"
 
 KOTAK_ENVIRONMENT = "prod"
 
@@ -527,6 +527,9 @@ class KotakMarketDataSource:
 
         self.last_rejection_reason = ""
 
+        # Never store/print the actual mobile number.
+        self.mobile_format = "UNKNOWN"
+
         self.last_message_type = ""
 
         self.last_raw_keys: List[str] = []
@@ -815,6 +818,54 @@ class KotakMarketDataSource:
                 + ", ".join(missing)
             )
 
+        # ----------------------------------------------------
+        # MOBILE NUMBER NORMALIZATION
+        # ----------------------------------------------------
+        # Kotak expects the mobile number in international form.
+        # Existing credentials may contain:
+        #   9876543210
+        #   09876543210
+        #   919876543210
+        #   +919876543210
+        #
+        # Normalize all of these to:
+        #   +919876543210
+        #
+        # This keeps the existing Streamlit Secret unchanged.
+        raw_mobile = str(
+            getattr(
+                self.credentials,
+                "mobile",
+                "",
+            )
+            or ""
+        ).strip()
+
+        mobile_digits = "".join(
+            ch
+            for ch in raw_mobile
+            if ch.isdigit()
+        )
+
+        if mobile_digits.startswith("91") and len(mobile_digits) == 12:
+            kotak_mobile = "+" + mobile_digits
+
+        elif mobile_digits.startswith("0") and len(mobile_digits) == 11:
+            kotak_mobile = "+91" + mobile_digits[1:]
+
+        elif len(mobile_digits) == 10:
+            kotak_mobile = "+91" + mobile_digits
+
+        else:
+            raise RuntimeError(
+                "Invalid Kotak mobile number format. "
+                "Expected a 10-digit Indian mobile number "
+                "or an international +91 number."
+            )
+
+        with self._lock:
+            self.mobile_format = "+91XXXXXXXXXX"
+
         totp = str(
             totp_override
             or getattr(
@@ -850,7 +901,7 @@ class KotakMarketDataSource:
         # Keep the legacy callback API because this deployed
         # environment has already proven authentication works with it.
         step1 = self.client.totp_login(
-            mobile_number=self.credentials.mobile,
+            mobile_number=kotak_mobile,
             ucc=self.credentials.ucc,
             totp=totp,
         )
