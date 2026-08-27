@@ -10,10 +10,10 @@ Purpose
 A completely isolated stock-selection engine for:
 
 1. Market-close / day-ahead scan
-2. Selecting up to TOP 15 high-quality overnight candidates
+2. Selecting a FINAL TOP 15 overnight deep-dive basket
 3. Assigning directional bias (LONG / SHORT)
 4. Next morning 09:15-09:20 confirmation
-5. Producing FINAL 2 / FINAL 1 / NO TRADE
+5. Producing FINAL 2-5 / FINAL 1 / NO TRADE
 
 ARCHITECTURE
 ------------
@@ -100,7 +100,7 @@ DEPENDENCIES
 numpy
 pandas
 requests
-yfinance (historical data only; real market data, never synthetic)
+optional: yfinance (historical fallback only)
 optional: neo_api_client (preferred live/intraday)
 
 PUBLIC API
@@ -129,8 +129,6 @@ import threading
 import time
 import logging
 import random
-import sys
-from collections import defaultdict
 from functools import wraps
 from logging.handlers import RotatingFileHandler
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -197,17 +195,9 @@ MIN_AVG_VOLUME = 100_000
 DAY_AHEAD_MIN_SCORE = 68.0
 # No forced trade rule: fewer than 5 may be returned if quality gates fail.
 TOP15_COUNT = 15
-TOP5_COUNT = TOP15_COUNT  # legacy compatibility alias
-
-# Data-integrity policy: synthetic/mock/dummy market data is NEVER permitted.
-# Historical daily data may use Yahoo because Kotak Neo does not expose the
-# required historical depth in this engine; live/intraday confirmation is
-# Kotak Neo/shared raw only.
-ALLOW_SYNTHETIC_DATA = False
-REQUIRE_REAL_INTRADAY = True
-PREMARKET_CAPTURE_START = (9, 0)
-PREMARKET_CAPTURE_END = (9, 14)
-PREMARKET_MOOD_MIN_SCORE = 55.0
+FINAL_MAX_COUNT = 5
+FINAL_MIN_COUNT = 2
+TOP5_COUNT = FINAL_MAX_COUNT  # legacy alias
 
 # ----------------------------- Morning confirmation ------------------------
 
@@ -381,7 +371,7 @@ def validate_config() -> Dict[str, Any]:
             if NEXT_DAY_REQUIRE_KOTAK:
                 errors.append(message)
             else:
-                warnings.append(message + " (live Kotak unavailable; Yahoo/shared-raw fallback remains enabled)")
+                warnings.append(message + " (live Kotak disabled by fallback policy)")
     report = {"ok": not errors, "errors": errors, "warnings": warnings}
     if errors:
         for msg in errors:
@@ -1119,10 +1109,11 @@ def fetch_history(
                         )
 
                         if len(sub) >= MIN_HISTORY_DAYS:
-                            clean = sub.reset_index(drop=True)
-                            clean.attrs["source"] = "YFINANCE_REAL"
-                            clean.attrs["synthetic"] = False
-                            result[symbol] = clean
+                            result[symbol] = (
+                                sub.reset_index(
+                                    drop=True
+                                )
+                            )
 
                 except Exception:
                     continue
@@ -1177,8 +1168,7 @@ def fetch_history(
                         and len(df)
                         >= MIN_HISTORY_DAYS
                     ):
-                        df.attrs["source"] = "YAHOO_CHART_REAL"
-                        df.attrs["synthetic"] = False
+
                         result[symbol] = df
 
                 except Exception:
@@ -1292,46 +1282,6 @@ def structure_features(
     }
 
 
-def _wma(series: pd.Series, period: int) -> pd.Series:
-    """Weighted moving average used by the Hilega-Milega-style momentum layer."""
-    weights = np.arange(1, period + 1, dtype=float)
-    denom = float(weights.sum())
-    return series.rolling(period, min_periods=period).apply(
-        lambda values: float(np.dot(values, weights) / denom), raw=True
-    )
-
-
-def hilega_milega_features(close: pd.Series) -> Tuple[pd.Series, pd.Series, pd.Series, pd.Series]:
-    """
-    Hilega-Milega-style strength layer.
-
-    It is deliberately treated as a momentum/strength confirmation, not as an
-    independent trade trigger. Components: RSI(9), WMA(21), EMA(3), and EMA(3)
-    slope. This avoids giving multiple momentum indicators duplicate authority.
-    Returns RSI9, WMA21, EMA3, and signed score [-1, +1].
-    """
-    rsi9 = rsi(close, 9)
-    wma21 = _wma(close, 21)
-    ema3 = ema(close, 3)
-    slope3 = ema3.diff(2)
-
-    rsi_component = ((rsi9 - 50.0) / 25.0).clip(-1.0, 1.0)
-    spread_component = ((ema3 / wma21) - 1.0) * 25.0
-    spread_component = spread_component.clip(-1.0, 1.0)
-    slope_component = (slope3 / close.replace(0, np.nan) * 1000.0).clip(-1.0, 1.0)
-    signed = (0.45 * rsi_component + 0.40 * spread_component + 0.15 * slope_component).clip(-1.0, 1.0)
-    return rsi9, wma21, ema3, signed
-
-
-def hilega_milega_score(row: pd.Series, direction: str) -> float:
-    """Return 0-100 directional confirmation score."""
-    signed = safe_float(row.get("HilegaMilegaSigned", np.nan), np.nan)
-    if not np.isfinite(signed):
-        return 50.0
-    aligned = signed if direction == "LONG" else -signed
-    return clip(50.0 + 50.0 * aligned)
-
-
 def build_features(
     symbol: str,
     df: pd.DataFrame,
@@ -1420,14 +1370,6 @@ def build_features(
     ) = macd(
         d["Close"]
     )
-
-    # ---------------- Hilega-Milega-style momentum confirmation ----------------
-    (
-        d["HilegaMilegaRSI9"],
-        d["HilegaMilegaWMA21"],
-        d["HilegaMilegaEMA3"],
-        d["HilegaMilegaSigned"],
-    ) = hilega_milega_features(d["Close"])
 
     # ---------------- Volatility ----------------
 
@@ -1615,11 +1557,6 @@ def build_features(
         )
     )
 
-    hm_rsi9 = safe_float(last["HilegaMilegaRSI9"], np.nan)
-    hm_wma21 = safe_float(last["HilegaMilegaWMA21"], np.nan)
-    hm_ema3 = safe_float(last["HilegaMilegaEMA3"], np.nan)
-    hm_signed = safe_float(last["HilegaMilegaSigned"], np.nan)
-
     ema20_slope = slope(
         d["EMA20"].dropna(),
         5,
@@ -1700,6 +1637,8 @@ def build_features(
         .mean()
     )
 
+    average_volume_7 = d["Volume"].iloc[-8:-1].mean()
+
     latest_volume = safe_float(
         last["Volume"]
     )
@@ -1717,6 +1656,21 @@ def build_features(
         if average_volume_5 > 0
         else np.nan
     )
+
+    volume_ratio_7 = latest_volume / average_volume_7 if np.isfinite(average_volume_7) and average_volume_7 > 0 else np.nan
+    rolling20_volume = d["Volume"].rolling(20, min_periods=10).mean()
+    rv=d["Volume"].tail(7); rb=rolling20_volume.tail(7)
+    volume_shock_persistence7=float(((rv>1.20*rb)&rb.notna()).mean()) if len(rv) else 0.0
+    prior4=d["Volume"].iloc[-8:-4].mean(); recent3=d["Volume"].iloc[-4:-1].mean()
+    volume_acceleration7=recent3/prior4 if np.isfinite(prior4) and prior4>0 else np.nan
+    median_abs_ret20=d["Close"].pct_change().abs().tail(20).median()*100.0
+    abs_ret1d=abs(ret_1d) if np.isfinite(ret_1d) else 0.0
+    median_range20=d["RangePct"].tail(20).median()
+    range_ratio=safe_float(last["RangePct"],0.0)/max(float(median_range20) if np.isfinite(median_range20) else 0.05,0.05)
+    volume_price_reaction_score=clip(50.0+18.0*min(abs_ret1d/max(float(median_abs_ret20) if np.isfinite(median_abs_ret20) else 0.05,0.05),3.0)+8.0*min(max(range_ratio-1.0,0.0),2.0))
+    breakout_volume_alignment=50.0
+    if breakout_20_up or breakout_60_up or breakout_20_down or breakout_60_down:
+        breakout_volume_alignment=90.0 if np.isfinite(volume_ratio_7) and volume_ratio_7>=1.5 else 72.0
 
     # ---------------- Volatility regime ----------------
 
@@ -1764,7 +1718,6 @@ def build_features(
             and plus > minus
         ),
         int(st_dir > 0),
-        int(np.isfinite(hm_signed) and hm_signed > 0.10),
         int(
             structure["Structure"]
             == "LONG"
@@ -1802,7 +1755,6 @@ def build_features(
             and minus > plus
         ),
         int(st_dir < 0),
-        int(np.isfinite(hm_signed) and hm_signed < -0.10),
         int(
             structure["Structure"]
             == "SHORT"
@@ -1912,12 +1864,6 @@ def build_features(
         "MinusDI": minus,
 
         "SuperTrendDirection": st_dir,
-        "HilegaMilegaRSI9": hm_rsi9,
-        "HilegaMilegaWMA21": hm_wma21,
-        "HilegaMilegaEMA3": hm_ema3,
-        "HilegaMilegaSigned": hm_signed,
-        "HilegaMilegaDirection": ("LONG" if np.isfinite(hm_signed) and hm_signed > 0.10 else "SHORT" if np.isfinite(hm_signed) and hm_signed < -0.10 else "NEUTRAL"),
-        "HistoricalDataSource": str(df.attrs.get("source", "UNKNOWN_REAL_SOURCE")),
 
         **structure,
 
@@ -1928,6 +1874,11 @@ def build_features(
 
         "VolumeRatio20": volume_ratio_20,
         "VolumeRatio5": volume_ratio_5,
+        "VolumeRatio7": volume_ratio_7,
+        "VolumeShockPersistence7": volume_shock_persistence7,
+        "VolumeAcceleration7": volume_acceleration7,
+        "VolumePriceReactionScore": volume_price_reaction_score,
+        "BreakoutVolumeAlignment": breakout_volume_alignment,
 
         "LongVotes": sum(long_votes),
         "ShortVotes": sum(short_votes),
@@ -2547,63 +2498,18 @@ def sector_score(
     )
 
 
-def volume_score(
-    row: pd.Series,
-) -> float:
+def volume_shock_score(row: pd.Series) -> float:
+    """7-day Volume Shock Score: abnormality + persistence + price reaction + sector context."""
+    ratio7=safe_float(row.get("VolumeRatio7"),1.0); ratio20=safe_float(row.get("VolumeRatio20"),1.0)
+    persistence=safe_float(row.get("VolumeShockPersistence7"),0.0); accel=safe_float(row.get("VolumeAcceleration7"),1.0)
+    price_reaction=safe_float(row.get("VolumePriceReactionScore"),50.0); breakout=safe_float(row.get("BreakoutVolumeAlignment"),50.0); sector=safe_float(row.get("SectorScore"),50.0)
+    abnormality=clip(50.0+math.log(max(ratio7,0.05))*38.0); baseline=clip(50.0+math.log(max(ratio20,0.05))*28.0)
+    persistence_score=clip(persistence*100.0); acceleration_score=clip(50.0+math.log(max(accel,0.05))*32.0)
+    return clip(0.28*abnormality+0.16*baseline+0.18*persistence_score+0.12*acceleration_score+0.14*price_reaction+0.07*breakout+0.05*sector)
 
-    parts = []
-
-    ratio_20 = safe_float(
-        row.get(
-            "VolumeRatio20"
-        )
-    )
-
-    ratio_5 = safe_float(
-        row.get(
-            "VolumeRatio5"
-        )
-    )
-
-    if np.isfinite(
-        ratio_20
-    ):
-
-        parts.append(
-            clip(
-                50.0
-                + math.log(
-                    max(
-                        ratio_20,
-                        0.05,
-                    )
-                )
-                * 35.0
-            )
-        )
-
-    if np.isfinite(
-        ratio_5
-    ):
-
-        parts.append(
-            clip(
-                50.0
-                + math.log(
-                    max(
-                        ratio_5,
-                        0.05,
-                    )
-                )
-                * 30.0
-            )
-        )
-
-    return safe_mean(
-        parts,
-        50.0,
-    )
-
+def volume_score(row: pd.Series) -> float:
+    """Backward-compatible alias for Volume Shock Score."""
+    return volume_shock_score(row)
 
 def volatility_score(
     row: pd.Series,
@@ -2879,8 +2785,6 @@ def score_candidates(
             direction,
         )
 
-        hilega = hilega_milega_score(row, direction)
-
         relative = (
             relative_strength_score(
                 row,
@@ -2954,18 +2858,15 @@ def score_candidates(
                 - catalyst
             )
 
-        # Hilega-Milega is a momentum confirmation, so momentum is reduced
-        # slightly to avoid double-counting the same information.
         score = (
             trend * 0.20
-            + momentum * 0.12
-            + hilega * 0.05
+            + momentum * 0.15
             + relative * 0.20
             + sector * 0.10
             + volume * 0.10
             + volatility * 0.08
             + catalyst * 0.07
-            + setup * 0.08
+            + setup * 0.10
         )
 
         # Quality multiplier.
@@ -3047,7 +2948,6 @@ def score_candidates(
 
                 "TrendScore": trend,
                 "MomentumScore": momentum,
-                "HilegaMilegaScore": hilega,
                 "RelativeStrengthScore": relative,
                 "SectorScore": sector,
                 "VolumeScore": volume,
@@ -3871,44 +3771,17 @@ class KotakRawAdapter:
 
 
 _KOTAK_SINGLETON = None
-_KOTAK_LOGIN_ATTEMPTED = False
 
 
 def get_kotak_adapter() -> Optional[KotakRawAdapter]:
-    """Return the process-wide Kotak adapter without repeated failed logins.
-
-    Missing credentials are a normal fallback-mode condition.  The old
-    implementation retried a failed login every time a quote/circuit check was
-    requested, which could create dozens of identical log entries and needless
-    network/API attempts during one run.
-    """
-    global _KOTAK_SINGLETON, _KOTAK_LOGIN_ATTEMPTED
-
-    if _KOTAK_LOGIN_ATTEMPTED:
-        return _KOTAK_SINGLETON
-
-    _KOTAK_LOGIN_ATTEMPTED = True
-
-    required = ("KOTAK_CONSUMER_KEY", "KOTAK_MOBILE", "KOTAK_UCC", "KOTAK_TOTP", "KOTAK_MPIN")
-    missing = [key for key in required if not os.getenv(key, "").strip()]
-    if missing:
-        LOGGER.info(
-            "[NEXT-DAY KOTAK] unavailable in fallback mode; missing credentials: %s",
-            ", ".join(missing),
-        )
-        return None
-
-    try:
-        adapter = KotakRawAdapter()
-        if adapter.login():
-            _KOTAK_SINGLETON = adapter
-            LOGGER.info("[NEXT-DAY KOTAK] live adapter connected")
-        else:
-            LOGGER.warning("[NEXT-DAY KOTAK] login returned unsuccessful status; fallback remains active")
-    except Exception:
-        LOGGER.exception("[NEXT-DAY KOTAK] login unavailable; fallback remains active")
-        _KOTAK_SINGLETON = None
-
+    global _KOTAK_SINGLETON
+    if _KOTAK_SINGLETON is None:
+        _KOTAK_SINGLETON = KotakRawAdapter()
+        try:
+            _KOTAK_SINGLETON.login()
+        except Exception as exc:
+            LOGGER.exception("[NEXT-DAY KOTAK] login unavailable")
+            _KOTAK_SINGLETON = None
     return _KOTAK_SINGLETON
 
 
@@ -3921,31 +3794,6 @@ def capture_kotak_day_ahead_snapshot(symbols: List[str]) -> Dict[str, Dict[str, 
     except Exception as exc:
         LOGGER.exception("[NEXT-DAY KOTAK] snapshot failed")
         return {}
-
-
-def capture_kotak_premarket_snapshot(symbols: List[str]) -> Dict[str, Dict[str, Any]]:
-    """Capture a real Kotak quote during the Indian pre-open window when available."""
-    adapter = get_kotak_adapter()
-    if adapter is None or not adapter.connected:
-        LOGGER.warning("[PREMARKET] Kotak unavailable; pre-market mood cannot be inferred safely")
-        return {}
-    current = now_ist()
-    if current.hour < 9 or (current.hour == 9 and current.minute < 0):
-        return {}
-    if current.hour > 9 or (current.hour == 9 and current.minute > 14):
-        # Too late to call the current quote a pre-market observation.
-        return {}
-    out = {}
-    for symbol in symbols:
-        try:
-            row = adapter.quote(symbol)
-            if row:
-                row["raw_source"] = "KOTAK_NEO_PREMARKET_REAL"
-                out[symbol] = row
-                write_shared_raw(symbol, [row])
-        except Exception:
-            LOGGER.exception("[PREMARKET] quote failed for %s", symbol)
-    return out
 
 
 def capture_kotak_opening_window(symbols: List[str]) -> None:
@@ -3978,32 +3826,19 @@ def capture_kotak_opening_window(symbols: List[str]) -> None:
 # ============================================================================
 
 def fetch_intraday(symbol: str) -> Optional[pd.DataFrame]:
-    """
-    Live/morning intraday data is REAL-DATA ONLY.
-
-    Priority: Kotak Neo -> shared raw cache. There is deliberately NO Yahoo
-    1-minute fallback here because a delayed/alternate feed can invalidate the
-    Thesis -> Reality gate. If real Kotak/shared raw data is unavailable, the
-    candidate is marked DATA_NOT_READY / NO_TRADE instead of being fabricated.
-    """
+    """Kotak-first intraday source; Yahoo only as explicit fallback."""
     kotak = get_kotak_adapter()
     if kotak is not None and kotak.connected:
         try:
-            live = kotak.get_intraday_capture(symbol)
-            if live is not None and not live.empty:
-                live.attrs["source"] = "KOTAK_NEO_REAL"
-                live.attrs["synthetic"] = False
-                return live
-        except Exception as exc:
-            LOGGER.warning("[REAL-DATA] Kotak intraday failed for %s: %s", symbol, exc)
+            return kotak.get_intraday_capture(symbol)
+        except Exception:
+            pass
 
     shared = read_shared_raw_intraday(symbol)
     if shared is not None and not shared.empty:
-        shared.attrs["source"] = "SHARED_RAW_REAL"
-        shared.attrs["synthetic"] = False
         return shared
 
-    return None
+    return fetch_yahoo_chart(f"{symbol}.NS", days=1, interval="1m")
 
 
 def normalize_intraday(
@@ -4168,22 +4003,25 @@ def intraday_vwap(
 # ============================================================================
 
 def market_gap(ticker: str) -> float:
-    """Return a REAL current-session opening gap only; never substitute Yahoo."""
-    adapter = get_kotak_adapter()
-    if adapter is None or not adapter.connected:
-        LOGGER.warning("[REAL-DATA] market gap unavailable: Kotak Neo is not connected")
+    # For NIFTY opening gap, use Kotak raw quote when available.
+    if ticker == NIFTY_TICKER:
+        adapter = get_kotak_adapter()
+        if adapter is not None and adapter.connected:
+            q = adapter.quote("Nifty 50")
+            if q:
+                previous_close = safe_float(q.get("close"))
+                open_price = safe_float(q.get("open"))
+                if np.isfinite(previous_close) and previous_close != 0 and np.isfinite(open_price):
+                    return (open_price / previous_close - 1.0) * 100.0
+
+    df = fetch_yahoo_chart(ticker, days=5, interval="1d")
+    if df is None or len(df) < 2:
         return np.nan
-    try:
-        q = adapter.quote("Nifty 50" if ticker == NIFTY_TICKER else ticker)
-        if not q:
-            return np.nan
-        previous_close = safe_float(q.get("close"))
-        open_price = safe_float(q.get("open"))
-        if np.isfinite(previous_close) and previous_close != 0 and np.isfinite(open_price):
-            return (open_price / previous_close - 1.0) * 100.0
-    except Exception:
-        LOGGER.exception("[REAL-DATA] market gap quote failed for %s", ticker)
-    return np.nan
+    previous_close = safe_float(df["Close"].iloc[-2])
+    today_open = safe_float(df["Open"].iloc[-1])
+    if not np.isfinite(previous_close) or previous_close == 0 or not np.isfinite(today_open):
+        return np.nan
+    return (today_open / previous_close - 1.0) * 100.0
 
 
 def confirm_candidate(
@@ -4900,12 +4738,13 @@ def append_outcome(
 import contextlib
 
 V7_VERSION = "FINAL_V7_FULL_MTF_MACRO_RISK_AUDIT"
-V7_BASKET_SIZE = max(TOP15_COUNT, int(os.getenv("NEXT_DAY_V7_BASKET_SIZE", "30")))
-V7_MAX_STOCKS_PER_SECTOR = max(1, int(os.getenv("NEXT_DAY_V7_MAX_PER_SECTOR", "5")))
+V7_BASKET_SIZE = max(10, int(os.getenv("NEXT_DAY_V7_BASKET_SIZE", "30")))
+V7_MAX_STOCKS_PER_SECTOR = max(1, int(os.getenv("NEXT_DAY_V7_MAX_PER_SECTOR", "4")))
 V7_MTF_MIN_SCORE = float(os.getenv("NEXT_DAY_V7_MTF_MIN_SCORE", "62"))
 V7_MIN_RR = max(1.0, float(os.getenv("NEXT_DAY_V7_MIN_RR", "1.5")))
 V7_RR_TARGET_MULT = max(1.5, float(os.getenv("NEXT_DAY_V7_RR_TARGET_MULT", "2.0")))
 V7_MAX_INVALIDATION_DISTANCE_ATR = max(0.25, float(os.getenv("NEXT_DAY_V7_MAX_INVALIDATION_DISTANCE_ATR", "2.5")))
+V7_MIN_INVALIDATION_DISTANCE_ATR = max(0.05, float(os.getenv("NEXT_DAY_V7_MIN_INVALIDATION_DISTANCE_ATR", "0.25")))
 V7_MTF_THREADS = max(2, int(os.getenv("NEXT_DAY_V7_MTF_THREADS", "6")))
 V7_VIX_CAUTION = float(os.getenv("NEXT_DAY_V7_VIX_CAUTION", "18"))
 V7_VIX_HIGH = float(os.getenv("NEXT_DAY_V7_VIX_HIGH", "20"))
@@ -4916,10 +4755,6 @@ V7_AUDIT_FILE = ROOT / "audit_summary.json"
 V7_MTF_CACHE_DIR = ROOT / "mtf_cache"
 V7_MTF_CACHE_DIR.mkdir(parents=True, exist_ok=True)
 V7_LOCK_FILE = SHARED_RAW_CACHE_DIR / ".shared_raw.lock"
-V7_SCANNER_LEARNING_FILE = ROOT / "scanner_learning.jsonl"
-V7_SCANNER_PRIOR_ALPHA = 10.0
-V7_SCANNER_PRIOR_BETA = 10.0
-V7_SCANNER_HIGH_CONF_N = 100.0
 
 # Extra raw fields only. These are still raw quote values; no calculated field
 # from either engine is allowed across the isolation boundary.
@@ -5056,8 +4891,19 @@ def _v7_mw_pattern(df: pd.DataFrame) -> Tuple[str, float]:
     return "NONE", 0.0
 
 
+def _v7_indicator_snapshot(frame: pd.DataFrame) -> Dict[str, Any]:
+    if frame is None or frame.empty or len(frame)<25: return {}
+    x=frame.copy()
+    for c in ("Open","High","Low","Close","Volume"):
+        if c not in x.columns: x[c]=np.nan
+        x[c]=pd.to_numeric(x[c],errors="coerce")
+    close=x["Close"]; e9,e20,e50,e200=(ema(close,p) for p in (9,20,50,200)); r9=rsi(close,9); r14=rsi(close,14); _,_,mh=macd(close)
+    adxv,plusdi,minusdi=adx(x,14); st=supertrend_direction(x,10,3.0); av=atr(x,14); ltp=safe_float(close.iloc[-1]); vol20=x["Volume"].tail(20).mean(); lv=safe_float(x["Volume"].iloc[-1]); avv=safe_float(av.iloc[-1])
+    return {"close":ltp,"ema9":safe_float(e9.iloc[-1]),"ema20":safe_float(e20.iloc[-1]),"ema50":safe_float(e50.iloc[-1]),"ema200":safe_float(e200.iloc[-1]),"rsi9":safe_float(r9.iloc[-1]),"rsi14":safe_float(r14.iloc[-1]),"macd_hist":safe_float(mh.iloc[-1]),"adx14":safe_float(adxv.iloc[-1]),"plus_di":safe_float(plusdi.iloc[-1]),"minus_di":safe_float(minusdi.iloc[-1]),"supertrend":int(safe_float(st.iloc[-1],0)),"atr_pct":avv/ltp*100.0 if np.isfinite(avv) and ltp>0 else np.nan,"volume_ratio20":lv/vol20 if np.isfinite(vol20) and vol20>0 else np.nan}
+
+
 def _v7_mtf_fetch(symbol: str) -> Dict[str, Any]:
-    """Fetch expensive MTF data only for the 30-stock bet basket."""
+    """Fetch expensive MTF data only for the 30-stock deep basket: 1M/W/D/4H/1H/15M."""
     ticker = f"{symbol}.NS"
     result: Dict[str, Any] = {"symbol": symbol}
     try:
@@ -5066,10 +4912,12 @@ def _v7_mtf_fetch(symbol: str) -> Dict[str, Any]:
         mins15 = fetch_yahoo_chart(ticker, days=55, interval="15m")
         if daily is not None and not daily.empty:
             weekly = _v7_resample_ohlc(daily, "W-FRI")
+            monthly = _v7_resample_ohlc(daily, "ME")
         else:
             weekly = pd.DataFrame()
+            monthly = pd.DataFrame()
         four_h = _v7_resample_ohlc(hourly, "4h") if hourly is not None else pd.DataFrame()
-        frames = {"W": weekly, "D": daily, "4H": four_h, "1H": hourly, "15M": mins15}
+        frames = {"1M": monthly, "W": weekly, "D": daily, "4H": four_h, "1H": hourly, "15M": mins15}
         levels = {}
         score_parts = []
         for name, frame in frames.items():
@@ -5077,6 +4925,7 @@ def _v7_mtf_fetch(symbol: str) -> Dict[str, Any]:
             pat, pat_score = _v7_mw_pattern(frame)
             lv["pattern"] = pat
             lv["pattern_score"] = pat_score
+            lv["indicators"] = _v7_indicator_snapshot(frame)
             levels[name] = lv
             if pat == "M_TOP": score_parts.append(25.0)
             elif pat == "W_BOTTOM": score_parts.append(75.0)
@@ -5097,45 +4946,122 @@ def _v7_directional_mtf(row: pd.Series, mtf: Dict[str, Any]) -> Dict[str, Any]:
     if not np.isfinite(av) or av <= 0:
         atrpct = safe_float(row.get("ATRpct"), np.nan)
         av = price * atrpct / 100.0 if np.isfinite(price) and np.isfinite(atrpct) else np.nan
+
     support_candidates, resistance_candidates = [], []
     pattern_conflicts, pattern_supports = 0, 0
+
     for tf, lv in mtf.items():
-        s = safe_float(lv.get("support")); r = safe_float(lv.get("resistance"))
-        if np.isfinite(s) and np.isfinite(price) and s < price: support_candidates.append(s)
-        if np.isfinite(r) and np.isfinite(price) and r > price: resistance_candidates.append(r)
+        s = safe_float(lv.get("support"))
+        r = safe_float(lv.get("resistance"))
+        if np.isfinite(s) and np.isfinite(price) and s < price:
+            support_candidates.append(s)
+        if np.isfinite(r) and np.isfinite(price) and r > price:
+            resistance_candidates.append(r)
+
         p = lv.get("pattern")
         if direction == "LONG":
-            if p == "M_TOP": pattern_conflicts += 1
-            elif p == "W_BOTTOM": pattern_supports += 1
+            if p == "M_TOP":
+                pattern_conflicts += 1
+            elif p == "W_BOTTOM":
+                pattern_supports += 1
         elif direction == "SHORT":
-            if p == "W_BOTTOM": pattern_conflicts += 1
-            elif p == "M_TOP": pattern_supports += 1
-    support = max(support_candidates) if support_candidates else np.nan
-    resistance = min(resistance_candidates) if resistance_candidates else np.nan
+            if p == "W_BOTTOM":
+                pattern_conflicts += 1
+            elif p == "M_TOP":
+                pattern_supports += 1
+        ind=lv.get("indicators",{})
+        if ind:
+            checks=[ind.get("close",np.nan)>ind.get("ema20",np.nan),ind.get("ema20",np.nan)>ind.get("ema50",np.nan),ind.get("rsi9",np.nan)>50,ind.get("adx14",np.nan)>=20 and ind.get("plus_di",0)>ind.get("minus_di",0),ind.get("supertrend",0)>0,ind.get("volume_ratio20",np.nan)>=1.0]
+            if direction=="SHORT": checks=[not c for c in checks]
+            valid=[c for c in checks if isinstance(c,(bool,np.bool_))]
+            if valid:
+                frac=sum(valid)/len(valid); pattern_supports+=int(frac>=0.67); pattern_conflicts+=int(frac<=0.33)
+
+    structural_support = max(support_candidates) if support_candidates else np.nan
+    structural_resistance = min(resistance_candidates) if resistance_candidates else np.nan
+
+    min_risk = (
+        V7_MIN_INVALIDATION_DISTANCE_ATR * av
+        if np.isfinite(av) and av > 0 else np.nan
+    )
+
     if direction == "LONG":
-        invalidation = support if np.isfinite(support) else (price - av if np.isfinite(price) and np.isfinite(av) else np.nan)
-        risk = price - invalidation if np.isfinite(price) and np.isfinite(invalidation) else np.nan
-        target = resistance if np.isfinite(resistance) else (price + V7_RR_TARGET_MULT * av if np.isfinite(price) and np.isfinite(av) else np.nan)
+        structural_risk = (
+            price - structural_support
+            if np.isfinite(price) and np.isfinite(structural_support) else np.nan
+        )
+        if np.isfinite(structural_risk) and np.isfinite(min_risk) and structural_risk >= min_risk:
+            invalidation = structural_support
+            invalidation_source = "STRUCTURAL_SR"
+            risk = structural_risk
+        elif np.isfinite(price) and np.isfinite(min_risk):
+            invalidation = price - min_risk
+            invalidation_source = "ATR_FLOOR"
+            risk = min_risk
+        else:
+            invalidation = structural_support
+            invalidation_source = "STRUCTURAL_SR"
+            risk = structural_risk
+
+        target = (
+            structural_resistance
+            if np.isfinite(structural_resistance)
+            else (price + V7_RR_TARGET_MULT * av if np.isfinite(price) and np.isfinite(av) else np.nan)
+        )
         reward = target - price if np.isfinite(target) and np.isfinite(price) else np.nan
+
     else:
-        invalidation = resistance if np.isfinite(resistance) else (price + av if np.isfinite(price) and np.isfinite(av) else np.nan)
-        risk = invalidation - price if np.isfinite(price) and np.isfinite(invalidation) else np.nan
-        target = support if np.isfinite(support) else (price - V7_RR_TARGET_MULT * av if np.isfinite(price) and np.isfinite(av) else np.nan)
+        structural_risk = (
+            structural_resistance - price
+            if np.isfinite(price) and np.isfinite(structural_resistance) else np.nan
+        )
+        if np.isfinite(structural_risk) and np.isfinite(min_risk) and structural_risk >= min_risk:
+            invalidation = structural_resistance
+            invalidation_source = "STRUCTURAL_SR"
+            risk = structural_risk
+        elif np.isfinite(price) and np.isfinite(min_risk):
+            invalidation = price + min_risk
+            invalidation_source = "ATR_FLOOR"
+            risk = min_risk
+        else:
+            invalidation = structural_resistance
+            invalidation_source = "STRUCTURAL_SR"
+            risk = structural_risk
+
+        target = (
+            structural_support
+            if np.isfinite(structural_support)
+            else (price - V7_RR_TARGET_MULT * av if np.isfinite(price) and np.isfinite(av) else np.nan)
+        )
         reward = price - target if np.isfinite(target) and np.isfinite(price) else np.nan
+
     rr = reward / risk if np.isfinite(reward) and np.isfinite(risk) and risk > 0 else np.nan
     invalidation_atr = risk / av if np.isfinite(risk) and np.isfinite(av) and av > 0 else np.nan
+
     mtf_score = 50.0 + pattern_supports * 6.0 - pattern_conflicts * 9.0
     for tf in ("W", "D", "4H", "1H", "15M"):
         lv = mtf.get(tf, {})
         if direction == "LONG" and np.isfinite(price) and np.isfinite(lv.get("support", np.nan)) and np.isfinite(lv.get("resistance", np.nan)):
-            if price > lv["support"]: mtf_score += 2.0
+            if price > lv["support"]:
+                mtf_score += 2.0
         if direction == "SHORT" and np.isfinite(price) and np.isfinite(lv.get("resistance", np.nan)) and np.isfinite(lv.get("support", np.nan)):
-            if price < lv["resistance"]: mtf_score += 2.0
+            if price < lv["resistance"]:
+                mtf_score += 2.0
+
+    hard_rr_pass = bool(
+        np.isfinite(rr)
+        and rr >= V7_MIN_RR
+        and np.isfinite(invalidation_atr)
+        and invalidation_atr <= V7_MAX_INVALIDATION_DISTANCE_ATR
+        and invalidation_atr >= V7_MIN_INVALIDATION_DISTANCE_ATR
+    )
+
     return {
         "mtf_score": clip(mtf_score),
-        "support": support,
-        "resistance": resistance,
+        "support": structural_support,
+        "resistance": structural_resistance,
         "invalidation": invalidation,
+        "invalidation_source": invalidation_source,
         "target": target,
         "risk_points": risk,
         "reward_points": reward,
@@ -5143,7 +5069,7 @@ def _v7_directional_mtf(row: pd.Series, mtf: Dict[str, Any]) -> Dict[str, Any]:
         "invalidation_atr": invalidation_atr,
         "pattern_conflicts": pattern_conflicts,
         "pattern_supports": pattern_supports,
-        "hard_rr_pass": bool(np.isfinite(rr) and rr >= V7_MIN_RR and np.isfinite(invalidation_atr) and invalidation_atr <= V7_MAX_INVALIDATION_DISTANCE_ATR),
+        "hard_rr_pass": hard_rr_pass,
     }
 
 
@@ -5226,50 +5152,23 @@ def _v7_enrich_basket(basket: pd.DataFrame) -> pd.DataFrame:
 
 
 def _v7_select_final15(enriched: pd.DataFrame) -> pd.DataFrame:
-    """Select the TOP-15 overnight opportunity pool.
+    if enriched.empty: return enriched
+    x=enriched[enriched["Direction"].isin(["LONG","SHORT"])].copy(); x=x[x["hard_rr_pass"]==True].copy()
+    if x.empty: return x
+    selected=[]; sector_count={}; used=set()
+    for _,row in x.sort_values("V7Score",ascending=False).iterrows():
+        sec=str(row.get("SectorBucket","UNKNOWN"))
+        if sector_count.get(sec,0)>=2: continue
+        selected.append(row); used.add(str(row["Symbol"])); sector_count[sec]=sector_count.get(sec,0)+1
+        if len(selected)>=TOP15_COUNT: break
+    if len(selected)<TOP15_COUNT:
+        for _,row in x.sort_values("V7Score",ascending=False).iterrows():
+            if str(row["Symbol"]) in used: continue
+            selected.append(row); used.add(str(row["Symbol"]))
+            if len(selected)>=TOP15_COUNT: break
+    return pd.DataFrame(selected).reset_index(drop=True).head(TOP15_COUNT)
 
-    Same-sector names are allowed. Diversification is a soft preference,
-    not a hard exclusion, because the next morning performs the actual
-    market/sector/stock confirmation and can legitimately retain 2-3
-    exceptional names from one sector.
-    """
-    if enriched.empty:
-        return enriched
-    x = enriched.copy()
-    x = x[x["Direction"].isin(["LONG", "SHORT"])].copy()
-    x = x[x["hard_rr_pass"] == True].copy()
-    if x.empty:
-        return x
-
-    x["NightSelectionScore"] = pd.to_numeric(
-        x["V7Score"], errors="coerce"
-    ).fillna(0.0)
-
-    selected, sector_count = [], {}
-    remaining = x.sort_values("NightSelectionScore", ascending=False).copy()
-
-    while not remaining.empty and len(selected) < TOP15_COUNT:
-        best_idx, best_adjusted = None, -np.inf
-        for idx, row in remaining.iterrows():
-            sector = str(row.get("SectorBucket", "UNKNOWN"))
-            count = sector_count.get(sector, 0)
-            # Small soft penalty only; never hard-reject a strong sector cluster.
-            adjusted = safe_float(row.get("NightSelectionScore"), 0.0) - min(9.0, 3.0 * count)
-            if adjusted > best_adjusted:
-                best_adjusted, best_idx = adjusted, idx
-        if best_idx is None:
-            break
-        row = remaining.loc[best_idx].copy()
-        row["SelectionScore"] = round(float(best_adjusted), 4)
-        sector = str(row.get("SectorBucket", "UNKNOWN"))
-        selected.append(row)
-        sector_count[sector] = sector_count.get(sector, 0) + 1
-        remaining = remaining.drop(index=best_idx)
-
-    return pd.DataFrame(selected).reset_index(drop=True)
-
-# Legacy helper name retained so older UI/tests do not break.
-_v7_select_final5 = _v7_select_final15
+_v7_select_final5=_v7_select_final15
 
 
 def _v7_risk_profile(row: Dict[str, Any], vix: Dict[str, Any]) -> Dict[str, Any]:
@@ -5295,6 +5194,7 @@ def _v7_risk_profile(row: Dict[str, Any], vix: Dict[str, Any]) -> Dict[str, Any]
         "rr": round(rr, 3) if np.isfinite(rr) else None,
         "risk_multiplier": vix.get("risk_multiplier", 1.0),
         "distance_to_invalidation_atr": row.get("invalidation_atr"),
+            "invalidation_source": row.get("invalidation_source", "UNKNOWN"),
     }
 
 
@@ -5369,259 +5269,43 @@ def _v7_audit() -> Dict[str, Any]:
     return result
 
 
-
-# ============================================================================
-# ORTHOGONAL MATHEMATICAL SCANNER LIBRARY + COLD-START LEARNING
-# ============================================================================
-# Existing V7 scoring/MTF/VIX/R:R/sector gates remain the backbone. This layer
-# adds independent, hypothesis-driven evidence. It starts with a conservative
-# prior and learns only from next-day outcomes generated from this engine's own
-# raw data. It never reads NIFTY 3-Min calculated state.
-
-def _nd8_clip(x):
-    try: return float(np.clip(float(x), -1.0, 1.0))
-    except Exception: return 0.0
-
-def _nd8_sig(x, scale=1.0):
-    try: return float(np.tanh(float(x)/max(scale,1e-9)))
-    except Exception: return 0.0
-
-def _nd8_scan_from_row(row: Dict[str, Any]) -> List[Tuple[str,str,float]]:
-    def v(k, default=50.0): return safe_float(row.get(k,default),default)
-    T=_nd8_clip((v("TrendScore")-50)/50); M=_nd8_clip((v("MomentumScore")-50)/50)
-    R=_nd8_clip((v("RelativeStrengthScore")-50)/50); S=_nd8_clip((v("SectorScore")-50)/50)
-    V=_nd8_clip((v("VolumeScore")-50)/50); VV=_nd8_clip((v("VolatilityScore")-50)/50)
-    C=_nd8_clip((v("CatalystScoreFinal")-50)/50); A=_nd8_clip(2*(v("mtf_score",50)/100)-1)
-    Q=_nd8_clip(2*(v("rr",0)/max(V7_RR_TARGET_MULT,1e-9))-1)
-    d=1 if str(row.get("Direction","LONG")).upper()=="LONG" else -1
-    # Scores are directional by construction; SHORT uses the negative of the
-    # same evidence orientation, so the decision layer remains symmetric.
-    return [
-      ("TREND_RIDER","TREND",d*_nd8_clip(.45*T+.35*A+.20*S)),
-      ("TREND_ACCELERATION","TREND",d*_nd8_clip(.55*T+.25*M+.20*A)),
-      ("TREND_PERSISTENCE","TREND",d*_nd8_clip(.50*T+.30*A+.20*R)),
-      ("TREND_SECTOR_ALIGNMENT","TREND",d*_nd8_clip(.50*T+.30*S+.20*R)),
-      ("MOMENTUM_SURGE","MOMENTUM",d*_nd8_clip(.55*M+.25*V+.20*A)),
-      ("MOMENTUM_CONFIRMATION","MOMENTUM",d*_nd8_clip(.45*M+.35*R+.20*T)),
-      ("MOMENTUM_VOLUME_EXPANSION","MOMENTUM",d*_nd8_clip(.55*M+.45*V)),
-      ("MOMENTUM_EXHAUSTION","MOMENTUM",d*_nd8_clip(-.60*M-.25*T+.15*VV)),
-      ("RELATIVE_STRENGTH_LEADER","RELATIVE_STRENGTH",d*_nd8_clip(.65*R+.20*S+.15*T)),
-      ("RELATIVE_STRENGTH_BREAK","RELATIVE_STRENGTH",d*_nd8_clip(.45*R+.35*M+.20*V)),
-      ("RELATIVE_STRENGTH_DIVERGENCE","RELATIVE_STRENGTH",d*_nd8_clip(.60*R-.40*T)),
-      ("SECTOR_LEADERSHIP","SECTOR",d*_nd8_clip(.65*S+.20*R+.15*T)),
-      ("SECTOR_MOMENTUM","SECTOR",d*_nd8_clip(.55*S+.45*M)),
-      ("SECTOR_CONFIRMATION","SECTOR",d*_nd8_clip(.50*S+.30*A+.20*R)),
-      ("VOLUME_PARTICIPATION","FLOW",d*_nd8_clip(.65*V+.35*M)),
-      ("VOLUME_BREAKOUT","FLOW",d*_nd8_clip(.50*V+.30*M+.20*T)),
-      ("ACCUMULATION_PROXY","FLOW",d*_nd8_clip(.35*T+.30*V+.20*R+.15*S)),
-      ("DISTRIBUTION_PROXY","FLOW",d*_nd8_clip(-.35*T-.30*V-.20*R-.15*S)),
-      ("VOLATILITY_EXPANSION","VOLATILITY",d*_nd8_clip(.55*VV+.30*M+.15*V)),
-      ("VOLATILITY_COMPRESSION","VOLATILITY",d*_nd8_clip(-.55*VV+.30*T-.15*V)),
-      ("VOLATILITY_TREND_ALIGNMENT","VOLATILITY",d*_nd8_clip(.50*VV+.30*T+.20*M)),
-      ("MTF_ALIGNMENT","LOCATION",d*_nd8_clip(.70*A+.20*T+.10*S)),
-      ("MTF_PULLBACK_CONTINUATION","LOCATION",d*_nd8_clip(.45*A+.35*T-.20*M)),
-      ("STRUCTURAL_BREAKOUT","BREAKOUT",d*_nd8_clip(.40*T+.25*M+.20*V+.15*A)),
-      ("BREAKOUT_BLITZ","BREAKOUT",d*_nd8_clip(.35*T+.30*M+.20*V+.15*R)),
-      ("FAILED_BREAKOUT","BREAKOUT",d*_nd8_clip(-.45*T-.30*M+.15*VV-.10*V)),
-      ("BREAKOUT_SECTOR_CONFIRM","BREAKOUT",d*_nd8_clip(.35*T+.25*M+.25*S+.15*V)),
-      ("BREAKOUT_RELATIVE_STRENGTH","BREAKOUT",d*_nd8_clip(.40*T+.35*R+.25*M)),
-      ("CATALYST_ALIGNMENT","CATALYST",d*_nd8_clip(.55*C+.25*T+.20*S)),
-      ("CATALYST_MOMENTUM","CATALYST",d*_nd8_clip(.50*C+.30*M+.20*V)),
-      ("CATALYST_CONTRADICTION","CATALYST",d*_nd8_clip(-.55*C+.30*T+.15*R)),
-      ("RISK_REWARD_QUALITY","RISK",d*_nd8_clip(.70*Q+.20*T+.10*M)),
-      ("STRUCTURAL_RISK_CONFIRM","RISK",d*_nd8_clip(.55*Q+.25*A+.20*S)),
-      ("TREND_MOMENTUM_COMBO","STRATEGY",d*_nd8_clip(.45*T+.35*M+.20*A)),
-      ("BREAKOUT_MOMENTUM_COMBO","STRATEGY",d*_nd8_clip(.35*T+.30*M+.20*V+.15*A)),
-      ("MEAN_REVERSION_SETUP","STRATEGY",d*_nd8_clip(-.55*T-.25*M+.20*VV)),
-      ("REVERSAL_RISK","STRATEGY",d*_nd8_clip(-.50*T-.25*A-.25*M)),
-      ("TREND_INVERTER","STRATEGY",d*_nd8_clip(-.50*T-.30*M+.20*VV)),
-      ("DECAY_ENVIRONMENT","STRATEGY",d*_nd8_clip(-.35*M-.25*VV+.25*Q-.15*V)),
-      ("INSTITUTIONAL_ALIGNMENT","STRATEGY",d*_nd8_clip(.25*T+.20*M+.20*R+.20*S+.15*V)),
-      ("QUALITY_CONFLUENCE","STRATEGY",d*_nd8_clip(.20*T+.15*M+.15*R+.15*S+.15*V+.10*A+.10*Q)),
-      ("TREND_WITH_RISK_FILTER","STRATEGY",d*_nd8_clip(.45*T+.25*M+.30*Q)),
-      ("SECTOR_RELATIVE_COMBO","STRATEGY",d*_nd8_clip(.45*S+.35*R+.20*M)),
-      ("PARTICIPATION_BREAKOUT","STRATEGY",d*_nd8_clip(.45*V+.30*M+.25*T)),
-      ("DEFENSIVE_SHORT_SETUP","STRATEGY",d*_nd8_clip(-.45*T-.30*M-.25*R)),
-      ("HIGH_CONVICTION_ALIGNMENT","STRATEGY",d*_nd8_clip(.40*T+.20*M+.15*R+.10*S+.15*Q)),
-      ("CROWDING_EXHAUSTION","STRATEGY",d*_nd8_clip(.45*T-.35*M+.20*VV)),
-      ("RANGE_TO_TREND_TRANSITION","STRATEGY",d*_nd8_clip(.35*T+.25*M+.20*V+.20*VV)),
-      ("RISK_ADJUSTED_LEADERSHIP","STRATEGY",d*_nd8_clip(.35*R+.30*T+.20*S+.15*Q)),
-    ]
-
-def _nd8_load_learning() -> Dict[str, Dict[str,float]]:
-    """Load only resolved scanner outcomes; malformed rows fail closed.
-
-    Control/ledger records such as ``__PENDING__`` are deliberately excluded
-    from scanner statistics so they cannot distort the cold-start prior.
-    """
-    out=defaultdict(lambda:{"n":0.0,"wins":0.0})
-    if not V7_SCANNER_LEARNING_FILE.exists():
-        return out
-
+def _v7_bse_scrip_code(symbol: str) -> Optional[str]:
     try:
-        with V7_SCANNER_LEARNING_FILE.open("r", encoding="utf-8") as fh:
-            for line_no, line in enumerate(fh, start=1):
-                if not line.strip():
-                    continue
-                try:
-                    r=json.loads(line)
-                except Exception as exc:
-                    LOGGER.warning("scanner learning malformed row %d: %s", line_no, exc)
-                    continue
-                key=str(r.get("scanner_id","")).strip()
-                if not key or key == "__PENDING__" or r.get("pending"):
-                    continue
-                # Only resolved outcome rows contribute to learning.
-                if "win" not in r:
-                    continue
-                out[key]["n"] += 1.0
-                out[key]["wins"] += int(bool(r.get("win",False)))
+        import re
+        r=_requests_get("https://api.bseindia.com/BseIndiaAPI/api/PeerSmartSearch/w",params={"Type":"SS","text":symbol},headers={"User-Agent":"Mozilla/5.0","Accept":"text/html,application/xhtml+xml","Referer":"https://www.bseindia.com/"},timeout=10)
+        m=re.search(r"(\d{6})",r.text or ""); return m.group(1) if m else None
+    except Exception: return None
+
+def fetch_bse_corporate_events(symbol: str, lookback_hours: int = NEWS_LOOKBACK_HOURS) -> List[Dict[str, Any]]:
+    try:
+        code=_v7_bse_scrip_code(symbol)
+        if not code: return []
+        end=now_ist(); start=end-timedelta(hours=lookback_hours)
+        params={"pageno":1,"strCat":"-1","subcategory":"-1","strPrevDate":start.strftime("%Y%m%d"),"strToDate":end.strftime("%Y%m%d"),"strSearch":"P","strscrip":code,"strType":"C"}
+        r=_requests_get("https://api.bseindia.com/BseIndiaAPI/api/AnnSubCategoryGetData/w",params=params,headers={"User-Agent":"Mozilla/5.0","Accept":"application/json,text/plain,*/*","Referer":"https://www.bseindia.com/corporates/ann.html"},timeout=15)
+        payload=r.json(); rows=payload.get("Table",[]) if isinstance(payload,dict) else []; out=[]
+        for row in rows or []:
+            if not isinstance(row,dict): continue
+            text=" ".join(str(row.get(k,"")) for k in ("HEADLINE","SUBJECT","NEWS_SUB","DETAILS","DESCRIPTION","NEWSSUB")); direction,strength=_trusted_event_direction(text)
+            out.append({"source":"BSE","source_type":"exchange_filing","symbol":symbol.upper(),"bse_scrip_code":code,"published_at":str(row.get("DT_TM",row.get("NEWS_DT",row.get("BroadcastDateTime","")))),"title":text[:300],"direction":direction,"strength":strength})
+        return out[:20]
     except Exception as exc:
-        LOGGER.warning("scanner learning read failed: %s",exc)
-    return out
+        LOGGER.warning("BSE event verification failed for %s: %s",symbol,exc); return []
 
-def _nd8_append_learning(record: Dict[str,Any]) -> None:
-    V7_SCANNER_LEARNING_FILE.parent.mkdir(parents=True,exist_ok=True)
-    lock_path = V7_SCANNER_LEARNING_FILE.with_suffix(".lock")
-    with _v7_process_lock(lock_path):
-        with V7_SCANNER_LEARNING_FILE.open("a",encoding="utf-8") as fh:
-            fh.write(json.dumps(record,ensure_ascii=False,default=str)+"\n")
-            fh.flush()
-            os.fsync(fh.fileno())
+def _v7_deep_event_context(symbol: str) -> Dict[str, Any]:
+    nse=fetch_nse_corporate_events(symbol); bse=fetch_bse_corporate_events(symbol); events=nse+bse
+    bull=sum(max(0.0,safe_float(e.get("strength"),0)) for e in events if e.get("direction")=="BULLISH"); bear=sum(max(0.0,safe_float(e.get("strength"),0)) for e in events if e.get("direction")=="BEARISH")
+    direction="BULLISH" if bull>bear else ("BEARISH" if bear>bull else ("MIXED" if events else "NONE")); score=clip(50.0+(bull-bear)*10.0+min(len(events),4)*2.0,10.0,90.0)
+    return {"event_score":round(score,2),"event_direction":direction,"event_count":len(events),"nse_event_count":len(nse),"bse_event_count":len(bse),"event_materiality":"HIGH" if abs(bull-bear)>=2 else ("MEDIUM" if events else "NONE"),"event_titles":[str(e.get("title",""))[:220] for e in events[:6]],"event_sources":sorted(set(str(e.get("source","")) for e in events if e.get("source")))}
 
-def _nd8_evaluate_scanners(row: Dict[str,Any]) -> Dict[str,Any]:
-    stats=_nd8_load_learning(); scans=_nd8_scan_from_row(row); groups=defaultdict(list); evidence=[]
-    for sid,g,score in scans:
-        st=stats.get(sid,{"n":0.0,"wins":0.0}); n=st["n"]; w=st["wins"]
-        p=(V7_SCANNER_PRIOR_ALPHA+w)/(V7_SCANNER_PRIOR_ALPHA+V7_SCANNER_PRIOR_BETA+n)
-        conf=1-math.exp(-n/V7_SCANNER_HIGH_CONF_N)
-        groups[g].append(score)
-        evidence.append({"id":sid,"group":g,"score":round(score,5),"estimate":round(p,5),"confidence":round(conf,5),"n":int(n)})
-    gs={g:float(np.mean(v)) for g,v in groups.items()}
-    weights={"TREND":.16,"MOMENTUM":.14,"RELATIVE_STRENGTH":.12,"SECTOR":.10,"FLOW":.10,"VOLATILITY":.08,"LOCATION":.08,"BREAKOUT":.08,"CATALYST":.05,"RISK":.05,"STRATEGY":.04}
-    raw=sum(gs.get(g,0.0)*w for g,w in weights.items()); conf=float(np.mean([x["confidence"] for x in evidence])) if evidence else 0.0
-    # Directional orientation is always LONG-positive / SHORT-negative.
-    direction=raw*(.90+.10*conf)
-    strategy=float(np.clip(.5+.5*direction,0,1))
-    pos=sum(1 for x in evidence if x["score"]>=.45); neg=sum(1 for x in evidence if x["score"]<=-.45)
-    if abs(direction)>=.45 and strategy>=.725: family="TREND_CONTINUATION" if gs.get("TREND",0)*direction>0 and gs.get("MOMENTUM",0)*direction>0 else "CONFLUENCE"
-    elif abs(direction)>=.30: family="BREAKOUT_OR_MOMENTUM" if gs.get("BREAKOUT",0)*direction>0 else "SELECTIVE_SETUP"
-    else: family="NO_EDGE"
-    return {"score":direction,"strategy_score":strategy,"confidence":conf,"positive":pos,"negative":neg,"groups":gs,"evidence":evidence,"family":family}
-
-def _nd8_apply_scanners_df(df: pd.DataFrame) -> pd.DataFrame:
-    if df is None or df.empty: return df
-    x=df.copy(); records=[]
-    # Load the immutable snapshot once per scan.  The previous implementation
-    # reread the JSONL learning file for every stock, multiplying disk I/O.
-    stats = _nd8_load_learning()
-    for _,row in x.iterrows():
-        scans=_nd8_scan_from_row(row.to_dict())
-        groups=defaultdict(list); evidence=[]
-        for sid,g,score in scans:
-            st=stats.get(sid,{"n":0.0,"wins":0.0}); n=st["n"]; w=st["wins"]
-            p=(V7_SCANNER_PRIOR_ALPHA+w)/(V7_SCANNER_PRIOR_ALPHA+V7_SCANNER_PRIOR_BETA+n)
-            conf=1-math.exp(-n/V7_SCANNER_HIGH_CONF_N)
-            groups[g].append(score)
-            evidence.append({"id":sid,"group":g,"score":round(score,5),"estimate":round(p,5),"confidence":round(conf,5),"n":int(n)})
-        gs={g:float(np.mean(v)) for g,v in groups.items()}
-        weights={"TREND":.16,"MOMENTUM":.14,"RELATIVE_STRENGTH":.12,"SECTOR":.10,"FLOW":.10,"VOLATILITY":.08,"LOCATION":.08,"BREAKOUT":.08,"CATALYST":.05,"RISK":.05,"STRATEGY":.04}
-        raw=sum(gs.get(g,0.0)*w for g,w in weights.items())
-        conf=float(np.mean([x["confidence"] for x in evidence])) if evidence else 0.0
-        direction=raw*(.90+.10*conf)
-        strategy=float(np.clip(.5+.5*direction,0,1))
-        pos=sum(1 for x in evidence if x["score"]>=.45); neg=sum(1 for x in evidence if x["score"]<=-.45)
-        if abs(direction)>=.45 and strategy>=.725:
-            family="TREND_CONTINUATION" if gs.get("TREND",0)*direction>0 and gs.get("MOMENTUM",0)*direction>0 else "CONFLUENCE"
-        elif abs(direction)>=.30:
-            family="BREAKOUT_OR_MOMENTUM" if gs.get("BREAKOUT",0)*direction>0 else "SELECTIVE_SETUP"
-        else:
-            family="NO_EDGE"
-        records.append({"score":direction,"strategy_score":strategy,"confidence":conf,"positive":pos,"negative":neg,"groups":gs,"evidence":evidence,"family":family})
-    x["ScannerScore"]=[r["score"] for r in records]
-    x["ScannerStrategyScore"]=[r["strategy_score"] for r in records]
-    x["ScannerConfidence"]=[r["confidence"] for r in records]
-    x["ScannerEvidenceCount"]=[r["positive"] for r in records]
-    x["ScannerContradictionCount"]=[r["negative"] for r in records]
-    x["ScannerFamily"]=[r["family"] for r in records]
-    x["ScannerGroupsJSON"]=[json.dumps(r["groups"],sort_keys=True) for r in records]
-    x["ScannerEvidenceJSON"]=[json.dumps(r["evidence"],sort_keys=True) for r in records]
-    # Additive 10% contribution. V7Score remains the primary backbone.
-    x["V7Score"]=(0.90*pd.to_numeric(x["V7Score"],errors="coerce").fillna(0)+10.0*x["ScannerStrategyScore"]).clip(0,100)
-    return x
-
-
-def _nd8_record_predictions(candidates: List[Dict[str,Any]]) -> None:
-    # Prediction ledger is separate from outcome learning; it is resolved next run
-    # from the following session's raw OHLC. No future information is used here.
-    for c in candidates:
-        try:
-            rec={"type":"PENDING_NEXT_DAY","prediction_date":str(c.get("data_as_of",now_ist().date())),"symbol":c.get("symbol"),"direction":c.get("direction"),"scanner_evidence":json.loads(c.get("scanner_evidence_json","[]")),"scanner_family":c.get("scanner_family","NO_EDGE"),"entry_reference":c.get("ltp"),"target":c.get("risk_profile",{}).get("target_2"),"stop":c.get("risk_profile",{}).get("suggested_stop")}
-            _nd8_append_learning({"scanner_id":"__PENDING__","win":False,"pending":True,"record":rec,"timestamp":now_ist().isoformat()})
-        except Exception: pass
-
-
-def _nd8_resolve_pending() -> None:
-    """Resolve yesterday's pending scanner predictions using only raw next-day data."""
-    if not V7_SCANNER_LEARNING_FILE.exists(): return
-    rows=[]
-    try:
-        for line in V7_SCANNER_LEARNING_FILE.read_text(encoding="utf-8").splitlines():
-            if line.strip(): rows.append(json.loads(line))
-    except Exception: return
-    pending=[r for r in rows if r.get("pending") and not r.get("resolved")]
-    if not pending: return
-    resolved_keys=set()
-    for r in pending:
-        rec=r.get("record",{}); sym=str(rec.get("symbol","")).strip(); pred=str(rec.get("prediction_date",""))
-        if not sym or not pred: continue
-        try:
-            df=fetch_yahoo_chart(f"{sym}.NS",days=15,interval="1d")
-            if df is None or df.empty or "DateTime" not in df.columns: continue
-            d=df.copy(); d["DateTime"]=pd.to_datetime(d["DateTime"],errors="coerce"); d=d.dropna(subset=["DateTime"])
-            day=pd.Timestamp(pred).date(); after=d[d["DateTime"].dt.date>day]
-            if after.empty: continue
-            nxt=after.iloc[0]; entry=safe_float(rec.get("entry_reference")); direction=str(rec.get("direction","LONG")).upper();
-            if not np.isfinite(entry) or entry<=0: continue
-            target=safe_float(rec.get("target"),np.nan); stop=safe_float(rec.get("stop"),np.nan)
-            high=safe_float(nxt.get("High")); low=safe_float(nxt.get("Low")); close=safe_float(nxt.get("Close"))
-            if direction=="LONG":
-                hit_t=np.isfinite(target) and high>=target; hit_s=np.isfinite(stop) and low<=stop; pnl=close-entry
-            else:
-                hit_t=np.isfinite(target) and low<=target; hit_s=np.isfinite(stop) and high>=stop; pnl=entry-close
-            outcome="TARGET_FIRST" if hit_t and not hit_s else ("STOP_FIRST" if hit_s and not hit_t else ("AMBIGUOUS" if hit_t and hit_s else "TIMEOUT"))
-            win=outcome=="TARGET_FIRST" or (outcome=="TIMEOUT" and pnl>0)
-            for x in rec.get("scanner_evidence",[]):
-                sid=str(x.get("id",""));
-                if sid: _nd8_append_learning({"scanner_id":sid,"win":bool(win),"outcome":outcome,"symbol":sym,"prediction_date":pred,"resolved_date":str(nxt["DateTime"]),"pending":False})
-            r["resolved"]=True; r["resolved_outcome"]=outcome; resolved_keys.add(id(r))
-        except Exception: continue
-    # Rewrite pending records only when at least one was resolved; preserve append-only
-    # learning records and avoid duplicate resolution.
-    if resolved_keys:
-        try:
-            tmp=V7_SCANNER_LEARNING_FILE.with_suffix(".tmp")
-            with tmp.open("w",encoding="utf-8") as fh:
-                for r in rows: fh.write(json.dumps(r,ensure_ascii=False,default=str)+"\n")
-            tmp.replace(V7_SCANNER_LEARNING_FILE)
-        except Exception: pass
 
 def _v7_build_day_ahead_watchlist() -> Dict[str, Any]:
-    """V7 orchestration: ~500 scan -> 30 deep basket -> expensive MTF -> TOP 15 overnight watchlist -> morning FINAL 2."""
-    started = time.monotonic()
-    LOGGER.info("[DAY-AHEAD] START")
-    _nd8_resolve_pending()
+    """V7 orchestration: original 500 scan -> 30 bet basket -> expensive MTF -> final 5."""
     timestamp = now_ist()
     universe = load_nifty500_universe()
-    if universe is None or universe.empty or "Symbol" not in universe.columns:
-        raise RuntimeError("NIFTY-500 universe unavailable or invalid")
-    symbols = universe["Symbol"].astype(str).str.upper().str.strip().replace("", np.nan).dropna().drop_duplicates().tolist()
-    LOGGER.info("[DAY-AHEAD] universe loaded: %d symbols", len(symbols))
+    symbols = universe["Symbol"].astype(str).str.upper().str.strip().drop_duplicates().tolist()
     benchmark = fetch_yahoo_chart(NIFTY_TICKER, days=320, interval="1d")
-    if benchmark is None or benchmark.empty:
-        LOGGER.warning("[DAY-AHEAD] NIFTY benchmark unavailable; relative-strength fields may be neutral")
     histories = fetch_history(symbols, days=320)
-    LOGGER.info("[DAY-AHEAD] historical data loaded: %d/%d symbols", len(histories), len(symbols))
     rows=[]
     for _, item in universe.iterrows():
         symbol=str(item["Symbol"]).upper().strip(); df=histories.get(symbol)
@@ -5630,28 +5314,26 @@ def _v7_build_day_ahead_watchlist() -> Dict[str, Any]:
         features=build_features(symbol,df,benchmark,industry)
         if features is not None: rows.append(features)
     if not rows: raise RuntimeError("No usable stock data available")
-    LOGGER.info("[DAY-AHEAD] feature rows usable: %d", len(rows))
     frame=add_sector_features(pd.DataFrame(rows))
-    # Current completed session volume-shocker evidence versus prior baselines.
-    frame["VolumeShocker20"] = pd.to_numeric(frame.get("VolumeRatio20"), errors="coerce")
-    frame["VolumeShocker5"] = pd.to_numeric(frame.get("VolumeRatio5"), errors="coerce")
-    frame["VolumeShockerScore"] = (
-        0.65 * frame["VolumeShocker20"].clip(lower=0).fillna(0)
-        + 0.35 * frame["VolumeShocker5"].clip(lower=0).fillna(0)
-    )
-    scored=score_candidates(frame)
-    LOGGER.info("[DAY-AHEAD] scored symbols: %d; >= minimum: %d", len(scored), int((pd.to_numeric(scored.get("DayAheadScore", pd.Series(dtype=float)), errors="coerce") >= DAY_AHEAD_MIN_SCORE).sum()))
+    frame["VolumeShockScore"]=frame.apply(volume_shock_score,axis=1)
+    # Volume-first discovery: the expensive scoring/catalyst layer sees only
+    # the strongest ~200 volume/participation names from the liquid universe.
+    discovery_n=min(200,max(150,int(os.getenv("NEXT_DAY_VOLUME_DISCOVERY_COUNT","200"))))
+    volume_pool=frame.sort_values("VolumeShockScore",ascending=False).head(discovery_n).copy()
+    scored=score_candidates(volume_pool)
     basket=_v7_preselect_30(scored)
-    LOGGER.info("[DAY-AHEAD] preselected basket: %d", len(basket))
     enriched=_v7_enrich_basket(basket)
-    LOGGER.info("[DAY-AHEAD] MTF enrichment complete: %d", len(enriched))
-    enriched=_nd8_apply_scanners_df(enriched)
-    LOGGER.info("[DAY-AHEAD] scanner layer complete: %d", len(enriched))
     vix=_v7_vix_context()
     if not enriched.empty:
         enriched["MacroVIXRegime"] = vix.get("regime","UNAVAILABLE")
     top15=_v7_select_final15(enriched)
-    LOGGER.info("[DAY-AHEAD] TOP-15 selected: %d", len(top15))
+    if not top15.empty:
+        deep=[]
+        for _,row in top15.iterrows():
+            d=row.to_dict(); ev=_v7_deep_event_context(str(row["Symbol"])); d.update(ev); base=safe_float(d.get("V7Score"),50.0); evs=safe_float(d.get("event_score"),50.0); direction=str(d.get("Direction")); ed=str(d.get("event_direction"))
+            aligned=(direction=="LONG" and ed=="BULLISH") or (direction=="SHORT" and ed=="BEARISH"); opposed=(direction=="LONG" and ed=="BEARISH") or (direction=="SHORT" and ed=="BULLISH")
+            d["NightDeepDiveScore"]=clip(base*0.82+evs*0.18+(5 if aligned else (-10 if opposed else 0))); deep.append(d)
+        top15=pd.DataFrame(deep).sort_values("NightDeepDiveScore",ascending=False).reset_index(drop=True)
     kotak_snapshot=capture_kotak_day_ahead_snapshot([str(x).upper() for x in top15["Symbol"].tolist()] if not top15.empty else [])
     candidates=[]
     for rank,(_,row) in enumerate(top15.iterrows(),start=1):
@@ -5661,10 +5343,11 @@ def _v7_build_day_ahead_watchlist() -> Dict[str, Any]:
         candidates.append({
             "rank":rank,"symbol":sym,"industry":str(d.get("Industry","UNKNOWN")),"sector_bucket":d["sector_bucket"],"direction":str(d.get("Direction")),
             "day_ahead_score":round(safe_float(d.get("DayAheadScore"),0),2),"v7_score":round(safe_float(d.get("V7Score"),0),2),
-            "selection_score":round(safe_float(d.get("V7Score"),0),2),"setup_type":str(d.get("SetupType","UNKNOWN")),
-            "trend_score":round(safe_float(d.get("TrendScore"),50),2),"momentum_score":round(safe_float(d.get("MomentumScore"),50),2),"hilega_milega_score":round(safe_float(d.get("HilegaMilegaScore"),50),2),"supertrend_direction":int(safe_float(d.get("SuperTrendDirection"),0)),
+            "selection_score":round(safe_float(d.get("NightDeepDiveScore",d.get("V7Score",0)),0),2),"setup_type":str(d.get("SetupType","UNKNOWN")),
+            "night_deep_dive_score":round(safe_float(d.get("NightDeepDiveScore",d.get("V7Score",50)),50),2),"event_direction":str(d.get("event_direction","NONE")),"event_score":round(safe_float(d.get("event_score",50)),2),"event_count":int(d.get("event_count",0)),"nse_event_count":int(d.get("nse_event_count",0)),"bse_event_count":int(d.get("bse_event_count",0)),"event_materiality":str(d.get("event_materiality","NONE")),"event_titles":d.get("event_titles",[]),"event_sources":d.get("event_sources",[]),
+            "trend_score":round(safe_float(d.get("TrendScore"),50),2),"momentum_score":round(safe_float(d.get("MomentumScore"),50),2),
             "relative_strength_score":round(safe_float(d.get("RelativeStrengthScore"),50),2),"sector_score":round(safe_float(d.get("SectorScore"),50),2),
-            "volume_score":round(safe_float(d.get("VolumeScore"),50),2),"volatility_score":round(safe_float(d.get("VolatilityScore"),50),2),
+            "volume_score":round(safe_float(d.get("VolumeScore"),50),2),"volume_shock_score":round(safe_float(d.get("VolumeShockScore",d.get("VolumeScore",50)),50),2),"volume_ratio_7":round(safe_float(d.get("VolumeRatio7"),np.nan),3),"volume_shock_persistence_7":round(safe_float(d.get("VolumeShockPersistence7"),np.nan),3),"volume_acceleration_7":round(safe_float(d.get("VolumeAcceleration7"),np.nan),3),"volatility_score":round(safe_float(d.get("VolatilityScore"),50),2),
             "catalyst_score":round(safe_float(d.get("CatalystScoreFinal"),50),2),"anti_false_positive_score":round(safe_float(d.get("AntiFalsePositiveScore"),50),2),
             "ltp":round(safe_float(d.get("LTP"),np.nan),2),"atr_pct":round(safe_float(d.get("ATRpct"),np.nan),3),
             "ret_1d":round(safe_float(d.get("Ret1D"),np.nan),3),"ret_5d":round(safe_float(d.get("Ret5D"),np.nan),3),"ret_20d":round(safe_float(d.get("Ret20D"),np.nan),3),
@@ -5672,43 +5355,18 @@ def _v7_build_day_ahead_watchlist() -> Dict[str, Any]:
             "mtf_score":round(safe_float(d.get("mtf_score"),50),2),"support":safe_float(d.get("support"),np.nan),"resistance":safe_float(d.get("resistance"),np.nan),
             "invalidation":safe_float(d.get("invalidation"),np.nan),"target":safe_float(d.get("target"),np.nan),"rr":round(safe_float(d.get("rr"),np.nan),3),
             "invalidation_atr":round(safe_float(d.get("invalidation_atr"),np.nan),3),"pattern_conflicts":int(d.get("pattern_conflicts",0)),"pattern_supports":int(d.get("pattern_supports",0)),
-            "risk_profile":d["risk_profile"],"scanner_score":round(safe_float(d.get("ScannerScore"),0),5),"scanner_strategy_score":round(safe_float(d.get("ScannerStrategyScore"),0.5),5),"scanner_confidence":round(safe_float(d.get("ScannerConfidence"),0),5),"scanner_evidence_count":int(d.get("ScannerEvidenceCount",0)),"scanner_contradiction_count":int(d.get("ScannerContradictionCount",0)),"scanner_family":str(d.get("ScannerFamily","NO_EDGE")),"scanner_groups_json":str(d.get("ScannerGroupsJSON","{}")),"scanner_evidence_json":str(d.get("ScannerEvidenceJSON","[]")),"thesis":"THESIS_PENDING_MORNING_CONFIRMATION","invalidation_rule":"Structural S/R or ATR fallback; hard R:R gate applies."
+            "risk_profile":d["risk_profile"],"thesis":"THESIS_PENDING_MORNING_CONFIRMATION","invalidation_rule":"Structural S/R or ATR fallback; hard R:R gate applies."
         })
     basket_records=[]
     for _,row in enriched.iterrows():
-        basket_records.append({"symbol":str(row["Symbol"]),"sector_bucket":str(row.get("SectorBucket",_v7_sector_bucket(row.get("Industry")))),"direction":str(row.get("Direction")),"day_ahead_score":round(safe_float(row.get("DayAheadScore"),0),2),"v7_score":round(safe_float(row.get("V7Score"),0),2),"mtf_score":round(safe_float(row.get("mtf_score"),50),2),"rr":round(safe_float(row.get("rr"),np.nan),3),"hard_rr_pass":bool(row.get("hard_rr_pass",False)),"scanner_score":round(safe_float(row.get("ScannerScore"),0),5),"scanner_strategy_score":round(safe_float(row.get("ScannerStrategyScore"),0.5),5),"scanner_confidence":round(safe_float(row.get("ScannerConfidence"),0),5),"scanner_family":str(row.get("ScannerFamily","NO_EDGE"))})
-    result={"engine":"NEXT_DAY_ALPHA_ENGINE","version":V7_VERSION,"generated_at":timestamp.isoformat(),"data_as_of":timestamp.strftime("%Y-%m-%d"),"architecture":{"nifty_3min_engine_modified":False,"shared_raw_data_allowed":True,"shared_calculated_features":False,"shared_scores":False,"shared_regime_decisions":False,"shared_decisions":False,"shared_labels":False,"shared_predictions":False,"shared_raw_fields_only":True,"next_day_can_write_to_nifty_engine":False,"next_day_can_read_nifty_calculations":False},"macro_regime":vix,"day_ahead":{"universe_size":len(symbols),"usable_symbols":len(frame),"scored_symbols":len(scored),"bet_basket_size":len(basket_records),"bet_basket_30":basket_records,"top15_count":len(candidates),"top15":candidates,"top5_count":len(candidates),"top5":candidates},"morning_confirmation":{"status":"PENDING","final":[]},"probability_note":"Quality scores are not win probabilities. VIX is not a directional predictor. Historical calibration is required before any probability claim.","quality_controls":{"hard_rr_gate":V7_MIN_RR,"max_invalidation_atr":V7_MAX_INVALIDATION_DISTANCE_ATR,"mtf_timeframes":["W","D","4H","1H","15M"],"sector_basket_max_per_sector":V7_MAX_STOCKS_PER_SECTOR,"no_trade_allowed":True}}
-    _nd8_record_predictions(candidates)
+        basket_records.append({"symbol":str(row["Symbol"]),"sector_bucket":str(row.get("SectorBucket",_v7_sector_bucket(row.get("Industry")))),"direction":str(row.get("Direction")),"day_ahead_score":round(safe_float(row.get("DayAheadScore"),0),2),"v7_score":round(safe_float(row.get("V7Score"),0),2),"mtf_score":round(safe_float(row.get("mtf_score"),50),2),"rr":round(safe_float(row.get("rr"),np.nan),3),"hard_rr_pass":bool(row.get("hard_rr_pass",False))})
+    result={"engine":"NEXT_DAY_ALPHA_ENGINE","version":V7_VERSION,"generated_at":timestamp.isoformat(),"data_as_of":timestamp.strftime("%Y-%m-%d"),"architecture":{"nifty_3min_engine_modified":False,"shared_raw_data_allowed":True,"shared_calculated_features":False,"shared_scores":False,"shared_regime_decisions":False,"shared_decisions":False,"shared_labels":False,"shared_predictions":False,"shared_raw_fields_only":True,"next_day_can_write_to_nifty_engine":False,"next_day_can_read_nifty_calculations":False},"macro_regime":vix,"day_ahead":{"universe_size":len(symbols),"usable_symbols":len(frame),"scored_symbols":len(scored),"bet_basket_size":len(basket_records),"bet_basket_30":basket_records,"top15_count":min(TOP15_COUNT,len(candidates)),"top15":candidates[:TOP15_COUNT],"top5_count":min(FINAL_MAX_COUNT,len(candidates)),"top5":candidates[:FINAL_MAX_COUNT]},"morning_confirmation":{"status":"PENDING","final":[]},"probability_note":"Quality scores are not win probabilities. VIX is not a directional predictor. Historical calibration is required before any probability claim.","quality_controls":{"hard_rr_gate":V7_MIN_RR,"min_invalidation_atr":V7_MIN_INVALIDATION_DISTANCE_ATR,"max_invalidation_atr":V7_MAX_INVALIDATION_DISTANCE_ATR,"mtf_timeframes":["1M","W","D","4H","1H","15M"],"sector_basket_max_per_sector":V7_MAX_STOCKS_PER_SECTOR,"no_trade_allowed":True}}
     _atomic_write_text(CACHE_JSON,json.dumps(result,ensure_ascii=False,indent=2,default=str))
-    LOGGER.info("[DAY-AHEAD] COMPLETE: top15=%d elapsed=%.2fs | REAL_DATA_ONLY", len(candidates), time.monotonic()-started)
     return result
 
 
 # Override the original orchestration without removing its implementation.
 build_day_ahead_watchlist = _v7_build_day_ahead_watchlist
-
-
-def _real_premarket_mood(symbol: str, previous_close: float) -> Dict[str, Any]:
-    """Read pre-market mood from saved/live Kotak raw data only."""
-    df = fetch_intraday(symbol)
-    if df is None or df.empty:
-        return {"status":"DATA_NOT_READY","direction":"UNKNOWN","gap_pct":np.nan,"score":0.0}
-    x = normalize_intraday(df)
-    if x.empty:
-        return {"status":"DATA_NOT_READY","direction":"UNKNOWN","gap_pct":np.nan,"score":0.0}
-    today = now_ist().date()
-    start = datetime(today.year,today.month,today.day,9,0,tzinfo=IST)
-    end = datetime(today.year,today.month,today.day,9,15,tzinfo=IST)
-    pm = x[(x["DateTime"] >= start) & (x["DateTime"] < end)].copy()
-    if pm.empty:
-        return {"status":"DATA_NOT_READY","direction":"UNKNOWN","gap_pct":np.nan,"score":0.0}
-    last = safe_float(pm["Close"].iloc[-1], np.nan)
-    if not np.isfinite(last) or not np.isfinite(previous_close) or previous_close == 0:
-        return {"status":"DATA_NOT_READY","direction":"UNKNOWN","gap_pct":np.nan,"score":0.0}
-    gap = (last / previous_close - 1.0) * 100.0
-    direction = "UP" if gap > 0.15 else "DOWN" if gap < -0.15 else "FLAT"
-    score = clip(50.0 + gap * 12.0, 0.0, 100.0)
-    return {"status":"READY","direction":direction,"gap_pct":round(gap,3),"score":round(score,2),"source":"KOTAK_NEO_OR_SHARED_RAW_REAL"}
 
 
 def _v7_run_morning_confirmation() -> Dict[str, Any]:
@@ -5719,7 +5377,7 @@ def _v7_run_morning_confirmation() -> Dict[str, Any]:
     nifty_gap=market_gap(NIFTY_TICKER)
     vix=latest.get("macro_regime",{})
     # Morning sector regime is calculated from the 30-stock raw basket first.
-    basket=latest.get("day_ahead",{}).get("top15",latest.get("day_ahead",{}).get("top5",[]))
+    basket=latest.get("day_ahead",{}).get("bet_basket_30",[])
     regimes=_v7_sector_regimes(basket)
     confirmations=[]
     for c in candidates:
@@ -5727,21 +5385,6 @@ def _v7_run_morning_confirmation() -> Dict[str, Any]:
         sector_ret=safe_float(regimes.get(sec,{}).get("return_5m_pct"),np.nan)
         conf=confirm_candidate(c,nifty_gap,sector_ret)
         item=asdict(conf); item["sector_bucket"]=sec; item["sector_live_regime"]=regimes.get(sec,{}).get("regime","UNKNOWN"); item["vix_regime"]=vix.get("regime","UNKNOWN")
-        pm=_real_premarket_mood(str(c["symbol"]), safe_float(item.get("prev_close"), np.nan))
-        item["premarket_mood"]=pm
-        # Explicit Thesis -> Reality ledger. The overnight direction is only a
-        # thesis; morning market/sector/stock observations can invalidate it.
-        item["thesis_direction"] = str(c.get("direction", "NEUTRAL")).upper()
-        item["reality_market"] = ("UP" if safe_float(nifty_gap, 0.0) > 0.10 else "DOWN" if safe_float(nifty_gap, 0.0) < -0.10 else "FLAT")
-        item["reality_sector"] = str(item.get("sector_live_regime", "UNKNOWN"))
-        item["reality_stock"] = ("STRONG" if safe_float(item.get("confirmation_score"), 0.0) >= MORNING_WATCH_SCORE and (item.get("acceptance") or item.get("breakout")) else "WEAK")
-        item["thesis_reality"] = {
-            "thesis": item["thesis_direction"],
-            "premarket": item.get("premarket_mood",{}).get("direction","UNKNOWN"),
-            "market": item["reality_market"],
-            "sector": item["reality_sector"],
-            "stock": item["reality_stock"],
-        }
         ok, circuit_reason=_v7_circuit_gate(str(c["symbol"]),pd.DataFrame()); item["circuit_gate"]=circuit_reason
         if not ok: item["status"]="REJECTED"; item["reason"]=circuit_reason; item["confirmation_score"]=0.0
         confirmations.append(item)
@@ -5751,38 +5394,7 @@ def _v7_run_morning_confirmation() -> Dict[str, Any]:
     confirmed=[]
     for item in confirmations:
         score=safe_float(item.get("confirmation_score"),0)
-        scanner_score=safe_float(item.get("scanner_score"),0)
-        scanner_family=str(item.get("scanner_family","NO_EDGE"))
-        direction=str(item.get("direction","LONG")).upper()
-        scanner_dir_ok=(scanner_score >= 0.12) if direction=="LONG" else (scanner_score <= -0.12)
-        scanner_strategy=safe_float(item.get("scanner_strategy_score"),0.5)
-        if scanner_dir_ok:
-            score=min(99.0, score + 4.0*scanner_strategy)
-        else:
-            score=max(0.0, score - 8.0)
-        pm_dir=str(item.get("premarket_mood",{}).get("direction","UNKNOWN")).upper()
-        if (direction=="LONG" and pm_dir=="UP") or (direction=="SHORT" and pm_dir=="DOWN"):
-            score=min(99.0, score + 3.0)
-            item["premarket_alignment"]="ALIGNED"
-        elif (direction=="LONG" and pm_dir=="DOWN") or (direction=="SHORT" and pm_dir=="UP"):
-            score=max(0.0, score - 5.0)
-            item["premarket_alignment"]="CONTRADICTED"
-        else:
-            item["premarket_alignment"]="NEUTRAL_OR_UNAVAILABLE"
-        item["scanner_gate"]="PASS" if scanner_dir_ok and scanner_strategy>=0.55 else "CAUTION"
-        item["scanner_family"]=scanner_family
         sector_ok=item.get("sector_live_alignment") is True
-        thesis = str(item.get("thesis_direction", direction)).upper()
-        reality_market = str(item.get("reality_market", "FLAT")).upper()
-        reality_sector = str(item.get("reality_sector", "UNKNOWN")).upper()
-        reality_stock = str(item.get("reality_stock", "WEAK")).upper()
-        # Core rule: thesis is never allowed to override reality.
-        if ((thesis == "LONG" and reality_market == "DOWN" and reality_sector == "BEARISH" and reality_stock == "WEAK") or
-            (thesis == "SHORT" and reality_market == "UP" and reality_sector == "BULLISH" and reality_stock == "WEAK")):
-            item["status"] = "REJECTED"
-            item["reason"] = "Thesis contradicted by market + sector + stock reality"
-            item["confirmation_score"] = 0.0
-            continue
         # In neutral sectors the original confirmation may still stand; opposite live sectors are hard rejection.
         if item.get("sector_live_regime") in ("BULLISH","BEARISH") and not sector_ok:
             item["status"]="REJECTED"; item["reason"]="Live sector regime contradicts thesis"
@@ -5793,22 +5405,19 @@ def _v7_run_morning_confirmation() -> Dict[str, Any]:
         else:
             item["status"]="REJECTED"
     confirmed.sort(key=lambda x:(safe_float(x.get("confirmation_score"),0),safe_float(x.get("previous_day_score"),0)),reverse=True)
-    # FINAL-2 sector gate: diversity is preferred. A same-sector pair is allowed
-    # only when live sector breadth is strong and both names align with that regime.
+    # Final 2-5: sector-diversify first, then fill from strongest confirmations.
     final=[]; sector_used={}
     for item in confirmed:
         sec=item.get("sector_bucket","UNKNOWN")
-        if sector_used.get(sec,0)>=1:
-            reg=regimes.get(sec,{})
-            breadth=safe_float(reg.get("breadth"),0.0)
-            regime=str(reg.get("regime","NEUTRAL"))
-            direction=str(item.get("direction","")).upper()
-            aligned=(regime=="BULLISH" and direction=="LONG") or (regime=="BEARISH" and direction=="SHORT")
-            if not (breadth >= 0.70 and aligned and item.get("sector_live_alignment") is True):
-                continue
+        if sector_used.get(sec,0)>=1: continue
         final.append(item); sector_used[sec]=sector_used.get(sec,0)+1
-        if len(final)>=2: break
-    status="FINAL_2" if len(final)>=2 else ("FINAL_1" if len(final)==1 else "NO_TRADE")
+        if len(final)>=FINAL_MAX_COUNT: break
+    if len(final)<FINAL_MAX_COUNT:
+        for item in confirmed:
+            if item in final: continue
+            final.append(item)
+            if len(final)>=FINAL_MAX_COUNT: break
+    status="FINAL_"+str(len(final)) if final else "NO_TRADE"
     result={"status":status,"generated_at":now_ist().isoformat(),"required_confirmation_score":required,"vix_regime":vix,"sector_regimes":regimes,"final":final,"confirmations":confirmations,"no_trade_reason":"No candidate satisfied thesis, sector, circuit, R:R and morning confirmation gates." if not final else ""}
     latest["morning_confirmation"]=result
     _atomic_write_text(CACHE_JSON,json.dumps(latest,ensure_ascii=False,indent=2,default=str))
@@ -5846,6 +5455,11 @@ class NextDayAlphaEngine:
     ) -> Optional[Dict[str, Any]]:
 
         current = now_ist()
+        latest = load_latest()
+        if current.hour == MARKET_OPEN_HOUR and MARKET_OPEN_MINUTE <= current.minute <= CONFIRMATION_END_MINUTE:
+            morning_generated=str(latest.get("morning_confirmation",{}).get("generated_at",""))
+            if latest.get("day_ahead") and not morning_generated.startswith(current.strftime("%Y-%m-%d")):
+                return run_morning_confirmation()
 
         # Day-ahead scan after market close.
         if (
@@ -5857,8 +5471,6 @@ class NextDayAlphaEngine:
                 >= DAY_AHEAD_RUN_MINUTE
             )
         ):
-
-            latest = load_latest()
 
             current_date = (
                 current.strftime(
@@ -5899,16 +5511,12 @@ class NextDayAlphaEngine:
             run_morning_confirmation()
         )
 
-    def live_top5(self) -> List[Dict[str, Any]]:
-        # Legacy API name retained; returns the full overnight TOP-15 watchlist.
-        latest = load_latest()
-        day_ahead = latest.get("day_ahead", {})
-        return day_ahead.get("top15", day_ahead.get("top5", []))
-
     def live_top15(self) -> List[Dict[str, Any]]:
-        latest = load_latest()
-        day_ahead = latest.get("day_ahead", {})
-        return day_ahead.get("top15", day_ahead.get("top5", []))
+        latest=load_latest()
+        return latest.get("day_ahead",{}).get("top15",latest.get("day_ahead",{}).get("top5",[]))
+
+    def live_top5(self) -> List[Dict[str, Any]]:
+        return self.live_top15()[:FINAL_MAX_COUNT]
 
     def live_basket30(self) -> List[Dict[str, Any]]:
         latest = load_latest()
@@ -5950,21 +5558,11 @@ class NextDayAlphaEngine:
 
                 current = now_ist()
 
-                # Capture raw pre-market quotes for TOP15. Only raw fields are
-                # written to the shared cache; no calculated opinion crosses the boundary.
-                if current.hour == 9 and 0 <= current.minute < 15:
-                    try:
-                        basket_now = self.live_top15()
-                        symbols_now = [str(x.get("symbol", "")) for x in basket_now if x.get("symbol")]
-                        capture_kotak_premarket_snapshot(symbols_now)
-                    except Exception:
-                        LOGGER.exception("[NEXT-DAY PREMARKET] capture failed")
-
-                # Capture raw opening-window quotes for TOP15 using Kotak.
+                # Capture raw opening-window quotes for TOP 5 using Kotak.
                 # Only raw fields are written to the shared cache.
                 if current.hour == 9 and 15 <= current.minute < 20:
                     try:
-                        basket_now = self.live_top15()
+                        basket_now = self.live_basket30()
                         symbols_now = [str(x.get("symbol", "")) for x in basket_now if x.get("symbol")]
                         adapter = get_kotak_adapter()
                         if adapter is not None and adapter.connected:
@@ -6172,26 +5770,31 @@ def run_streamlit_dashboard() -> None:
 
     st.set_page_config(page_title="Next-Day Stock Alpha Engine", layout="wide")
     st.title("NEXT-DAY STOCK ALPHA ENGINE")
-    st.caption("Standalone | Raw-data sharing only | Kotak Neo live | Trusted catalyst layer")
+    st.caption("Standalone â€¢ Raw-data sharing only â€¢ Kotak Neo live â€¢ Trusted catalyst layer")
 
-    result = load_latest()
+    engine = NextDayAlphaEngine()
+    try:
+        engine.run_if_due()
+    except Exception:
+        LOGGER.exception("Dashboard auto-run failed")
+    result = engine.latest()
     day = result.get("day_ahead", {})
     morning = result.get("morning_confirmation", {})
 
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("TOP 5", len(day.get("top5", [])))
+    c1.metric("TOP 15", len(day.get("top15", day.get("top5", []))))
     c2.metric("Morning Status", morning.get("status", "PENDING"))
     c3.metric("FINAL", len(morning.get("final", [])))
     c4.metric("Engine", result.get("version", "UNKNOWN"))
 
-    st.subheader("DAY-AHEAD TOP 5")
-    top5 = day.get("top5", [])
-    if top5:
-        st.dataframe(pd.DataFrame(top5), use_container_width=True, hide_index=True)
+    st.subheader("15 STOCK OVERNIGHT DEEP-DIVE SHORTLIST")
+    top15 = day.get("top15", day.get("top5", []))
+    if top15:
+        st.dataframe(pd.DataFrame(top15), use_container_width=True, hide_index=True)
     else:
         st.warning("NO QUALIFIED CANDIDATE")
 
-    st.subheader("09:15-09:20 CONFIRMATION")
+    st.subheader("09:15â€“09:20 CONFIRMATION")
     confirmations = morning.get("confirmations", [])
     if confirmations:
         st.dataframe(pd.DataFrame(confirmations), use_container_width=True, hide_index=True)
@@ -6200,7 +5803,7 @@ def run_streamlit_dashboard() -> None:
         st.success("FINAL TRADE CANDIDATES")
         st.dataframe(pd.DataFrame(final), use_container_width=True, hide_index=True)
     else:
-        st.info("NO TRADE - engine never forces two trades.")
+        st.info("NO TRADE â€” engine never forces two trades.")
 
     st.caption("A score is a quality score, not a guaranteed win probability. Historical calibration is required before any probability claim.")
 
@@ -6273,7 +5876,6 @@ def main() -> None:
     # This is intentionally performed at application boot so configuration
     # errors cannot surface for the first time during market hours.
     validate_config()
-    LOGGER.info("[ENGINE] CLI start: argv=%s", " ".join(sys.argv[1:]))
 
     engine = (
         NextDayAlphaEngine()
@@ -6288,25 +5890,27 @@ def main() -> None:
         return
 
     if args.day_ahead:
-        try:
-            result = engine.run_day_ahead()
-            print_day_ahead(result)
-        except Exception as exc:
-            LOGGER.exception("[DAY-AHEAD] FAILED")
-            print(f"DAY-AHEAD FAILED: {type(exc).__name__}: {exc}")
-            print(f"Check log: {LOG_FILE}")
-            raise SystemExit(1)
+
+        result = (
+            engine.run_day_ahead()
+        )
+
+        print_day_ahead(
+            result
+        )
+
         return
 
     if args.morning:
-        try:
-            result = engine.run_morning()
-            print_morning(result)
-        except Exception as exc:
-            LOGGER.exception("[MORNING] FAILED")
-            print(f"MORNING CONFIRMATION FAILED: {type(exc).__name__}: {exc}")
-            print(f"Check log: {LOG_FILE}")
-            raise SystemExit(1)
+
+        result = (
+            engine.run_morning()
+        )
+
+        print_morning(
+            result
+        )
+
         return
 
     if args.show:
@@ -6350,13 +5954,7 @@ def main() -> None:
         return
 
     # Default: run appropriate operation.
-    try:
-        result = engine.run_if_due()
-    except Exception as exc:
-        LOGGER.exception("[ENGINE] scheduled run failed")
-        print(f"ENGINE FAILED: {type(exc).__name__}: {exc}")
-        print(f"Check log: {LOG_FILE}")
-        raise SystemExit(1)
+    result = engine.run_if_due()
 
     if result:
 
