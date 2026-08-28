@@ -315,7 +315,7 @@ def main():
         col1, col2 = st.columns(2)
         with col1:
             if st.button("Connect Kotak"):
-                                try:
+                try:
                     with st.spinner("Authenticating..."):
                         kotak.login(totp_override=totp_input)
                         st.success("Authenticated Successfully!")
