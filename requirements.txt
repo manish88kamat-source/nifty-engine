@@ -9,5 +9,5 @@ lightgbm>=4.0.0
 requests>=2.31.0
 websocket-client>=1.6.0
 git+https://github.com/Kotak-Neo/Kotak-neo-api-v2.git@v2.0.2#egg=neo_api_client
-yfinance
-supabase
+yfinance==0.2.38
+supabase==2.3.0
