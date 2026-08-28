@@ -104,31 +104,86 @@ KOTAK_ENVIRONMENT = os.getenv("KOTAK_ENVIRONMENT", "prod")
 NIFTY_SPOT_TOKEN = "Nifty 50"
 NIFTY_FUT_FALLBACK = os.getenv("NIFTY_FUT_TOKEN", "53000").strip()
 
-HEAVYWEIGHT_TOKENS = {
-    "HDFCBANK": "1333", "RELIANCE": "2885", "ICICIBANK": "4963",
-    "INFY": "1594", "ITC": "1660", "TCS": "11536",
-    "LT": "11483", "AXISBANK": "5900", "KOTAKBANK": "1922", "SBIN": "3045",
+# Only raw fields are permitted to cross the common boundary.
+RAW_ALLOWED_FIELDS = {
+    "symbol",
+    "instrument_token",
+    "exchange",
+    "exchange_segment",
+    "observation_timestamp",
+    "received_timestamp",
+    "open",
+    "high",
+    "low",
+    "close",
+    "ltp",
+    "volume",
+    "oi",
+    "bid",
+    "ask",
+    "bid_qty",
+    "ask_qty",
+    "open_interest",
+    "prev_close",
+    "source_sequence",
+    "source_status",
 }
 
-FORBIDDEN_INTELLIGENCE_FIELDS = {
-    "alpha", "alpha_score", "score", "selection_score", "ranking", "rank",
-    "signal", "signals", "bias", "market_bias", "regime", "regime_score",
-    "prediction", "probability", "confidence", "label", "trade_decision",
-    "decision", "recommendation", "thesis", "invalidation", "target",
-    "stop_loss", "entry", "final_2", "final_1", "final_candidates",
-    "day_ahead_score", "setup_score", "quality_score", "composite_score",
+# Explicitly forbidden engine-intelligence fields.
+FORBIDDEN_FIELDS = {
+    "alpha",
+    "alpha_score",
+    "signal",
+    "signals",
+    "regime",
+    "prediction",
+    "predicted",
+    "confidence",
+    "ranking",
+    "rank",
+    "label",
+    "trade_decision",
+    "decision",
+    "setup_score",
+    "quality_score",
+    "day_ahead_score",
+    "direction",
+    "bias",
+    "recommendation",
+    "strategy",
+    "strategy_id",
 }
 
-# Raw market fields only. The raw broker payload is also retained for audit.
-RAW_CANONICAL_FIELDS = {
-    "ltp", "open", "high", "low", "close", "prev_close", "volume",
-    "oi", "bid", "ask", "bid_qty", "ask_qty", "vwap", "upper_circuit",
-    "lower_circuit", "price_band", "last_traded_time", "strike", "option_type",
-    "expiry", "exchange", "exchange_segment", "instrument_token", "symbol",
-}
+NIFTY_HEAVYWEIGHTS = [
+    "HDFCBANK",
+    "RELIANCE",
+    "ICICIBANK",
+    "INFY",
+    "ITC",
+    "TCS",
+    "LT",
+    "AXISBANK",
+    "KOTAKBANK",
+    "SBIN",
+]
+
+DEFAULT_YAHOO_TICKERS = [
+    "^NSEI",
+    "RELIANCE.NS",
+    "HDFCBANK.NS",
+    "ICICIBANK.NS",
+    "INFY.NS",
+    "TCS.NS",
+    "ITC.NS",
+    "LT.NS",
+    "AXISBANK.NS",
+    "KOTAKBANK.NS",
+    "SBIN.NS",
+]
+
 
 # -----------------------------------------------------------------------------
-# Utilities
+# Utility helpers
 # -----------------------------------------------------------------------------
 def now_ist() -> datetime:
     return datetime.now(IST)
@@ -138,117 +193,457 @@ def iso_now() -> str:
     return now_ist().isoformat()
 
 
-def safe_float(value: Any, default: float = float("nan")) -> float:
+def safe_float(value: Any) -> Optional[float]:
     try:
         if value is None:
-            return default
-        if isinstance(value, str):
-            value = value.replace(",", "").strip()
-            if not value:
-                return default
-        value = float(value)
-        return value if math.isfinite(value) else default
+            return None
+        if isinstance(value, bool):
+            return None
+        x = float(value)
+        if not math.isfinite(x):
+            return None
+        return x
     except Exception:
-        return default
+        return None
 
 
-def is_valid_number(value: Any) -> bool:
+def safe_int(value: Any) -> Optional[int]:
     try:
-        return value is not None and math.isfinite(float(value))
+        if value is None:
+            return None
+        return int(float(value))
     except Exception:
-        return False
+        return None
 
 
 def safe_json_value(value: Any) -> Any:
+    if value is None:
+        return None
+    if isinstance(value, (str, int, bool)):
+        return value
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
     if isinstance(value, datetime):
         return value.isoformat()
-    if isinstance(value, (pd.Timestamp,)):
-        return value.isoformat()
-    if isinstance(value, float) and not math.isfinite(value):
-        return None
-    if isinstance(value, dict):
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, Mapping):
         return {str(k): safe_json_value(v) for k, v in value.items()}
-    if isinstance(value, (list, tuple)):
+    if isinstance(value, (list, tuple, set)):
         return [safe_json_value(v) for v in value]
-    return value
+    return str(value)
 
 
-def env_or_secret(name: str) -> str:
-    value = os.getenv(name, "")
-    if value:
-        return str(value).strip()
-    if st is not None:
+def canonical_symbol(symbol: Any) -> str:
+    text = str(symbol or "").strip().upper()
+    text = re.sub(r"\s+", " ", text)
+    return text
+
+
+def source_key(source: str, symbol: str) -> str:
+    return f"{source}:{canonical_symbol(symbol)}"
+
+
+def reject_engine_fields(raw: Mapping[str, Any]) -> None:
+    lowered = {str(k).strip().lower() for k in raw.keys()}
+    illegal = sorted(lowered.intersection(FORBIDDEN_FIELDS))
+    if illegal:
+        raise ValueError(
+            "Raw-data boundary violation: forbidden engine fields present: "
+            + ", ".join(illegal)
+        )
+
+
+def filter_raw_fields(raw: Mapping[str, Any]) -> Dict[str, Any]:
+    reject_engine_fields(raw)
+    result = {}
+    for key, value in raw.items():
+        if str(key) in RAW_ALLOWED_FIELDS:
+            result[str(key)] = safe_json_value(value)
+    return result
+
+
+# -----------------------------------------------------------------------------
+# Raw observation model
+# -----------------------------------------------------------------------------
+@dataclass(frozen=True)
+class RawObservation:
+    schema_version: str
+    event_id: str
+    sequence: int
+    source: str
+    source_type: str
+    symbol: str
+    received_at: str
+    observation_timestamp: str
+    raw: Dict[str, Any]
+
+    def to_dict(self) -> Dict[str, Any]:
+        return safe_json_value(asdict(self))
+
+
+# -----------------------------------------------------------------------------
+# Shared raw store
+# -----------------------------------------------------------------------------
+class SharedRawStore:
+    """
+    Append-only local raw observation store.
+
+    This class deliberately knows nothing about any engine.
+    It only validates and persists raw observations.
+    """
+
+    def __init__(self, root: Path = ROOT):
+        self.root = Path(root)
+        self.obs_dir = self.root / "observations"
+        self.obs_dir.mkdir(parents=True, exist_ok=True)
+        self.latest_file = self.root / "latest.json"
+        self.audit_file = self.root / "producer_audit.jsonl"
+        self.lock = threading.RLock()
+        self.sequence = 0
+        self.latest: Dict[str, Dict[str, Any]] = {}
+        self._load_state()
+
+    def _load_state(self) -> None:
+        with self.lock:
+            if self.latest_file.exists():
+                try:
+                    payload = json.loads(
+                        self.latest_file.read_text(encoding="utf-8")
+                    )
+                    if isinstance(payload, dict):
+                        self.latest = payload.get("latest", payload)
+                        self.sequence = int(payload.get("sequence", 0))
+                except Exception:
+                    self.latest = {}
+                    self.sequence = 0
+
+    def _daily_path(self) -> Path:
+        return self.obs_dir / f"raw_{now_ist().date().isoformat()}.jsonl"
+
+    def _rotate_if_needed(self, path: Path) -> None:
+        if path.exists() and path.stat().st_size >= MAX_JSONL_BYTES:
+            stamp = now_ist().strftime("%Y%m%d_%H%M%S")
+            rotated = path.with_name(f"{path.stem}_{stamp}{path.suffix}")
+            os.replace(path, rotated)
+
+    def publish(
+        self,
+        raw: Mapping[str, Any],
+        source: str,
+        source_type: str,
+    ) -> RawObservation:
+        clean = filter_raw_fields(raw)
+
+        symbol = canonical_symbol(clean.get("symbol"))
+        if not symbol:
+            raise ValueError("Raw observation requires symbol")
+
+        observation_timestamp = str(
+            clean.get("observation_timestamp") or iso_now()
+        )
+        received_at = str(clean.get("received_timestamp") or iso_now())
+
+        with self.lock:
+            self.sequence += 1
+            event = RawObservation(
+                schema_version=RAW_SCHEMA_VERSION,
+                event_id=str(uuid.uuid4()),
+                sequence=self.sequence,
+                source=str(source),
+                source_type=str(source_type),
+                symbol=symbol,
+                received_at=received_at,
+                observation_timestamp=observation_timestamp,
+                raw=clean,
+            )
+
+            path = self._daily_path()
+            self._rotate_if_needed(path)
+
+            with path.open("a", encoding="utf-8") as fh:
+                fh.write(
+                    json.dumps(
+                        event.to_dict(),
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    )
+                    + "\n"
+                )
+
+            key = source_key(source, symbol)
+            self.latest[key] = event.to_dict()
+
+            payload = {
+                "schema_version": RAW_SCHEMA_VERSION,
+                "sequence": self.sequence,
+                "updated_at": iso_now(),
+                "latest": self.latest,
+            }
+
+            tmp = self.latest_file.with_suffix(".tmp")
+            tmp.write_text(
+                json.dumps(
+                    safe_json_value(payload),
+                    ensure_ascii=False,
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
+            os.replace(tmp, self.latest_file)
+
+            audit = {
+                "timestamp": iso_now(),
+                "event_id": event.event_id,
+                "sequence": event.sequence,
+                "source": event.source,
+                "source_type": event.source_type,
+                "symbol": event.symbol,
+            }
+
+            with self.audit_file.open("a", encoding="utf-8") as fh:
+                fh.write(
+                    json.dumps(
+                        audit,
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    )
+                    + "\n"
+                )
+
+            return event
+
+    def status(self) -> Dict[str, Any]:
+        with self.lock:
+            return {
+                "schema_version": RAW_SCHEMA_VERSION,
+                "sequence": self.sequence,
+                "latest_symbols": len(self.latest),
+                "latest_file": str(self.latest_file),
+                "observation_directory": str(self.obs_dir),
+                "updated_at": iso_now(),
+            }
+
+    def latest_by_source(self, source: str) -> Dict[str, Dict[str, Any]]:
+        prefix = f"{source}:"
+        with self.lock:
+            return {
+                key: value
+                for key, value in self.latest.items()
+                if key.startswith(prefix)
+            }
+
+
+# -----------------------------------------------------------------------------
+# Kotak raw producer
+# -----------------------------------------------------------------------------
+class KotakRawProducer:
+    """
+    Broker-facing producer.
+
+    Credentials remain inside this producer only.
+    No engine output is ever consumed here.
+    """
+
+    def __init__(self, store: SharedRawStore):
+        self.store = store
+        self.client = None
+        self.authenticated = False
+        self.connected = False
+        self.streaming = False
+        self.last_poll: Optional[datetime] = None
+        self.last_tick: Optional[datetime] = None
+        self.poll_count = 0
+        self.publish_count = 0
+        self.last_error = ""
+        self.future_token = ""
+        self.future_symbol = ""
+        self.pcr_tokens: List[Dict[str, Any]] = []
+        self.lock = threading.RLock()
+
+        self.consumer_key = self._secret("KOTAK_CONSUMER_KEY")
+        self.mobile = self._secret("KOTAK_MOBILE")
+        self.ucc = self._secret("KOTAK_UCC")
+        self.totp = self._secret("KOTAK_TOTP")
+        self.mpin = self._secret("KOTAK_MPIN")
+
+        self.spot_token = NIFTY_SPOT_TOKEN
+
+    @staticmethod
+    def _secret(name: str) -> str:
+        if st is not None:
+            try:
+                value = st.secrets.get(name, "")
+                if value:
+                    return str(value).strip()
+            except Exception:
+                pass
+        return str(os.getenv(name, "")).strip()
+
+    def credentials_status(self) -> Dict[str, Any]:
+        fields = {
+            "KOTAK_CONSUMER_KEY": bool(self.consumer_key),
+            "KOTAK_MOBILE": bool(self.mobile),
+            "KOTAK_UCC": bool(self.ucc),
+            "KOTAK_TOTP": bool(self.totp),
+            "KOTAK_MPIN": bool(self.mpin),
+        }
+        return {
+            "credentials_present": all(fields.values()),
+            "fields": fields,
+        }
+
+    def login(self) -> bool:
+        with self.lock:
+            if NeoAPI is None:
+                self.last_error = "neo_api_client is not installed"
+                self.authenticated = False
+                return False
+
+            status = self.credentials_status()
+            if not status["credentials_present"]:
+                self.last_error = "MISSING_KOTAK_CREDENTIALS"
+                self.authenticated = False
+                return False
+
+            try:
+                self.client = NeoAPI(
+                    environment=KOTAK_ENVIRONMENT,
+                    access_token=None,
+                    consumer_key=self.consumer_key,
+                )
+
+                login_response = self.client.login(
+                    mobile_number=self.mobile,
+                    ucc=self.ucc,
+                    totp=self.totp,
+                )
+
+                if not login_response:
+                    raise RuntimeError("Kotak login returned empty response")
+
+                try:
+                    self.client.session_2fa(
+                        OTP=self.mpin,
+                    )
+                except Exception:
+                    try:
+                        self.client.session_2fa(
+                            mpin=self.mpin,
+                        )
+                    except Exception as exc:
+                        raise RuntimeError(
+                            f"Kotak 2FA failed: {exc}"
+                        ) from exc
+
+                self.authenticated = True
+                self.connected = True
+                self.last_error = ""
+                return True
+
+            except Exception as exc:
+                self.authenticated = False
+                self.connected = False
+                self.streaming = False
+                self.last_error = f"login: {exc}"
+                return False
+
+    def _quote_batch(self) -> List[Dict[str, Any]]:
+        """
+        Build a raw quote request list.
+
+        This method only describes instruments; it does not calculate
+        any engine feature.
+        """
+        tokens = [
+            {
+                "instrument_token": self.spot_token,
+                "exchange_segment": "nse_cm",
+            }
+        ]
+
+        for symbol in NIFTY_HEAVYWEIGHTS:
+            tokens.append(
+                {
+                    "instrument_token": symbol,
+                    "exchange_segment": "nse_cm",
+                }
+            )
+
+        if self.future_token:
+            tokens.append(
+                {
+                    "instrument_token": self.future_token,
+                    "exchange_segment": "nse_fo",
+                }
+            )
+
+        return tokens
+
+    def discover(self) -> Dict[str, Any]:
+        """
+        Discover the current NIFTY future token if the SDK supports it.
+
+        Failure to discover a future does not invalidate the spot raw feed.
+        """
+        if not self.authenticated or not self.client:
+            return {
+                "success": False,
+                "error": "Kotak is not authenticated",
+            }
+
+        result = {
+            "success": True,
+            "future_symbol": self.future_symbol,
+            "future_token": self.future_token,
+        }
+
+        # The SDK/API surface differs across versions. Keep discovery
+        # defensive and never synthesize calculated data.
         try:
-            value = st.secrets.get(name, "")
-            if value:
-                return str(value).strip()
-        except Exception:
-            pass
-    return ""
+            if hasattr(self.client, "search_scrip"):
+                response = self.client.search_scrip(
+                    exchange_segment="nse_fo",
+                    symbol="NIFTY",
+                )
+                result["search_response"] = safe_json_value(response)
 
+                candidates = []
+                if isinstance(response, Mapping):
+                    for key in ("data", "scrips", "result"):
+                        value = response.get(key)
+                        if isinstance(value, list):
+                            candidates.extend(value)
 
-def normalize_mobile(value: str) -> str:
-    raw = str(value or "").strip()
-    digits = "".join(c for c in raw if c.isdigit())
-    if digits.startswith("00"):
-        digits = digits[2:]
-    if digits.startswith("91") and len(digits) == 12:
-        digits = digits[2:]
-    return "+91" + digits if len(digits) == 10 and digits[0] in "6789" else raw
+                for item in candidates:
+                    if not isinstance(item, Mapping):
+                        continue
+                    token = (
+                        item.get("token")
+                        or item.get("instrument_token")
+                        or item.get("instrumentToken")
+                    )
+                    symbol = (
+                        item.get("symbol")
+                        or item.get("trading_symbol")
+                        or item.get("tradingSymbol")
+                    )
+                    if token and symbol:
+                        text = str(symbol).upper()
+                        if "NIFTY" in text and "FUT" in text:
+                            self.future_token = str(token)
+                            self.future_symbol = str(symbol)
+                            break
 
+        except Exception as exc:
+            result["success"] = False
+            result["error"] = str(exc)
 
-def generate_totp(secret_or_otp: str) -> str:
-    raw = str(secret_or_otp or "").strip().replace(" ", "").upper()
-    if raw.isdigit() and len(raw) == 6:
-        return raw
-    try:
-        if len(raw) % 8:
-            raw += "=" * (8 - len(raw) % 8)
-        key = base64.b32decode(raw, casefold=True)
-        counter = int(time.time() // 30)
-        digest = hmac.new(key, struct.pack(">Q", counter), hashlib.sha1).digest()
-        offset = digest[-1] & 15
-        code = (struct.unpack(">I", digest[offset:offset + 4])[0] & 0x7fffffff) % 1_000_000
-        return f"{code:06d}"
-    except Exception:
-        return raw
+        if not self.future_token:
+            self.future_token = NIFTY_FUT_FALLBACK
 
-
-def token_from_record(record: Mapping[str, Any]) -> str:
-    for key in ("exchange_token", "pSymbol", "pSymbolToken", "instrument_token",
-                "instrumentToken", "tok", "token", "pToken", "tk"):
-        value = record.get(key)
-        if value is not None and str(value).strip():
-            return str(value).strip()
-    return ""
-
-
-def extract_ltp(record: Mapping[str, Any]) -> float:
-    for key in ("ltp", "lp", "last_price", "last_traded_price", "c", "close", "lastPrice"):
-        value = safe_float(record.get(key))
-        if is_valid_number(value) and value > 0:
-            return value
-    return float("nan")
-
-
-def extract_oi(record: Mapping[str, Any]) -> float:
-    keys = ("oi", "open_interest", "openInterest", "OpenInterest", "oI", "OI",
-            "open_int", "opnInterest", "openInt", "dOpenInterest")
-    for key in keys:
-        value = safe_float(record.get(key))
-        if is_valid_number(value) and value >= 0:
-            return value
-    for wrapper in ("data", "quote", "marketDepth", "depth", "ohlc"):
-        nested = record.get(wrapper)
-        if isinstance(nested, dict):
-            for key in keys:
-                value = safe_float(nested.get(key))
-                if is_valid_number(value) and value >= 0:
-                    return value
-    return float("nan")
-
-
-def record_list(response: Any) -> List[Dict[str, Any]]:
+        return result
+        def record_list(response: Any) -> List[Dict[str, Any]]:
     if isinstance(response, list):
         return [x for x in response if isinstance(x, dict)]
     if not isinstance(response, dict):
@@ -311,6 +706,7 @@ def detect_forbidden(payload: Mapping[str, Any]) -> List[str]:
         if str(key).strip().lower() in FORBIDDEN_INTELLIGENCE_FIELDS:
             found.append(str(key))
     return sorted(set(found))
+
 
 # -----------------------------------------------------------------------------
 # Shared raw-data store
@@ -430,6 +826,7 @@ class SharedRawStore:
             "latest_file_age_sec": age,
         }
 
+
 # -----------------------------------------------------------------------------
 # Kotak raw adapter
 # -----------------------------------------------------------------------------
@@ -499,7 +896,304 @@ class KotakRawProducer:
     def on_open(self, message=None):
         self.connected = True
 
+    def on_error(self, message=None):
+        self.connected = False
+        self.last_error = str(message)
+
     def on_close(self, message=None):
+        self.connected = False
+        self.streaming = False
+        self.last_error = str(message)
+
+    def on_message(self, message=None):
+        self.connected = True
+        self.last_tick = now_ist()
+        self._handle_message(message)
+
+    def _handle_message(self, message: Any) -> None:
+        """
+        Normalize a broker message into raw observations only.
+        No indicators, scores, signals, or engine decisions are generated.
+        """
+        records = record_list(message)
+        if not records and isinstance(message, Mapping):
+            records = [dict(message)]
+
+        for record in records:
+            raw = self._normalize_quote(record)
+            if raw is None:
+                continue
+            try:
+                event = self.store.publish(
+                    raw,
+                    source="kotak_neo",
+                    source_type="live",
+                )
+                key = f"{event['exchange']}:{event['symbol']}"
+                self.latest[key] = event
+                self.publish_count += 1
+            except Exception as exc:
+                self.last_error = f"publish: {exc}"
+
+    def _normalize_quote(self, record: Mapping[str, Any]) -> Optional[Dict[str, Any]]:
+        if not record:
+            return None
+
+        symbol = (
+            record.get("symbol")
+            or record.get("trading_symbol")
+            or record.get("tradingSymbol")
+            or record.get("ts")
+            or record.get("pTrdSymbol")
+            or record.get("instrument_token")
+            or record.get("token")
+        )
+
+        if not symbol:
+            return None
+
+        ltp = (
+            record.get("ltp")
+            or record.get("last_traded_price")
+            or record.get("lastPrice")
+            or record.get("last_traded_price")
+            or record.get("lp")
+            or record.get("last")
+        )
+
+        open_price = record.get("open") or record.get("o")
+        high = record.get("high") or record.get("h")
+        low = record.get("low") or record.get("l")
+        close = record.get("close") or record.get("c")
+        volume = record.get("volume") or record.get("v")
+        oi = record.get("oi") or record.get("open_interest") or record.get("openInterest")
+
+        bid = record.get("bid") or record.get("bid_price") or record.get("bp")
+        ask = record.get("ask") or record.get("ask_price") or record.get("ap")
+
+        observation_timestamp = (
+            record.get("observation_timestamp")
+            or record.get("timestamp")
+            or record.get("exchange_timestamp")
+            or record.get("ft")
+            or iso_now()
+        )
+
+        return {
+            "symbol": canonical_symbol(symbol),
+            "instrument_token": str(
+                record.get("instrument_token")
+                or record.get("token")
+                or ""
+            ),
+            "exchange": str(
+                record.get("exchange")
+                or record.get("exchange_segment")
+                or "NSE"
+            ),
+            "exchange_segment": str(
+                record.get("exchange_segment")
+                or "nse_cm"
+            ),
+            "observation_timestamp": str(observation_timestamp),
+            "received_timestamp": iso_now(),
+            "open": safe_float(open_price),
+            "high": safe_float(high),
+            "low": safe_float(low),
+            "close": safe_float(close),
+            "ltp": safe_float(ltp),
+            "volume": safe_float(volume),
+            "oi": safe_float(oi),
+            "bid": safe_float(bid),
+            "ask": safe_float(ask),
+            "bid_qty": safe_float(
+                record.get("bid_qty") or record.get("bid_quantity")
+            ),
+            "ask_qty": safe_float(
+                record.get("ask_qty") or record.get("ask_quantity")
+            ),
+            "prev_close": safe_float(
+                record.get("prev_close") or record.get("previous_close")
+            ),
+            "source_sequence": record.get("sequence") or record.get("seq"),
+            "source_status": "LIVE",
+        }
+
+    def discover(self) -> Dict[str, Any]:
+        if not self.client or not self.authenticated:
+            return {"success": False, "error": "not authenticated"}
+
+        result: Dict[str, Any] = {
+            "success": True,
+            "future_token": self.future_token,
+            "future_symbol": self.future_symbol,
+        }
+
+        # Best-effort instrument discovery. Raw-only.
+        for method_name in ("search_scrip", "searchScrip"):
+            method = getattr(self.client, method_name, None)
+            if not callable(method):
+                continue
+            try:
+                response = method(
+                    exchange_segment="nse_fo",
+                    symbol="NIFTY",
+                )
+                records = record_list(response)
+                result["records_found"] = len(records)
+
+                for item in records:
+                    sym = str(
+                        item.get("symbol")
+                        or item.get("trading_symbol")
+                        or item.get("tradingSymbol")
+                        or item.get("ts")
+                        or ""
+                    ).upper()
+
+                    token = (
+                        item.get("instrument_token")
+                        or item.get("token")
+                        or item.get("instrumentToken")
+                    )
+
+                    if token and "NIFTY" in sym and (
+                        "FUT" in sym or "FUTURE" in sym
+                    ):
+                        self.future_token = str(token)
+                        self.future_symbol = sym
+                        result["future_token"] = self.future_token
+                        result["future_symbol"] = self.future_symbol
+                        break
+                break
+            except Exception as exc:
+                result["success"] = False
+                result["error"] = str(exc)
+
+        return result
+
+    def subscribe(self) -> int:
+        if not self.client or not self.authenticated:
+            raise RuntimeError("Kotak is not authenticated")
+
+        tokens = self._quote_batch()
+
+        try:
+            if hasattr(self.client, "subscribe"):
+                instrument_tokens = []
+                for item in tokens:
+                    instrument_tokens.append(
+                        {
+                            "instrument_token": item["instrument_token"],
+                            "exchange_segment": item["exchange_segment"],
+                        }
+                    )
+
+                self.client.subscribe(
+                    instrument_tokens=instrument_tokens,
+                    isIndex=False,
+                )
+
+            self.streaming = True
+            self.connected = True
+            return len(tokens)
+
+        except Exception as exc:
+            self.streaming = False
+            self.last_error = f"subscribe: {exc}"
+            raise
+
+    def _quote_batch(self) -> List[Dict[str, Any]]:
+        tokens = [
+            {
+                "instrument_token": self.spot_token,
+                "exchange_segment": "nse_cm",
+            }
+        ]
+
+        for symbol, token in self.heavy_tokens.items():
+            tokens.append(
+                {
+                    "instrument_token": token,
+                    "exchange_segment": "nse_cm",
+                }
+            )
+
+        if self.future_token:
+            tokens.append(
+                {
+                    "instrument_token": self.future_token,
+                    "exchange_segment": "nse_fo",
+                }
+            )
+
+        return tokens
+
+    def poll(self) -> int:
+        if not self.client or not self.authenticated:
+            raise RuntimeError("Kotak is not authenticated")
+
+        count = 0
+
+        try:
+            tokens = self._quote_batch()
+
+            if hasattr(self.client, "quotes"):
+                response = self.client.quotes(
+                    instrument_tokens=tokens,
+                )
+
+                records = record_list(response)
+
+                for record in records:
+                    raw = self._normalize_quote(record)
+                    if raw is None:
+                        continue
+
+                    try:
+                        event = self.store.publish(
+                            raw,
+                            source="kotak_neo",
+                            source_type="live",
+                        )
+                        key = f"{event['exchange']}:{event['symbol']}"
+                        self.latest[key] = event
+                        self.publish_count += 1
+                        count += 1
+                    except Exception as exc:
+                        self.last_error = f"poll publish: {exc}"
+
+            self.poll_count += 1
+            self.last_poll = now_ist()
+            self.connected = True
+
+            if count:
+                self.last_tick = now_ist()
+
+            return count
+
+        except Exception as exc:
+            self.last_poll = now_ist()
+            self.connected = False
+            self.last_error = f"poll: {exc}"
+            raise
+
+    def status(self) -> Dict[str, Any]:
+        with self.lock:
+            return {
+                "authenticated": bool(self.authenticated),
+                "connected": bool(self.connected),
+                "streaming": bool(self.streaming),
+                "last_poll": self.last_poll.isoformat() if self.last_poll else None,
+                "last_tick": self.last_tick.isoformat() if self.last_tick else None,
+                "poll_count": self.poll_count,
+                "published_count": self.publish_count,
+                "last_error": self.last_error,
+                "future_token": self.future_token,
+                "future_symbol": self.future_symbol,
+                "option_tokens": len(self.pcr_tokens),
+            }
+                def on_close(self, message=None):
         self.streaming = False
         self.connected = False
 
@@ -749,6 +1443,7 @@ class YahooRawProducer:
     def fetch(self, tickers: List[str], period: str = "1y") -> Dict[str, Any]:
         if yf is None:
             raise RuntimeError("yfinance is not installed")
+                        raise RuntimeError("yfinance is not installed")
         self.last_run = now_ist()
         published = 0
         successful = 0
