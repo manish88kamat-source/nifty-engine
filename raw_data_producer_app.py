@@ -143,39 +143,52 @@ class KotakConnector:
         self.connected = True
         return True
 
-    def discover_instruments(self):
+        def discover_instruments(self):
         if not self.connected or not self.client:
             raise RuntimeError("Kotak connector is not authenticated.")
         
         self.logs.clear()
         
-        # 1. Resolve Active Nifty Future Token (Strict Check - No Fake Fallback)
+        # Flexible & Robust Active Nifty Future Token Resolution
         res = self.client.search_scrip(exchange_segment="nse_fo", symbol="NIFTY")
         records = res.get("result", res.get("data", [])) if isinstance(res, dict) else []
         now_d = now_ist().date()
         
         futures = []
         for r in records:
-            sym = str(r.get("pTrdSymbol", r.get("ts", ""))).upper().strip()
+            sym = str(r.get("pTrdSymbol", r.get("ts", r.get("symbol", "")))).upper().strip()
             inst = str(r.get("pInstType", "")).upper()
-            if sym.startswith("NIFTY") and ("FUT" in sym or "FUTIDX" in inst):
+            
+            # Check if it's a Nifty Index Future and NOT bank/fin/midcap
+            if "NIFTY" in sym and ("FUT" in sym or "FUTIDX" in inst):
                 if not any(x in sym for x in ["BANK", "FIN", "MID", "IT", "SENSEX", "FPI"]):
-                    exp_val = r.get("pExpiryDate", r.get("expiryDate"))
+                    exp_val = r.get("pExpiryDate", r.get("expiryDate", r.get("lExpiryDate")))
                     try:
-                        exp_dt = datetime.strptime(str(exp_val), "%d%b%Y").date() if len(str(exp_val))>7 else now_d
-                        if exp_dt >= now_d:
-                            tok = str(r.get("pSymbolToken", r.get("instrument_token", "")))
+                        # Try parsing various expiry formats safely
+                        exp_dt = None
+                        if exp_val:
+                            for fmt in ["%d%b%Y", "%d%b%y", "%Y-%m-%d", "%d-%m-%Y"]:
+                                try:
+                                    exp_dt = datetime.strptime(str(exp_val).upper(), fmt).date()
+                                    break
+                                except Exception:
+                                    pass
+                        
+                        if exp_dt is None or exp_dt >= now_d:
+                            tok = str(r.get("pSymbolToken", r.get("instrument_token", r.get("token", ""))))
                             if tok:
-                                futures.append((exp_dt, tok, sym))
+                                futures.append((exp_dt if exp_dt else now_d, tok, sym))
                     except Exception:
                         pass
         
         if not futures:
-            raise RuntimeError("Active NIFTY future contract could not be discovered. Aborting to avoid dataset contamination.")
+            raise RuntimeError("Active NIFTY future contract could not be discovered. Check if nse_fo segment search is returning records.")
         
+        # Sort by expiry to pick the nearest active contract
         futures.sort(key=lambda x: x[0])
         self.future_token = futures[0][1]
-        self.logs.append(f"Discovered Active Nifty Future: {futures[0][2]} (Token: {self.future_token}, Expiry: {futures[0][0]})")
+        self.logs.append(f"Discovered Active Nifty Future: {futures[0][2]} (Token: {self.future_token})")
+
 
         # 2. PCR & Option Discovery (Raw Only)
         spot_res = self.client.quotes(instrument_tokens=[{"instrument_token": "Nifty 50", "exchange_segment": "nse_cm"}], quote_type="all")
