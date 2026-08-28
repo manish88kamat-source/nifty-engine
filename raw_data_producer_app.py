@@ -4,6 +4,7 @@ Leak-Proof Raw Data Producer | Institutional Research Bus
 - Zero local calculations, zero indicators, zero ML.
 - Strict token resolution (no fake fallbacks).
 - Publishes raw normalized payloads directly to Supabase `raw_observations`.
+- Throttling-safe background loop (no st.rerun abuse).
 """
 
 from __future__ import annotations
@@ -23,6 +24,7 @@ from zoneinfo import ZoneInfo
 
 import pandas as pd
 import yfinance as yf
+import requests
 
 try:
     import streamlit as st
@@ -33,11 +35,6 @@ try:
     from neo_api_client import NeoAPI
 except ImportError:
     NeoAPI = None
-
-try:
-    from supabase import create_client, Client
-except ImportError:
-    create_client = None
 
 
 # =========================================================
@@ -164,7 +161,6 @@ class KotakConnector:
             if sym.startswith("NIFTY") and ("FUT" in sym or "FUTIDX" in inst):
                 if not any(x in sym for x in ["BANK", "FIN", "MID", "IT", "SENSEX", "FPI"]):
                     exp_val = r.get("pExpiryDate", r.get("expiryDate"))
-                    # Parse expiry validation
                     try:
                         exp_dt = datetime.strptime(str(exp_val), "%d%b%Y").date() if len(str(exp_val))>7 else now_d
                         if exp_dt >= now_d:
@@ -261,18 +257,24 @@ class YahooConnector:
 
 
 # =========================================================
-# 3. SUPABASE PUBLISHER
+# 3. SUPABASE PUBLISHER (Lightweight REST API via Requests)
 # =========================================================
 class SupabasePublisher:
     def __init__(self):
-        url = env_or_secret("SUPABASE_URL", CONFIG["supabase_url"])
-        key = env_or_secret("SUPABASE_KEY", CONFIG["supabase_key"])
-        self.client: Optional[Client] = create_client(url, key) if (create_client and url and key) else None
+        self.url = env_or_secret("SUPABASE_URL", CONFIG["supabase_url"])
+        self.key = env_or_secret("SUPABASE_KEY", CONFIG["supabase_key"])
 
     def publish_observation(self, source: str, symbol: str, token: str, raw_payload: dict):
-        if not self.client:
+        if not self.url or not self.key:
             return False
         try:
+            endpoint = f"{self.url.rstrip('/')}/rest/v1/raw_observations"
+            headers = {
+                "apikey": self.key,
+                "Authorization": f"Bearer {self.key}",
+                "Content-Type": "application/json",
+                "Prefer": "return=minimal"
+            }
             record = {
                 "source": source,
                 "symbol": symbol,
@@ -280,8 +282,8 @@ class SupabasePublisher:
                 "observation_timestamp": now_ist().isoformat(),
                 "raw": raw_payload
             }
-            self.client.table("raw_observations").insert(record).execute()
-            return True
+            resp = requests.post(endpoint, headers=headers, json=record, timeout=5)
+            return resp.status_code in (200, 201, 204)
         except Exception as e:
             print(f"Supabase publish error: {e}")
             return False
@@ -315,7 +317,7 @@ def main():
             if st.button("Connect Kotak"):
                 try:
                     with st.spinner("Authenticating..."):
-                        kotak.login(totp_override=totp_input)
+                        kotak.login(live_totp_override=totp_input)
                         st.success("Authenticated Successfully!")
                 except Exception as e:
                     st.error(str(e))
@@ -350,44 +352,51 @@ def main():
             for log in kotak.logs[-10:]:
                 st.text(log)
 
-    # Background Live Polling & Publishing Loop
+    # Background Live Polling & Publishing Loop (Throttling-Safe)
     if st.session_state.producer_running:
         st.info("🟢 Raw Producer is active. Polling broker quotes and publishing to Supabase `raw_observations`...")
-        placeholder = st.empty()
         
+        status_container = st.empty()
+        log_container = st.empty()
+        
+        poll_cycle = 0
         while st.session_state.producer_running:
-            raw_quotes = kotak.fetch_raw_quotes()
-            published_count = 0
-            
-            for q in raw_quotes:
-                # Extract token & symbol dynamically without altering payload
-                tok = str(q.get("instrument_token", q.get("pSymbolToken", "UNKNOWN")))
-                sym = str(q.get("display_symbol", q.get("pTrdSymbol", "NIFTY")))
+            try:
+                raw_quotes = kotak.fetch_raw_quotes()
+                published_count = 0
                 
-                success = supabase.publish_observation(
-                    source="kotak_live",
-                    symbol=sym,
-                    token=tok,
-                    raw_payload=q
-                )
-                if success:
-                    published_count += 1
-
-            # Fetch Yahoo macro once in a while or display last status
-            macro_data = YahooConnector.fetch_macro_data()
-            for ticker, df in macro_data.items():
-                if not df.empty:
-                    latest_row = df.iloc[-1].to_dict()
-                    supabase.publish_observation(
-                        source="yahoo_macro",
-                        symbol=ticker,
-                        token=ticker,
-                        raw_payload={str(k): v for k, v in latest_row.items()}
+                for q in raw_quotes:
+                    tok = str(q.get("instrument_token", q.get("pSymbolToken", "UNKNOWN")))
+                    sym = str(q.get("display_symbol", q.get("pTrdSymbol", "NIFTY")))
+                    
+                    success = supabase.publish_observation(
+                        source="kotak_live",
+                        symbol=sym,
+                        token=tok,
+                        raw_payload=q
                     )
+                    if success:
+                        published_count += 1
 
-            placeholder.text(f"Last Poll: {now_ist().strftime('%H:%M:%S')} | Published {published_count} raw quotes to Supabase bus.")
+                if poll_cycle % 10 == 0:
+                    macro_data = YahooConnector.fetch_macro_data()
+                    for ticker, df in macro_data.items():
+                        if not df.empty:
+                            latest_row = df.iloc[-1].to_dict()
+                            supabase.publish_observation(
+                                source="yahoo_macro",
+                                symbol=ticker,
+                                token=ticker,
+                                raw_payload={str(k): v for k, v in latest_row.items()}
+                            )
+
+                status_container.text(f"Last Poll: {now_ist().strftime('%H:%M:%S')} | Published {published_count} raw quotes to Supabase bus.")
+                poll_cycle += 1
+                
+            except Exception as e:
+                log_container.error(f"Producer loop exception: {e}")
+                
             time.sleep(3.0)
-            st.rerun()
 
 if __name__ == "__main__":
     main()
