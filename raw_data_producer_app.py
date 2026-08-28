@@ -3,41 +3,41 @@
 COMMON RAW DATA PRODUCER
 ========================
 
-Standalone Streamlit application for the three isolated engines:
+Three-machine RAW market-data producer.
 
-                    KOTAK LIVE
-                        |
-                        |
-                    YAHOO RAW
-                        |
-                        v
-              +-------------------+
-              |   RAW PRODUCER    |
-              |                   |
-              | RAW ONLY          |
-              | NO ENGINE LOGIC   |
-              +---------+---------+
-                        |
-                        v
-                SUPABASE RAW BUS
-                  /      |      \
-                 /       |       \
-                v        v        v
-             NIFTY     ALPHA      GSR
+                         KOTAK LIVE
+                             |
+                         YAHOO RAW
+                             |
+                             v
+                  +----------------------+
+                  |   RAW DATA PRODUCER  |
+                  |                      |
+                  |   RAW ONLY           |
+                  |   NO INTELLIGENCE    |
+                  +----------+-----------+
+                             |
+                             v
+                    SUPABASE RAW BUS
+                      /      |      \
+                     /       |       \
+                    v        v        v
+                 NIFTY     ALPHA      GSR
+
 
 STRICT ARCHITECTURAL CONTRACT
 -----------------------------
 
-This application is a DATA PRODUCER only.
+This application is a DATA PRODUCER ONLY.
 
 It may:
     - authenticate with Kotak
     - receive Kotak raw market observations
     - poll Kotak raw quotes
     - subscribe to Kotak raw feed
-    - discover raw instruments
+    - discover NIFTY futures/options
     - fetch Yahoo historical OHLCV
-    - publish raw observations to Supabase
+    - publish raw observations
     - maintain a local audit/cache mirror
     - publish producer health
 
@@ -59,30 +59,34 @@ It MUST NOT:
     - consume Alpha engine output
     - consume GSR output
 
-ENGINE ISOLATION
-----------------
-
-NIFTY, Next-Day Alpha and GSR are independent consumers.
-
-Only RAW OBSERVATIONS may cross the common boundary.
-
-Producer credentials are never published to consumers.
+ONLY RAW OBSERVATIONS CROSS THE COMMON BOUNDARY.
 
 REMOTE SOURCE OF TRUTH
 ----------------------
 
-Supabase:
+Supabase tables:
+
     raw_observations
     consumer_heartbeats
     producer_health
 
-Local disk is only an audit/cache mirror.
+LOCAL DISK
+----------
 
-Required secrets:
+Local disk is an audit/cache mirror only.
+
+It is NEVER advertised as the cross-machine source of truth.
+
+SECRETS
+-------
+
+Required:
+
     SUPABASE_URL
     SUPABASE_SERVICE_ROLE_KEY
 
-Kotak secrets:
+Kotak:
+
     KOTAK_CONSUMER_KEY
     KOTAK_MOBILE
     KOTAK_UCC
@@ -90,12 +94,15 @@ Kotak secrets:
     KOTAK_MPIN
 
 Optional:
+
     KOTAK_ENVIRONMENT=prod
     KOTAK_NIFTY_FUT_TOKEN
     RAW_LOCAL_CACHE_DIR=./raw_producer_cache
     RAW_PRODUCER_POLL_SECONDS=3
 
-Run:
+RUN
+---
+
     streamlit run raw_data_producer_app.py
 """
 
@@ -120,12 +127,11 @@ from urllib.request import Request, urlopen
 from zoneinfo import ZoneInfo
 
 import pandas as pd
-import streamlit as st
 
-
-# ============================================================================
-# OPTIONAL DEPENDENCIES
-# ============================================================================
+try:
+    import streamlit as st
+except Exception:
+    st = None
 
 try:
     from neo_api_client import NeoAPI
@@ -144,15 +150,23 @@ except Exception:
 
 IST = ZoneInfo("Asia/Kolkata")
 
-PRODUCER_VERSION = "RAW_PRODUCER_2.1.0"
-RAW_SCHEMA_VERSION = "RAW_OBSERVATION_2.0"
-HEALTH_SCHEMA_VERSION = "RAW_HEALTH_1.0"
+PRODUCER_VERSION = "RAW_PRODUCER_3.0.0"
+RAW_SCHEMA_VERSION = "RAW_OBSERVATION_2.1"
+HEALTH_SCHEMA_VERSION = "RAW_HEALTH_1.1"
 
-KOTAK_ENVIRONMENT = os.getenv("KOTAK_ENVIRONMENT", "prod")
+KOTAK_ENVIRONMENT = os.getenv(
+    "KOTAK_ENVIRONMENT",
+    "prod",
+)
 
 POLL_SECONDS = max(
     1,
-    int(os.getenv("RAW_PRODUCER_POLL_SECONDS", "3")),
+    int(
+        os.getenv(
+            "RAW_PRODUCER_POLL_SECONDS",
+            "3",
+        )
+    ),
 )
 
 LOCAL_ROOT = Path(
@@ -174,10 +188,16 @@ LOCAL_OBS.mkdir(
     exist_ok=True,
 )
 
+LOCAL_HEALTH = LOCAL_ROOT / "producer_health.json"
+
+LOCAL_AUDIT = LOCAL_ROOT / "producer_audit.jsonl"
+
 
 # ============================================================================
-# KOTAK INSTRUMENTS
+# INSTRUMENTS
 # ============================================================================
+
+NIFTY_INDEX_TOKEN = "Nifty 50"
 
 HEAVYWEIGHT_TOKENS: Dict[str, str] = {
     "HDFCBANK": "1333",
@@ -191,8 +211,6 @@ HEAVYWEIGHT_TOKENS: Dict[str, str] = {
     "KOTAKBANK": "1922",
     "SBIN": "3045",
 }
-
-NIFTY_INDEX_TOKEN = "Nifty 50"
 
 DEFAULT_YAHOO_TICKERS = [
     "^NSEI",
@@ -213,7 +231,7 @@ DEFAULT_YAHOO_TICKERS = [
 # RAW BOUNDARY
 # ============================================================================
 
-FORBIDDEN_FIELDS = {
+FORBIDDEN_INTELLIGENCE_FIELDS = {
     "alpha",
     "alpha_score",
     "score",
@@ -237,6 +255,7 @@ FORBIDDEN_FIELDS = {
     "thesis",
     "invalidation",
     "target",
+    "targets",
     "stop",
     "stop_loss",
     "entry",
@@ -247,9 +266,9 @@ FORBIDDEN_FIELDS = {
     "setup_score",
     "quality_score",
     "composite_score",
-    "direction",
     "strategy",
     "strategy_id",
+    "market_direction",
 }
 
 RAW_ALLOWED_FIELDS = {
@@ -257,6 +276,7 @@ RAW_ALLOWED_FIELDS = {
     "instrument_token",
     "exchange",
     "exchange_segment",
+    "instrument_type",
     "observation_timestamp",
     "received_timestamp",
     "open",
@@ -286,7 +306,7 @@ RAW_ALLOWED_FIELDS = {
 
 
 # ============================================================================
-# TIME / VALUE HELPERS
+# TIME / JSON HELPERS
 # ============================================================================
 
 def now_ist() -> datetime:
@@ -297,24 +317,40 @@ def iso_now() -> str:
     return now_ist().isoformat()
 
 
-def safe_float(value: Any) -> Optional[float]:
+def safe_float(
+    value: Any,
+) -> Optional[float]:
+
     try:
+
         if value is None:
             return None
 
-        if isinstance(value, bool):
+        if isinstance(
+            value,
+            bool,
+        ):
             return None
 
-        text = str(value).strip()
+        text = str(
+            value
+        ).strip()
 
         if not text:
             return None
 
-        text = text.replace(",", "")
+        text = text.replace(
+            ",",
+            "",
+        )
 
-        number = float(text)
+        number = float(
+            text
+        )
 
-        if not math.isfinite(number):
+        if not math.isfinite(
+            number
+        ):
             return None
 
         return number
@@ -323,41 +359,55 @@ def safe_float(value: Any) -> Optional[float]:
         return None
 
 
-def safe_int(value: Any) -> Optional[int]:
-    try:
-        if value is None:
-            return None
-
-        return int(float(str(value).replace(",", "").strip()))
-
-    except Exception:
-        return None
-
-
-def json_safe(value: Any) -> Any:
+def safe_json(
+    value: Any,
+) -> Any:
 
     if value is None:
         return None
 
-    if isinstance(value, (str, int, bool)):
+    if isinstance(
+        value,
+        (str, int, bool),
+    ):
         return value
 
-    if isinstance(value, float):
-        return value if math.isfinite(value) else None
+    if isinstance(
+        value,
+        float,
+    ):
 
-    if isinstance(value, (datetime, pd.Timestamp)):
+        return (
+            value
+            if math.isfinite(value)
+            else None
+        )
+
+    if isinstance(
+        value,
+        (datetime, pd.Timestamp),
+    ):
+
         return value.isoformat()
 
-    if isinstance(value, Mapping):
+    if isinstance(
+        value,
+        Mapping,
+    ):
+
         return {
-            str(key): json_safe(item)
-            for key, item in value.items()
+            str(k): safe_json(v)
+            for k, v in value.items()
         }
 
-    if isinstance(value, (list, tuple, set)):
+    if isinstance(
+        value,
+        (list, tuple, set),
+    ):
+
         return [
-            json_safe(item)
-            for item in value
+            safe_json(v)
+            for v in value
         ]
 
     return str(value)
@@ -367,39 +417,63 @@ def json_safe(value: Any) -> Any:
 # SECRETS
 # ============================================================================
 
-def secret(name: str) -> str:
+def secret(
+    name: str,
+) -> str:
 
-    value = os.getenv(name, "")
+    value = os.getenv(
+        name,
+        "",
+    )
 
     if value:
-        return str(value).strip()
+        return str(
+            value
+        ).strip()
 
-    try:
-        value = st.secrets.get(name, "")
+    if st is not None:
 
-        if value:
-            return str(value).strip()
+        try:
 
-    except Exception:
-        pass
+            value = st.secrets.get(
+                name,
+                "",
+            )
+
+            if value:
+                return str(
+                    value
+                ).strip()
+
+        except Exception:
+            pass
 
     return ""
 
 
-def normalize_mobile(value: str) -> str:
+def normalize_mobile(
+    value: str,
+) -> str:
 
-    raw = str(value or "").strip()
+    raw = str(
+        value or ""
+    ).strip()
 
     digits = "".join(
-        character
-        for character in raw
-        if character.isdigit()
+        ch
+        for ch in raw
+        if ch.isdigit()
     )
 
-    if digits.startswith("00"):
+    if digits.startswith(
+        "00"
+    ):
         digits = digits[2:]
 
-    if digits.startswith("91") and len(digits) == 12:
+    if (
+        digits.startswith("91")
+        and len(digits) == 12
+    ):
         digits = digits[2:]
 
     if (
@@ -415,21 +489,36 @@ def normalize_mobile(value: str) -> str:
 # TOTP
 # ============================================================================
 
-def generate_totp(value: str) -> str:
+def generate_totp(
+    secret_or_otp: str,
+) -> str:
 
-    raw = str(value or "").replace(
-        " ",
-        "",
-    ).upper()
+    raw = (
+        str(
+            secret_or_otp or ""
+        )
+        .replace(" ", "")
+        .strip()
+        .upper()
+    )
 
-    # If the secret itself is already a 6 digit OTP,
-    # allow it as-is.
-    if raw.isdigit() and len(raw) == 6:
+    if (
+        raw.isdigit()
+        and len(raw) == 6
+    ):
         return raw
 
     try:
+
         padded = raw + (
-            "=" * ((8 - len(raw) % 8) % 8)
+            "="
+            * (
+                (
+                    8
+                    - len(raw) % 8
+                )
+                % 8
+            )
         )
 
         key = base64.b32decode(
@@ -450,9 +539,12 @@ def generate_totp(value: str) -> str:
             hashlib.sha1,
         ).digest()
 
-        offset = digest[-1] & 15
+        offset = (
+            digest[-1]
+            & 15
+        )
 
-        binary_code = (
+        code = (
             struct.unpack(
                 ">I",
                 digest[
@@ -463,11 +555,12 @@ def generate_totp(value: str) -> str:
             & 0x7FFFFFFF
         )
 
-        otp = binary_code % 1000000
+        code %= 1_000_000
 
-        return f"{otp:06d}"
+        return f"{code:06d}"
 
     except Exception:
+
         return raw
 
 
@@ -480,17 +573,20 @@ def reject_intelligence(
 ) -> None:
 
     keys = {
-        str(key).strip().lower()
+        str(key)
+        .strip()
+        .lower()
         for key in payload.keys()
     }
 
     forbidden = sorted(
         keys.intersection(
-            FORBIDDEN_FIELDS
+            FORBIDDEN_INTELLIGENCE_FIELDS
         )
     )
 
     if forbidden:
+
         raise ValueError(
             "RAW boundary violation: "
             + ", ".join(forbidden)
@@ -505,20 +601,34 @@ def canonical_raw(
         payload,
         Mapping,
     ):
+
         raise ValueError(
             "Raw payload must be a mapping"
         )
 
-    reject_intelligence(payload)
+    reject_intelligence(
+        payload
+    )
 
-    result: Dict[str, Any] = {}
+    result: Dict[
+        str,
+        Any,
+    ] = {}
 
     for key, value in payload.items():
 
-        key_text = str(key)
+        key_text = str(
+            key
+        )
 
-        if key_text in RAW_ALLOWED_FIELDS:
-            result[key_text] = json_safe(value)
+        if (
+            key_text
+            in RAW_ALLOWED_FIELDS
+        ):
+
+            result[
+                key_text
+            ] = safe_json(value)
 
     return result
 
@@ -528,7 +638,7 @@ def canonical_raw(
 # ============================================================================
 
 def token_from_record(
-    row: Mapping[str, Any],
+    record: Mapping[str, Any],
 ) -> str:
 
     keys = (
@@ -537,27 +647,34 @@ def token_from_record(
         "pSymbolToken",
         "instrument_token",
         "instrumentToken",
+        "instrumentTokenId",
         "tok",
         "token",
         "pToken",
         "tk",
+        "i",
     )
 
     for key in keys:
 
-        value = row.get(key)
+        value = record.get(
+            key
+        )
 
         if value not in (
             None,
             "",
         ):
-            return str(value).strip()
+
+            return str(
+                value
+            ).strip()
 
     return ""
 
 
 def extract_ltp(
-    row: Mapping[str, Any],
+    record: Mapping[str, Any],
 ) -> Optional[float]:
 
     keys = (
@@ -573,17 +690,23 @@ def extract_ltp(
     for key in keys:
 
         value = safe_float(
-            row.get(key)
+            record.get(
+                key
+            )
         )
 
-        if value is not None and value > 0:
+        if (
+            value is not None
+            and value > 0
+        ):
+
             return value
 
     return None
 
 
 def extract_oi(
-    row: Mapping[str, Any],
+    record: Mapping[str, Any],
 ) -> Optional[float]:
 
     keys = (
@@ -602,34 +725,49 @@ def extract_oi(
     for key in keys:
 
         value = safe_float(
-            row.get(key)
+            record.get(
+                key
+            )
         )
 
-        if value is not None and value >= 0:
+        if (
+            value is not None
+            and value >= 0
+        ):
+
             return value
 
     return None
 
 
 def record_list(
-    value: Any,
-) -> List[Dict[str, Any]]:
+    response: Any,
+) -> List[
+    Dict[str, Any]
+]:
 
-    if isinstance(value, list):
+    if isinstance(
+        response,
+        list,
+    ):
 
         return [
             item
-            for item in value
-            if isinstance(item, dict)
+            for item in response
+            if isinstance(
+                item,
+                dict,
+            )
         ]
 
     if not isinstance(
-        value,
+        response,
         dict,
     ):
+
         return []
 
-    possible_keys = (
+    wrapper_keys = (
         "data",
         "result",
         "records",
@@ -639,19 +777,30 @@ def record_list(
         "message",
     )
 
-    for key in possible_keys:
+    for key in wrapper_keys:
 
-        item = value.get(key)
+        value = response.get(
+            key
+        )
 
-        if isinstance(item, list):
+        if isinstance(
+            value,
+            list,
+        ):
 
             return [
-                row
-                for row in item
-                if isinstance(row, dict)
+                item
+                for item in value
+                if isinstance(
+                    item,
+                    dict,
+                )
             ]
 
-        if isinstance(item, dict):
+        if isinstance(
+            value,
+            dict,
+        ):
 
             for nested_key in (
                 "data",
@@ -660,22 +809,198 @@ def record_list(
                 "scrips",
             ):
 
-                child = item.get(
+                nested = value.get(
                     nested_key
                 )
 
                 if isinstance(
-                    child,
+                    nested,
                     list,
                 ):
 
                     return [
-                        row
-                        for row in child
-                        if isinstance(row, dict)
+                        item
+                        for item in nested
+                        if isinstance(
+                            item,
+                            dict,
+                        )
                     ]
 
     return []
+
+
+def parse_expiry(
+    value: Any,
+) -> Optional[datetime]:
+
+    if value is None:
+        return None
+
+    if isinstance(
+        value,
+        datetime,
+    ):
+
+        if value.tzinfo:
+            return value.astimezone(
+                IST
+            )
+
+        return value.replace(
+            tzinfo=IST
+        )
+
+    try:
+
+        number = float(
+            value
+        )
+
+        if number > 10_000_000_000:
+
+            return datetime.fromtimestamp(
+                number / 1000,
+                tz=IST,
+            )
+
+        if number > 1_000_000_000:
+
+            return datetime.fromtimestamp(
+                number,
+                tz=IST,
+            )
+
+    except Exception:
+        pass
+
+    text = str(
+        value
+    ).strip().upper()
+
+    formats = (
+        "%d%b%Y",
+        "%d%b%y",
+        "%Y-%m-%d",
+        "%d-%m-%Y",
+        "%d/%m/%Y",
+        "%Y%m%d",
+    )
+
+    for fmt in formats:
+
+        try:
+
+            return datetime.strptime(
+                text,
+                fmt,
+            ).replace(
+                tzinfo=IST
+            )
+
+        except Exception:
+            continue
+
+    return None
+
+
+def extract_option_type(
+    record: Mapping[str, Any],
+) -> str:
+
+    value = str(
+        record.get(
+            "pOptionType"
+        )
+        or record.get(
+            "optType"
+        )
+        or record.get(
+            "option_type"
+        )
+        or ""
+    ).upper()
+
+    if (
+        "CE" in value
+        or "CALL" in value
+    ):
+
+        return "CE"
+
+    if (
+        "PE" in value
+        or "PUT" in value
+    ):
+
+        return "PE"
+
+    symbol = str(
+        record.get(
+            "pTrdSymbol"
+        )
+        or record.get(
+            "ts"
+        )
+        or record.get(
+            "symbol"
+        )
+        or ""
+    ).upper()
+
+    if symbol.endswith(
+        "CE"
+    ):
+
+        return "CE"
+
+    if symbol.endswith(
+        "PE"
+    ):
+
+        return "PE"
+
+    return ""
+
+
+def extract_strike(
+    record: Mapping[str, Any],
+) -> Optional[float]:
+
+    keys = (
+        "dStrikePrice",
+        "dStrikePrice;",
+        "strike_price",
+        "strikePrice",
+        "dStrike",
+        "strike",
+        "pStrikePrice",
+    )
+
+    for key in keys:
+
+        value = safe_float(
+            record.get(
+                key
+            )
+        )
+
+        if (
+            value is not None
+            and value > 0
+        ):
+
+            if value > 1_000_000:
+                value /= 100.0
+
+            elif (
+                value > 100_000
+            ):
+                value /= 100.0
+
+            return value
+
+    return None
 
 
 # ============================================================================
@@ -684,14 +1009,14 @@ def record_list(
 
 class SupabaseRawBus:
     """
-    Minimal REST client for the common remote raw bus.
+    Remote source of truth.
 
-    The producer owns the service-role credential.
-
-    Consumers only read raw observations and never receive this credential.
+    Uses service-role credentials only inside producer.
     """
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+    ) -> None:
 
         self.url = secret(
             "SUPABASE_URL"
@@ -702,7 +1027,8 @@ class SupabaseRawBus:
         )
 
         self.enabled = bool(
-            self.url and self.key
+            self.url
+            and self.key
         )
 
         self.last_error = ""
@@ -710,6 +1036,12 @@ class SupabaseRawBus:
         self.last_publish = None
 
         self.published = 0
+
+        self.lock = threading.RLock()
+
+    # ------------------------------------------------------------------------
+    # HTTP
+    # ------------------------------------------------------------------------
 
     def _request(
         self,
@@ -746,7 +1078,7 @@ class SupabaseRawBus:
         if payload is not None:
 
             body = json.dumps(
-                json_safe(payload)
+                safe_json(payload)
             ).encode(
                 "utf-8"
             )
@@ -776,17 +1108,19 @@ class SupabaseRawBus:
                 timeout=20,
             ) as response:
 
-                data = response.read()
+                raw = response.read()
 
-                if not data:
+                if not raw:
                     return None
 
-                text = data.decode(
+                text = raw.decode(
                     "utf-8"
                 )
 
                 try:
-                    return json.loads(text)
+                    return json.loads(
+                        text
+                    )
                 except Exception:
                     return text
 
@@ -798,8 +1132,9 @@ class SupabaseRawBus:
             )
 
             raise RuntimeError(
-                f"Supabase HTTP {exc.code}: "
-                f"{detail[:800]}"
+                f"Supabase HTTP "
+                f"{exc.code}: "
+                f"{detail[:1000]}"
             ) from exc
 
         except URLError as exc:
@@ -809,7 +1144,13 @@ class SupabaseRawBus:
                 f"{exc}"
             ) from exc
 
-    def health(self) -> Dict[str, Any]:
+    # ------------------------------------------------------------------------
+    # Health
+    # ------------------------------------------------------------------------
+
+    def health(
+        self,
+    ) -> Dict[str, Any]:
 
         if not self.enabled:
 
@@ -841,7 +1182,9 @@ class SupabaseRawBus:
 
         except Exception as exc:
 
-            self.last_error = str(exc)
+            self.last_error = str(
+                exc
+            )
 
             return {
                 "configured": True,
@@ -849,26 +1192,63 @@ class SupabaseRawBus:
                 "error": str(exc),
             }
 
+    # ------------------------------------------------------------------------
+    # Publish
+    # ------------------------------------------------------------------------
+
     def publish(
         self,
         event: Mapping[str, Any],
-    ) -> None:
+    ) -> bool:
 
-        self._request(
-            "POST",
-            "raw_observations",
-            dict(event),
-            prefer="return=minimal",
-        )
+        if not self.enabled:
 
-        self.last_publish = iso_now()
+            raise RuntimeError(
+                "Remote raw bus is not configured"
+            )
 
-        self.published += 1
+        try:
+
+            self._request(
+                "POST",
+                "raw_observations",
+                dict(event),
+                prefer="return=minimal",
+            )
+
+            with self.lock:
+
+                self.last_publish = (
+                    iso_now()
+                )
+
+                self.published += 1
+
+            self.last_error = ""
+
+            return True
+
+        except Exception as exc:
+
+            self.last_error = str(
+                exc
+            )
+
+            raise
+
+    # ------------------------------------------------------------------------
+    # Latest
+    # ------------------------------------------------------------------------
 
     def latest(
         self,
         limit: int = 100,
-    ) -> List[Dict[str, Any]]:
+    ) -> List[
+        Dict[str, Any]
+    ]:
+
+        if not self.enabled:
+            return []
 
         limit = max(
             1,
@@ -890,41 +1270,18 @@ class SupabaseRawBus:
             query=query,
         )
 
-        if isinstance(
-            result,
-            list,
-        ):
-            return result
-
-        return []
-
-    def heartbeat(
-        self,
-        consumer_name: str,
-        status: str,
-        **extra: Any,
-    ) -> None:
-
-        row = {
-            "consumer_name": consumer_name,
-            "status": status,
-            "heartbeat_timestamp": iso_now(),
-            "producer_version": PRODUCER_VERSION,
-        }
-
-        row.update(
-            json_safe(extra)
+        return (
+            result
+            if isinstance(
+                result,
+                list,
+            )
+            else []
         )
 
-        self._request(
-            "POST",
-            "consumer_heartbeats",
-            row,
-            prefer=(
-                "resolution=merge-duplicates,"
-                "return=minimal"
-            ),
-        )
+    # ------------------------------------------------------------------------
+    # Producer health
+    # ------------------------------------------------------------------------
 
     def producer_health(
         self,
@@ -941,6 +1298,44 @@ class SupabaseRawBus:
             ),
         )
 
+    # ------------------------------------------------------------------------
+    # Consumer heartbeat
+    # ------------------------------------------------------------------------
+
+    def consumer_health(
+        self,
+    ) -> List[
+        Dict[str, Any]
+    ]:
+
+        if not self.enabled:
+            return []
+
+        query = (
+            "select="
+            "consumer_name,"
+            "status,"
+            "heartbeat_timestamp,"
+            "updated_at"
+            "&order=updated_at.desc"
+            "&limit=50"
+        )
+
+        result = self._request(
+            "GET",
+            "consumer_heartbeats",
+            query=query,
+        )
+
+        return (
+            result
+            if isinstance(
+                result,
+                list,
+            )
+            else []
+        )
+
 
 # ============================================================================
 # LOCAL AUDIT MIRROR
@@ -950,10 +1345,12 @@ class LocalAuditMirror:
     """
     Local audit/cache only.
 
-    It is deliberately NOT the cross-app source of truth.
+    NEVER used as the three-machine source of truth.
     """
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+    ) -> None:
 
         self.sequence = 0
 
@@ -984,7 +1381,7 @@ class LocalAuditMirror:
 
                 handle.write(
                     json.dumps(
-                        json_safe(event),
+                        safe_json(event),
                         ensure_ascii=False,
                         separators=(
                             ",",
@@ -1021,9 +1418,13 @@ class KotakRawProducer:
 
         self.last_error = ""
 
-        self.last_tick: Optional[datetime] = None
+        self.last_tick: Optional[
+            datetime
+        ] = None
 
-        self.last_poll: Optional[datetime] = None
+        self.last_poll: Optional[
+            datetime
+        ] = None
 
         self.poll_count = 0
 
@@ -1078,7 +1479,8 @@ class KotakRawProducer:
             ),
             "missing": [
                 name
-                for name, ok in present.items()
+                for name, ok
+                in present.items()
                 if not ok
             ],
         }
@@ -1087,7 +1489,9 @@ class KotakRawProducer:
     # Login
     # ------------------------------------------------------------------------
 
-    def login(self) -> bool:
+    def login(
+        self,
+    ) -> bool:
 
         if NeoAPI is None:
 
@@ -1104,7 +1508,7 @@ class KotakRawProducer:
         ]:
 
             raise RuntimeError(
-                "Missing credentials: "
+                "Missing Kotak credentials: "
                 + ", ".join(
                     status["missing"]
                 )
@@ -1132,150 +1536,122 @@ class KotakRawProducer:
 
         try:
 
-            self.client = NeoAPI(
-                environment=KOTAK_ENVIRONMENT,
-                access_token=None,
-                neo_fin_key=None,
-                consumer_key=consumer_key,
-            )
+            try:
 
-        except TypeError:
-
-            # Compatibility with older SDK constructor.
-            self.client = NeoAPI(
-                environment=KOTAK_ENVIRONMENT,
-                access_token=None,
-                consumer_key=consumer_key,
-            )
-
-        self.client.on_message = (
-            self.on_message
-        )
-
-        self.client.on_error = (
-            self.on_error
-        )
-
-        self.client.on_close = (
-            self.on_close
-        )
-
-        self.client.on_open = (
-            self.on_open
-        )
-
-        # Current Kotak Neo SDK flow.
-        if hasattr(
-            self.client,
-            "totp_login",
-        ):
-
-            login_response = (
-                self.client.totp_login(
-                    mobile_number=mobile,
-                    ucc=ucc,
-                    totp=generate_totp(
-                        totp_secret
+                self.client = NeoAPI(
+                    environment=(
+                        KOTAK_ENVIRONMENT
+                    ),
+                    access_token=None,
+                    neo_fin_key=None,
+                    consumer_key=(
+                        consumer_key
                     ),
                 )
-            )
 
-            if (
-                isinstance(
-                    login_response,
-                    Mapping,
-                )
-                and login_response.get(
-                    "error"
-                )
-            ):
+            except TypeError:
 
-                raise RuntimeError(
-                    str(login_response)
-                )
-
-            validation = (
-                self.client.totp_validate(
-                    mpin=mpin
-                )
-            )
-
-            if (
-                isinstance(
-                    validation,
-                    Mapping,
-                )
-                and validation.get(
-                    "error"
-                )
-            ):
-
-                raise RuntimeError(
-                    str(validation)
-                )
-
-        # Compatibility fallback.
-        elif hasattr(
-            self.client,
-            "login",
-        ):
-
-            login_response = (
-                self.client.login(
-                    mobile_number=mobile,
-                    ucc=ucc,
-                    totp=generate_totp(
-                        totp_secret
+                self.client = NeoAPI(
+                    environment=(
+                        KOTAK_ENVIRONMENT
+                    ),
+                    access_token=None,
+                    consumer_key=(
+                        consumer_key
                     ),
                 )
+
+            self.client.on_message = (
+                self.on_message
             )
 
-            if (
-                isinstance(
-                    login_response,
-                    Mapping,
-                )
-                and login_response.get(
-                    "error"
-                )
-            ):
+            self.client.on_error = (
+                self.on_error
+            )
 
-                raise RuntimeError(
-                    str(login_response)
-                )
+            self.client.on_close = (
+                self.on_close
+            )
+
+            self.client.on_open = (
+                self.on_open
+            )
 
             if hasattr(
                 self.client,
-                "session_2fa",
+                "totp_login",
             ):
 
-                try:
+                response = (
+                    self.client.totp_login(
+                        mobile_number=mobile,
+                        ucc=ucc,
+                        totp=generate_totp(
+                            totp_secret
+                        ),
+                    )
+                )
 
-                    self.client.session_2fa(
-                        OTP=mpin
+                if (
+                    isinstance(
+                        response,
+                        Mapping,
+                    )
+                    and response.get(
+                        "error"
+                    )
+                ):
+
+                    raise RuntimeError(
+                        str(response)
                     )
 
-                except Exception:
-
-                    self.client.session_2fa(
+                validation = (
+                    self.client.totp_validate(
                         mpin=mpin
                     )
+                )
 
-        else:
+                if (
+                    isinstance(
+                        validation,
+                        Mapping,
+                    )
+                    and validation.get(
+                        "error"
+                    )
+                ):
 
-            raise RuntimeError(
-                "Installed neo_api_client "
-                "does not expose a supported "
-                "Kotak login method"
+                    raise RuntimeError(
+                        str(validation)
+                    )
+
+            else:
+
+                raise RuntimeError(
+                    "Installed Kotak SDK does not "
+                    "provide totp_login()."
+                )
+
+            self.authenticated = True
+
+            self.connected = True
+
+            self.last_error = ""
+
+            return True
+
+        except Exception as exc:
+
+            self.authenticated = False
+
+            self.connected = False
+
+            self.last_error = str(
+                exc
             )
 
-        self.authenticated = True
-
-        self.connected = True
-
-        self.last_error = ""
-
-        return True
+            raise
 
     # ------------------------------------------------------------------------
     # Callbacks
@@ -1354,7 +1730,7 @@ class KotakRawProducer:
             )
 
     # ------------------------------------------------------------------------
-    # Symbol mapping
+    # Symbol
     # ------------------------------------------------------------------------
 
     def symbol_for_token(
@@ -1362,7 +1738,9 @@ class KotakRawProducer:
         token: str,
     ) -> str:
 
-        token = str(token)
+        token = str(
+            token
+        )
 
         if token == NIFTY_INDEX_TOKEN:
             return "NIFTY_SPOT"
@@ -1370,7 +1748,9 @@ class KotakRawProducer:
         if (
             self.future_token
             and token
-            == str(self.future_token)
+            == str(
+                self.future_token
+            )
         ):
 
             return (
@@ -1384,7 +1764,9 @@ class KotakRawProducer:
         ) in HEAVYWEIGHT_TOKENS.items():
 
             if (
-                str(instrument_token)
+                str(
+                    instrument_token
+                )
                 == token
             ):
 
@@ -1406,20 +1788,52 @@ class KotakRawProducer:
         return token
 
     # ------------------------------------------------------------------------
-    # Raw quote normalization
+    # Segment
+    # ------------------------------------------------------------------------
+
+    def segment_for_token(
+        self,
+        token: str,
+    ) -> str:
+
+        token = str(
+            token
+        )
+
+        fo_tokens = {
+            str(
+                self.future_token
+            )
+        }
+
+        fo_tokens.update(
+            str(token)
+            for token
+            in self.pcr_tokens
+        )
+
+        return (
+            "nse_fo"
+            if token in fo_tokens
+            else "nse_cm"
+        )
+
+    # ------------------------------------------------------------------------
+    # Normalize raw quote
     # ------------------------------------------------------------------------
 
     def normalize_quote(
         self,
         row: Mapping[str, Any],
-    ) -> Optional[Dict[str, Any]]:
+    ) -> Optional[
+        Dict[str, Any]
+    ]:
 
         token = token_from_record(
             row
         )
 
         if not token:
-
             return None
 
         symbol = str(
@@ -1440,45 +1854,72 @@ class KotakRawProducer:
 
         if not symbol:
 
-            symbol = self.symbol_for_token(
-                token
-            )
-
-        segment = str(
-            row.get(
-                "exchange_segment"
-            )
-            or (
-                "nse_fo"
-                if token == str(
-                    self.future_token
+            symbol = (
+                self.symbol_for_token(
+                    token
                 )
-                else "nse_cm"
             )
-        )
 
         metadata = self.pcr_meta.get(
-            str(token),
+            token,
             {},
         )
 
-        return canonical_raw(
+        raw = canonical_raw(
             {
-                "symbol": symbol,
-                "instrument_token": token,
+                "symbol": (
+                    symbol
+                    or token
+                ),
+                "instrument_token": (
+                    token
+                ),
                 "exchange": "NSE",
-                "exchange_segment": segment,
-                "observation_timestamp": str(
-                    row.get(
-                        "timestamp"
+                "exchange_segment": (
+                    str(
+                        row.get(
+                            "exchange_segment"
+                        )
+                        or self.segment_for_token(
+                            token
+                        )
                     )
-                    or row.get(
-                        "exchange_timestamp"
+                ),
+                "instrument_type": (
+                    "OPTION"
+                    if metadata
+                    else (
+                        "FUTURE"
+                        if (
+                            token
+                            == str(
+                                self.future_token
+                            )
+                        )
+                        else (
+                            "INDEX"
+                            if token
+                            == NIFTY_INDEX_TOKEN
+                            else "EQUITY"
+                        )
                     )
-                    or row.get(
-                        "ft"
+                ),
+                "observation_timestamp": (
+                    str(
+                        row.get(
+                            "timestamp"
+                        )
+                        or row.get(
+                            "exchange_timestamp"
+                        )
+                        or row.get(
+                            "ft"
+                        )
+                        or iso_now()
                     )
-                    or iso_now()
+                ),
+                "received_timestamp": (
+                    iso_now()
                 ),
                 "open": safe_float(
                     row.get("o")
@@ -1522,8 +1963,12 @@ class KotakRawProducer:
                 ),
                 "volume": safe_float(
                     row.get("v")
-                    or row.get("volume")
-                    or row.get("vol")
+                    or row.get(
+                        "volume"
+                    )
+                    or row.get(
+                        "vol"
+                    )
                 ),
                 "oi": extract_oi(
                     row
@@ -1590,9 +2035,15 @@ class KotakRawProducer:
                     or ""
                 ),
                 "last_traded_time": str(
-                    row.get("ltt")
-                    or row.get("lstup_time")
-                    or row.get("ft")
+                    row.get(
+                        "lstup_time"
+                    )
+                    or row.get(
+                        "ltt"
+                    )
+                    or row.get(
+                        "ft"
+                    )
                     or ""
                 ),
                 "strike": metadata.get(
@@ -1601,19 +2052,36 @@ class KotakRawProducer:
                 "option_type": metadata.get(
                     "option_type"
                 ),
-                "expiry": metadata.get(
-                    "expiry"
+                "expiry": (
+                    metadata.get(
+                        "expiry"
+                    ).isoformat()
+                    if isinstance(
+                        metadata.get(
+                            "expiry"
+                        ),
+                        datetime,
+                    )
+                    else metadata.get(
+                        "expiry"
+                    )
                 ),
                 "source_sequence": (
-                    row.get("sequence")
-                    or row.get("seq")
+                    row.get(
+                        "sequence"
+                    )
+                    or row.get(
+                        "seq"
+                    )
                 ),
                 "source_status": "LIVE",
             }
         )
 
+        return raw
+
     # ------------------------------------------------------------------------
-    # Publish one raw observation
+    # Publish
     # ------------------------------------------------------------------------
 
     def publish_row(
@@ -1627,7 +2095,6 @@ class KotakRawProducer:
         )
 
         if not raw:
-
             return False
 
         event = {
@@ -1651,20 +2118,30 @@ class KotakRawProducer:
             "exchange": raw.get(
                 "exchange"
             ),
-            "observation_timestamp": raw.get(
-                "observation_timestamp"
-            )
-            or iso_now(),
+            "observation_timestamp": (
+                raw.get(
+                    "observation_timestamp"
+                )
+                or iso_now()
+            ),
             "received_at": iso_now(),
             "raw": raw,
         }
 
-        # Local audit first.
-        self.mirror.write(
-            event
-        )
+        # Local audit is best-effort.
+        try:
 
-        # Remote source of truth.
+            self.mirror.write(
+                event
+            )
+
+        except Exception as exc:
+
+            self.last_error = (
+                f"local audit: {exc}"
+            )
+
+        # Remote bus is authoritative.
         self.bus.publish(
             event
         )
@@ -1676,38 +2153,40 @@ class KotakRawProducer:
             )
         )
 
-        self.latest_by_token[
-            token
-        ] = event
+        with self.lock:
 
-        self.publish_count += 1
+            self.latest_by_token[
+                token
+            ] = event
 
-        self.last_tick = now_ist()
+            self.publish_count += 1
 
-        self.connected = True
+            self.last_tick = now_ist()
+
+            self.connected = True
 
         return True
 
     # ------------------------------------------------------------------------
-    # Quote token list
+    # Quote tokens
     # ------------------------------------------------------------------------
 
     def quote_tokens(
         self,
-    ) -> List[Dict[str, str]]:
+    ) -> List[
+        Dict[str, str]
+    ]:
 
         result: List[
             Dict[str, str]
-        ] = []
-
-        result.append(
+        ] = [
             {
                 "instrument_token":
                     NIFTY_INDEX_TOKEN,
                 "exchange_segment":
                     "nse_cm",
             }
-        )
+        ]
 
         for token in (
             HEAVYWEIGHT_TOKENS.values()
@@ -1735,7 +2214,9 @@ class KotakRawProducer:
                 }
             )
 
-        for token in self.pcr_tokens:
+        for token in (
+            self.pcr_tokens
+        ):
 
             result.append(
                 {
@@ -1746,9 +2227,7 @@ class KotakRawProducer:
                 }
             )
 
-        unique: List[
-            Dict[str, str]
-        ] = []
+        unique = []
 
         seen = set()
 
@@ -1783,7 +2262,6 @@ class KotakRawProducer:
     ) -> None:
 
         if not self.client:
-
             return
 
         search = getattr(
@@ -1792,8 +2270,9 @@ class KotakRawProducer:
             None,
         )
 
-        if not callable(search):
-
+        if not callable(
+            search
+        ):
             return
 
         try:
@@ -1828,7 +2307,7 @@ class KotakRawProducer:
                     row
                 )
 
-                expiry = str(
+                expiry = parse_expiry(
                     row.get(
                         "pExpiryDate"
                     )
@@ -1841,7 +2320,6 @@ class KotakRawProducer:
                     or row.get(
                         "expiry"
                     )
-                    or ""
                 )
 
                 if (
@@ -1850,6 +2328,9 @@ class KotakRawProducer:
                         "NIFTY"
                     )
                     and "FUT" in symbol
+                    and expiry is not None
+                    and expiry.date()
+                    >= now_ist().date()
                 ):
 
                     candidates.append(
@@ -1863,16 +2344,12 @@ class KotakRawProducer:
             if candidates:
 
                 candidates.sort(
-                    key=lambda item: (
-                        item[0]
-                    )
+                    key=lambda x: x[0]
                 )
 
-                (
-                    _expiry,
-                    token,
-                    symbol,
-                ) = candidates[0]
+                expiry, token, symbol = (
+                    candidates[0]
+                )
 
                 self.future_token = str(
                     token
@@ -1899,34 +2376,35 @@ class KotakRawProducer:
     ) -> int:
 
         if not self.client:
-
             return 0
 
-        # We deliberately use only the latest
-        # raw NIFTY spot observation.
-        spot_event = self.latest_by_token.get(
-            NIFTY_INDEX_TOKEN
-        )
-
-        if not spot_event:
-
-            self.pcr_tokens = []
-
-            self.pcr_meta = {}
-
-            return 0
-
-        spot_raw = (
-            spot_event.get(
-                "raw"
+        spot_event = (
+            self.latest_by_token.get(
+                NIFTY_INDEX_TOKEN
             )
-            or {}
         )
 
-        center = safe_float(
-            spot_raw.get("ltp")
-            or spot_raw.get("close")
-        )
+        center = None
+
+        if spot_event:
+
+            raw = (
+                spot_event.get(
+                    "raw"
+                )
+                or {}
+            )
+
+            center = (
+                safe_float(
+                    raw.get(
+                        "ltp"
+                    )
+                    or raw.get(
+                        "close"
+                    )
+                )
+            )
 
         if center is None:
 
@@ -1942,7 +2420,9 @@ class KotakRawProducer:
             None,
         )
 
-        if not callable(search):
+        if not callable(
+            search
+        ):
 
             return 0
 
@@ -1957,21 +2437,25 @@ class KotakRawProducer:
                 response
             )
 
-            atm = round(
-                center / step
-            ) * step
+            atm = (
+                round(
+                    center / step
+                )
+                * step
+            )
 
             wanted = {
                 atm + (
-                    i * step
+                    index * step
                 )
-                for i in range(
+                for index
+                in range(
                     -count,
                     count + 1,
                 )
             }
 
-            found = []
+            candidates = []
 
             for row in rows:
 
@@ -1992,71 +2476,108 @@ class KotakRawProducer:
                     row
                 )
 
-                option_type = ""
-
-                if symbol.endswith(
-                    "CE"
+                if (
+                    not token
+                    or "NIFTY"
+                    not in symbol
                 ):
 
-                    option_type = "CE"
+                    continue
 
-                elif symbol.endswith(
-                    "PE"
-                ):
-
-                    option_type = "PE"
-
-                raw_strike = safe_float(
-                    row.get(
-                        "dStrikePrice"
-                    )
-                    or row.get(
-                        "strikePrice"
-                    )
-                    or row.get(
-                        "strike"
+                option = (
+                    extract_option_type(
+                        row
                     )
                 )
 
+                expiry = parse_expiry(
+                    row.get(
+                        "pExpiryDate"
+                    )
+                    or row.get(
+                        "lExpiryDate"
+                    )
+                    or row.get(
+                        "expiryDate"
+                    )
+                    or row.get(
+                        "expiry"
+                    )
+                )
+
+                strike = extract_strike(
+                    row
+                )
+
                 if (
-                    raw_strike is not None
-                    and raw_strike > 100000
+                    option
+                    and expiry
+                    and strike
+                    and strike in wanted
+                    and expiry.date()
+                    >= now_ist().date()
                 ):
 
-                    raw_strike /= 100.0
-
-                if (
-                    token
-                    and option_type
-                    and raw_strike is not None
-                    and raw_strike in wanted
-                    and "NIFTY" in symbol
-                ):
-
-                    found.append(
+                    candidates.append(
                         (
+                            expiry,
                             token,
-                            raw_strike,
-                            option_type,
+                            strike,
+                            option,
                             symbol,
                         )
                     )
 
-            self.pcr_tokens = sorted(
-                {
-                    item[0]
-                    for item in found
-                }
+            if not candidates:
+
+                self.pcr_tokens = []
+
+                self.pcr_meta = {}
+
+                return 0
+
+            active_expiry = min(
+                item[0]
+                for item
+                in candidates
             )
 
-            self.pcr_meta = {
-                item[0]: {
-                    "strike": item[1],
-                    "option_type": item[2],
-                    "symbol": item[3],
+            self.pcr_tokens = []
+
+            self.pcr_meta = {}
+
+            for (
+                expiry,
+                token,
+                strike,
+                option,
+                symbol,
+            ) in candidates:
+
+                if (
+                    expiry.date()
+                    != active_expiry.date()
+                ):
+                    continue
+
+                self.pcr_tokens.append(
+                    str(token)
+                )
+
+                self.pcr_meta[
+                    str(token)
+                ] = {
+                    "strike": strike,
+                    "option_type": option,
+                    "expiry": expiry,
+                    "symbol": symbol,
                 }
-                for item in found
-            }
+
+            self.pcr_tokens = sorted(
+                set(
+                    self.pcr_tokens
+                )
+            )
 
             return len(
                 self.pcr_tokens
@@ -2106,10 +2627,12 @@ class KotakRawProducer:
         }
 
     # ------------------------------------------------------------------------
-    # Quote poll
+    # Poll
     # ------------------------------------------------------------------------
 
-    def poll(self) -> int:
+    def poll(
+        self,
+    ) -> int:
 
         if (
             not self.client
@@ -2120,14 +2643,14 @@ class KotakRawProducer:
                 "Kotak is not authenticated"
             )
 
-        quotes_method = getattr(
+        quotes = getattr(
             self.client,
             "quotes",
             None,
         )
 
         if not callable(
-            quotes_method
+            quotes
         ):
 
             raise RuntimeError(
@@ -2137,20 +2660,20 @@ class KotakRawProducer:
 
         self.last_poll = now_ist()
 
-        count = 0
-
         try:
 
-            tokens = self.quote_tokens()
-
-            response = quotes_method(
-                instrument_tokens=tokens,
+            response = quotes(
+                instrument_tokens=(
+                    self.quote_tokens()
+                ),
                 quote_type="all",
             )
 
             rows = record_list(
                 response
             )
+
+            count = 0
 
             for row in rows:
 
@@ -2168,18 +2691,12 @@ class KotakRawProducer:
                 except Exception as exc:
 
                     self.last_error = (
-                        f"poll publish: {exc}"
+                        f"poll row: {exc}"
                     )
 
             self.poll_count += 1
 
             self.connected = True
-
-            if count:
-
-                self.last_tick = (
-                    now_ist()
-                )
 
             return count
 
@@ -2194,10 +2711,12 @@ class KotakRawProducer:
             raise
 
     # ------------------------------------------------------------------------
-    # Websocket subscribe
+    # Subscribe
     # ------------------------------------------------------------------------
 
-    def subscribe(self) -> int:
+    def subscribe(
+        self,
+    ) -> int:
 
         if (
             not self.client
@@ -2208,14 +2727,14 @@ class KotakRawProducer:
                 "Kotak is not authenticated"
             )
 
-        subscribe_method = getattr(
+        subscribe = getattr(
             self.client,
             "subscribe",
             None,
         )
 
         if not callable(
-            subscribe_method
+            subscribe
         ):
 
             raise RuntimeError(
@@ -2225,40 +2744,51 @@ class KotakRawProducer:
 
         tokens = self.quote_tokens()
 
-        index_tokens = [
-            {
-                "instrument_token":
-                    NIFTY_INDEX_TOKEN,
-                "exchange_segment":
-                    "nse_cm",
-            }
-        ]
+        try:
 
-        subscribe_method(
-            instrument_tokens=index_tokens,
-            isIndex=True,
-        )
-
-        rest = [
-            item
-            for item in tokens
-            if item[
-                "instrument_token"
-            ] != NIFTY_INDEX_TOKEN
-        ]
-
-        if rest:
-
-            subscribe_method(
-                instrument_tokens=rest,
-                isIndex=False,
+            subscribe(
+                instrument_tokens=[
+                    {
+                        "instrument_token":
+                            NIFTY_INDEX_TOKEN,
+                        "exchange_segment":
+                            "nse_cm",
+                    }
+                ],
+                isIndex=True,
             )
 
-        self.streaming = True
+            rest = [
+                item
+                for item in tokens
+                if item[
+                    "instrument_token"
+                ]
+                != NIFTY_INDEX_TOKEN
+            ]
 
-        self.connected = True
+            if rest:
 
-        return len(tokens)
+                subscribe(
+                    instrument_tokens=rest,
+                    isIndex=False,
+                )
+
+            self.streaming = True
+
+            self.connected = True
+
+            return len(
+                tokens
+            )
+
+        except Exception as exc:
+
+            self.last_error = (
+                f"subscribe: {exc}"
+            )
+
+            raise
 
     # ------------------------------------------------------------------------
     # Status
@@ -2278,14 +2808,14 @@ class KotakRawProducer:
             "streaming": (
                 self.streaming
             ),
-            "last_tick": (
-                self.last_tick.isoformat()
-                if self.last_tick
-                else None
-            ),
             "last_poll": (
                 self.last_poll.isoformat()
                 if self.last_poll
+                else None
+            ),
+            "last_tick": (
+                self.last_tick.isoformat()
+                if self.last_tick
                 else None
             ),
             "poll_count": (
@@ -2314,16 +2844,6 @@ class KotakRawProducer:
 # ============================================================================
 
 class YahooRawProducer:
-    """
-    Yahoo Finance historical raw producer.
-
-    Only daily OHLCV is fetched.
-
-    No indicators.
-    No rankings.
-    No alpha.
-    No scores.
-    """
 
     def __init__(
         self,
@@ -2385,13 +2905,28 @@ class YahooRawProducer:
                 raw = canonical_raw(
                     {
                         "symbol": ticker,
-                        "instrument_token":
-                            ticker,
+                        "instrument_token": (
+                            ticker
+                        ),
                         "exchange": "NSE",
-                        "exchange_segment":
-                            "nse_cm",
-                        "observation_timestamp":
-                            timestamp.isoformat(),
+                        "exchange_segment": (
+                            "nse_index"
+                            if ticker
+                            == "^NSEI"
+                            else "nse_cm"
+                        ),
+                        "instrument_type": (
+                            "INDEX"
+                            if ticker
+                            == "^NSEI"
+                            else "EQUITY"
+                        ),
+                        "observation_timestamp": (
+                            timestamp.isoformat()
+                        ),
+                        "received_timestamp": (
+                            iso_now()
+                        ),
                         "open": safe_float(
                             row.get(
                                 "Open"
@@ -2417,42 +2952,52 @@ class YahooRawProducer:
                                 "Volume"
                             )
                         ),
-                        "source_status":
-                            "HISTORICAL",
+                        "source_status": (
+                            "HISTORICAL"
+                        ),
                     }
                 )
 
                 event = {
-                    "schema_version":
-                        RAW_SCHEMA_VERSION,
-                    "producer_version":
-                        PRODUCER_VERSION,
+                    "schema_version": (
+                        RAW_SCHEMA_VERSION
+                    ),
+                    "producer_version": (
+                        PRODUCER_VERSION
+                    ),
                     "event_id": str(
                         uuid.uuid4()
                     ),
-                    "source":
-                        "yahoo_finance",
-                    "source_type":
-                        "historical_daily",
-                    "symbol":
-                        ticker,
-                    "instrument_token":
-                        ticker,
-                    "exchange":
-                        "NSE",
-                    "observation_timestamp":
+                    "source": (
+                        "yahoo_finance"
+                    ),
+                    "source_type": (
+                        "historical_daily"
+                    ),
+                    "symbol": ticker,
+                    "instrument_token": ticker,
+                    "exchange": "NSE",
+                    "observation_timestamp": (
                         raw.get(
                             "observation_timestamp"
-                        ),
-                    "received_at":
-                        iso_now(),
-                    "raw":
-                        raw,
+                        )
+                    ),
+                    "received_at": iso_now(),
+                    "raw": raw,
                 }
 
-                self.mirror.write(
-                    event
-                )
+                try:
+
+                    self.mirror.write(
+                        event
+                    )
+
+                except Exception as exc:
+
+                    self.last_error = (
+                        f"local audit: "
+                        f"{exc}"
+                    )
 
                 self.bus.publish(
                     event
@@ -2463,7 +3008,8 @@ class YahooRawProducer:
             except Exception as exc:
 
                 self.last_error = (
-                    f"{ticker}: {exc}"
+                    f"{ticker}: "
+                    f"{exc}"
                 )
 
         self.rows_published += count
@@ -2483,6 +3029,12 @@ class YahooRawProducer:
                 "Add yfinance to requirements.txt."
             )
 
+        if not self.bus.enabled:
+
+            raise RuntimeError(
+                "Supabase raw bus is not configured."
+            )
+
         self.last_run = now_ist()
 
         successful = 0
@@ -2494,12 +3046,16 @@ class YahooRawProducer:
             str,
         ] = {}
 
-        for ticker in tickers:
+        unique_tickers = list(
+            dict.fromkeys(
+                ticker.strip()
+                for ticker
+                in tickers
+                if ticker.strip()
+            )
+        )
 
-            ticker = ticker.strip()
-
-            if not ticker:
-                continue
+        for ticker in unique_tickers:
 
             try:
 
@@ -2532,7 +3088,7 @@ class YahooRawProducer:
                     )
                 )
 
-                if rows > 0:
+                if rows:
 
                     successful += 1
 
@@ -2540,15 +3096,13 @@ class YahooRawProducer:
 
             except Exception as exc:
 
-                error_text = str(exc)
-
-                errors[ticker] = (
-                    error_text
-                )
+                errors[
+                    ticker
+                ] = str(exc)
 
                 self.last_error = (
                     f"{ticker}: "
-                    f"{error_text}"
+                    f"{exc}"
                 )
 
         self.tickers_with_data = (
@@ -2556,8 +3110,8 @@ class YahooRawProducer:
         )
 
         return {
-            "tickers_requested": len(
-                tickers
+            "tickers_requested": (
+                len(unique_tickers)
             ),
             "tickers_with_data": (
                 successful
@@ -2573,7 +3127,9 @@ class YahooRawProducer:
     ) -> Dict[str, Any]:
 
         return {
-            "installed": yf is not None,
+            "installed": (
+                yf is not None
+            ),
             "last_run": (
                 self.last_run.isoformat()
                 if self.last_run
@@ -2602,64 +3158,69 @@ def publish_producer_health(
 ) -> Dict[str, Any]:
 
     payload = {
-        "producer_name":
-            "raw_data_producer",
-
-        "producer_version":
-            PRODUCER_VERSION,
-
-        "schema_version":
-            HEALTH_SCHEMA_VERSION,
-
-        "status":
-            "READY",
-
-        "heartbeat_timestamp":
-            iso_now(),
-
-        "kotak_authenticated":
-            kotak.authenticated,
-
-        "kotak_connected":
-            kotak.connected,
-
-        "kotak_streaming":
-            kotak.streaming,
-
-        "kotak_last_tick":
-            (
-                kotak.last_tick.isoformat()
-                if kotak.last_tick
-                else None
-            ),
-
-        "kotak_last_poll":
-            (
-                kotak.last_poll.isoformat()
-                if kotak.last_poll
-                else None
-            ),
-
-        "kotak_published":
-            kotak.publish_count,
-
-        "yahoo_last_run":
-            (
-                yahoo.last_run.isoformat()
-                if yahoo.last_run
-                else None
-            ),
-
-        "yahoo_rows_published":
-            yahoo.rows_published,
-
-        "last_error":
-            (
-                kotak.last_error
-                or yahoo.last_error
-                or bus.last_error
-            ),
+        "producer_name": (
+            "raw_data_producer"
+        ),
+        "producer_version": (
+            PRODUCER_VERSION
+        ),
+        "schema_version": (
+            HEALTH_SCHEMA_VERSION
+        ),
+        "status": "READY",
+        "heartbeat_timestamp": (
+            iso_now()
+        ),
+        "kotak_authenticated": (
+            kotak.authenticated
+        ),
+        "kotak_connected": (
+            kotak.connected
+        ),
+        "kotak_streaming": (
+            kotak.streaming
+        ),
+        "kotak_last_tick": (
+            kotak.last_tick.isoformat()
+            if kotak.last_tick
+            else None
+        ),
+        "kotak_last_poll": (
+            kotak.last_poll.isoformat()
+            if kotak.last_poll
+            else None
+        ),
+        "kotak_published": (
+            kotak.publish_count
+        ),
+        "yahoo_last_run": (
+            yahoo.last_run.isoformat()
+            if yahoo.last_run
+            else None
+        ),
+        "yahoo_rows_published": (
+            yahoo.rows_published
+        ),
+        "last_error": (
+            kotak.last_error
+            or yahoo.last_error
+            or bus.last_error
+        ),
     }
+
+    try:
+
+        LOCAL_HEALTH.write_text(
+            json.dumps(
+                safe_json(payload),
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+
+    except Exception:
+        pass
 
     if bus.enabled:
 
@@ -2679,10 +3240,141 @@ def publish_producer_health(
 
 
 # ============================================================================
-# STREAMLIT UI
+# UI HELPERS
+# ============================================================================
+
+def parse_tickers(
+    text: str,
+) -> List[str]:
+
+    text = (
+        str(text or "")
+        .replace(
+            "\n",
+            ",",
+        )
+        .replace(
+            ";",
+            ",",
+        )
+    )
+
+    return list(
+        dict.fromkeys(
+            item.strip()
+            for item
+            in text.split(",")
+            if item.strip()
+        )
+    )
+
+
+def local_latest(
+    limit: int = 50,
+) -> List[
+    Dict[str, Any]
+]:
+
+    rows = []
+
+    files = sorted(
+        LOCAL_OBS.glob(
+            "raw_*.jsonl"
+        ),
+        reverse=True,
+    )
+
+    for path in files[:3]:
+
+        try:
+
+            with path.open(
+                "r",
+                encoding="utf-8",
+            ) as handle:
+
+                lines = handle.readlines()
+
+            for line in reversed(
+                lines
+            ):
+
+                if len(rows) >= limit:
+                    break
+
+                try:
+
+                    event = json.loads(
+                        line
+                    )
+
+                except Exception:
+                    continue
+
+                raw = (
+                    event.get(
+                        "raw"
+                    )
+                    or {}
+                )
+
+                rows.append(
+                    {
+                        "source": (
+                            event.get(
+                                "source"
+                            )
+                        ),
+                        "symbol": (
+                            event.get(
+                                "symbol"
+                            )
+                        ),
+                        "received_at": (
+                            event.get(
+                                "received_at"
+                            )
+                        ),
+                        "ltp": (
+                            raw.get(
+                                "ltp"
+                            )
+                        ),
+                        "close": (
+                            raw.get(
+                                "close"
+                            )
+                        ),
+                        "volume": (
+                            raw.get(
+                                "volume"
+                            )
+                        ),
+                        "oi": (
+                            raw.get(
+                                "oi"
+                            )
+                        ),
+                    }
+                )
+
+        except Exception:
+            continue
+
+    return rows
+
+
+# ============================================================================
+# STREAMLIT MAIN
 # ============================================================================
 
 def main() -> None:
+
+    if st is None:
+
+        raise RuntimeError(
+            "This application requires Streamlit."
+        )
 
     st.set_page_config(
         page_title=(
@@ -2693,7 +3385,7 @@ def main() -> None:
     )
 
     # ------------------------------------------------------------------------
-    # SESSION OBJECTS
+    # SESSION STATE
     # ------------------------------------------------------------------------
 
     if "raw_bus" not in st.session_state:
@@ -2752,17 +3444,19 @@ def main() -> None:
 
     st.caption(
         "RAW market observations only • "
-        "Supabase source of truth • "
-        "NIFTY / Next-Day Alpha / GSR isolated consumers"
+        "Supabase is the three-machine source of truth • "
+        "NIFTY / Next-Day Alpha / GSR remain isolated"
     )
 
     # ------------------------------------------------------------------------
-    # TOP STATUS
+    # TOP HEALTH
     # ------------------------------------------------------------------------
 
-    supabase_health = bus.health()
+    remote_health = bus.health()
 
-    c1, c2, c3, c4 = st.columns(4)
+    c1, c2, c3, c4 = st.columns(
+        4
+    )
 
     with c1:
 
@@ -2777,7 +3471,7 @@ def main() -> None:
             "SUPABASE",
             (
                 "ONLINE"
-                if supabase_health.get(
+                if remote_health.get(
                     "reachable"
                 )
                 else "OFFLINE"
@@ -2798,36 +3492,48 @@ def main() -> None:
     with c4:
 
         st.metric(
-            "RAW PUBLISHED",
+            "REMOTE RAW",
             f"{bus.published:,}",
         )
 
     # ------------------------------------------------------------------------
-    # SUPABASE WARNING
+    # REMOTE BUS WARNING
     # ------------------------------------------------------------------------
 
     if not bus.enabled:
 
         st.error(
-            "Supabase raw bus is not configured. "
+            "SUPABASE RAW BUS IS NOT CONFIGURED. "
             "Set SUPABASE_URL and "
-            "SUPABASE_SERVICE_ROLE_KEY "
-            "in Streamlit Secrets."
+            "SUPABASE_SERVICE_ROLE_KEY. "
+            "Local-only mode is intentionally NOT "
+            "treated as a valid three-machine bus."
         )
 
-    elif not supabase_health.get(
+    elif not remote_health.get(
         "reachable"
     ):
 
         st.warning(
-            supabase_health.get(
-                "error",
-                "Supabase is unreachable.",
+            "Supabase is configured but currently "
+            "unreachable: "
+            + str(
+                remote_health.get(
+                    "error",
+                    "unknown error",
+                )
             )
         )
 
+    else:
+
+        st.success(
+            "Supabase raw bus is ONLINE. "
+            "This is the cross-machine source of truth."
+        )
+
     # ------------------------------------------------------------------------
-    # KOTAK + BUS
+    # KOTAK / SUPABASE
     # ------------------------------------------------------------------------
 
     left, right = st.columns(
@@ -2835,13 +3541,13 @@ def main() -> None:
     )
 
     # ========================================================================
-    # KOTAK PANEL
+    # KOTAK
     # ========================================================================
 
     with left:
 
         st.subheader(
-            "1. KOTAK SOURCE AUTHENTICATION"
+            "1. KOTAK RAW SOURCE"
         )
 
         credentials = (
@@ -2875,7 +3581,9 @@ def main() -> None:
                     )
                 )
 
-        b1, b2, b3 = st.columns(3)
+        b1, b2, b3 = st.columns(
+            3
+        )
 
         with b1:
 
@@ -2901,7 +3609,7 @@ def main() -> None:
         with b2:
 
             if st.button(
-                "Discover Instruments",
+                "Discover",
                 use_container_width=True,
             ):
 
@@ -2924,7 +3632,7 @@ def main() -> None:
         with b3:
 
             if st.button(
-                "Subscribe Feed",
+                "Subscribe",
                 use_container_width=True,
             ):
 
@@ -2935,7 +3643,7 @@ def main() -> None:
                     )
 
                     st.success(
-                        f"Subscribed to "
+                        "Subscribed to "
                         f"{count} raw instruments"
                     )
 
@@ -2954,26 +3662,28 @@ def main() -> None:
         )
 
     # ========================================================================
-    # REMOTE RAW BUS PANEL
+    # REMOTE BUS
     # ========================================================================
 
     with right:
 
         st.subheader(
-            "2. COMMON REMOTE RAW BUS"
+            "2. COMMON SUPABASE RAW BUS"
         )
 
         st.write(
-            "**Remote source of truth:** "
+            "**Source of truth:** "
             "`raw_observations`"
         )
 
         st.write(
-            "**Local disk:** audit/cache only"
+            "**Local disk:** "
+            "audit/cache only"
         )
 
         st.write(
-            "**Engine intelligence accepted:** NO"
+            "**Engine intelligence accepted:** "
+            "NO"
         )
 
         st.write(
@@ -3075,7 +3785,7 @@ def main() -> None:
     st.divider()
 
     # ------------------------------------------------------------------------
-    # YAHOO HISTORICAL RAW
+    # YAHOO
     # ------------------------------------------------------------------------
 
     st.subheader(
@@ -3083,19 +3793,16 @@ def main() -> None:
     )
 
     st.caption(
-        "Downloads raw daily OHLCV only. "
-        "No indicators, scores, rankings or "
-        "engine opinions are calculated here."
-    )
-
-    default_tickers = ",".join(
-        DEFAULT_YAHOO_TICKERS
+        "Raw daily OHLCV only. "
+        "No indicators, scores, rankings, "
+        "signals or engine opinions."
     )
 
     ticker_text = st.text_area(
-        "Yahoo tickers "
-        "(comma separated)",
-        default_tickers,
+        "Yahoo tickers",
+        ",".join(
+            DEFAULT_YAHOO_TICKERS
+        ),
         height=100,
     )
 
@@ -3120,18 +3827,20 @@ def main() -> None:
 
         try:
 
-            tickers = [
-                ticker.strip()
-                for ticker
-                in ticker_text.split(",")
-                if ticker.strip()
-            ]
+            tickers = parse_tickers(
+                ticker_text
+            )
 
             if not tickers:
 
                 st.error(
-                    "At least one Yahoo ticker "
-                    "is required."
+                    "Enter at least one Yahoo ticker."
+                )
+
+            elif not bus.enabled:
+
+                st.error(
+                    "Supabase raw bus is not configured."
                 )
 
             else:
@@ -3148,7 +3857,7 @@ def main() -> None:
                 st.success(
                     "Published "
                     f"{result['rows_published']:,} "
-                    "raw daily rows"
+                    "raw rows"
                 )
 
                 st.json(
@@ -3162,25 +3871,25 @@ def main() -> None:
             )
 
     st.caption(
-        "Yahoo installed: "
+        "yfinance installed: "
         + (
             "YES"
             if yf is not None
-            else "NO — add yfinance to requirements.txt"
+            else "NO"
         )
     )
 
     # ------------------------------------------------------------------------
-    # KOTAK MANUAL RAW POLL
+    # KOTAK SNAPSHOT
     # ------------------------------------------------------------------------
 
     st.subheader(
-        "4. KOTAK — MANUAL RAW SNAPSHOT"
+        "4. KOTAK — CURRENT RAW SNAPSHOT"
     )
 
     st.caption(
-        "This publishes the current raw Kotak "
-        "snapshot. No calculations are performed."
+        "Manual snapshot publishes raw market "
+        "observations only."
     )
 
     if st.button(
@@ -3189,6 +3898,12 @@ def main() -> None:
     ):
 
         try:
+
+            if not bus.enabled:
+
+                raise RuntimeError(
+                    "Supabase raw bus is not configured."
+                )
 
             if not kotak.authenticated:
 
@@ -3199,6 +3914,12 @@ def main() -> None:
                 kotak.discover()
 
             count = kotak.poll()
+
+            publish_producer_health(
+                bus,
+                kotak,
+                yahoo,
+            )
 
             st.success(
                 f"Published {count} "
@@ -3216,7 +3937,7 @@ def main() -> None:
     # ------------------------------------------------------------------------
 
     st.subheader(
-        "5. LOCAL RAW AUDIT CACHE"
+        "5. LOCAL AUDIT / CACHE"
     )
 
     st.code(
@@ -3225,92 +3946,19 @@ def main() -> None:
     )
 
     st.caption(
-        "Local files are audit/cache only. "
-        "They are NOT the common cross-app source of truth."
+        "This directory is only a local audit mirror. "
+        "It is NOT the shared three-machine bus."
     )
 
-    # ------------------------------------------------------------------------
-    # LOCAL LATEST DISPLAY
-    # ------------------------------------------------------------------------
+    local_rows = local_latest(
+        50
+    )
 
-    latest_local_rows = []
-
-    for path in sorted(
-        LOCAL_OBS.glob(
-            "raw_*.jsonl"
-        ),
-        reverse=True,
-    )[:3]:
-
-        try:
-
-            with path.open(
-                "r",
-                encoding="utf-8",
-            ) as handle:
-
-                lines = handle.readlines()
-
-            for line in lines[-20:]:
-
-                try:
-
-                    event = json.loads(
-                        line
-                    )
-
-                except Exception:
-
-                    continue
-
-                raw = (
-                    event.get(
-                        "raw"
-                    )
-                    or {}
-                )
-
-                latest_local_rows.append(
-                    {
-                        "source":
-                            event.get(
-                                "source"
-                            ),
-                        "symbol":
-                            event.get(
-                                "symbol"
-                            ),
-                        "received_at":
-                            event.get(
-                                "received_at"
-                            ),
-                        "ltp":
-                            raw.get(
-                                "ltp"
-                            ),
-                        "close":
-                            raw.get(
-                                "close"
-                            ),
-                        "volume":
-                            raw.get(
-                                "volume"
-                            ),
-                        "oi":
-                            raw.get(
-                                "oi"
-                            ),
-                    }
-                )
-
-        except Exception:
-            continue
-
-    if latest_local_rows:
+    if local_rows:
 
         st.dataframe(
             pd.DataFrame(
-                latest_local_rows
+                local_rows
             ),
             use_container_width=True,
             hide_index=True,
@@ -3319,7 +3967,7 @@ def main() -> None:
     else:
 
         st.info(
-            "No local raw audit rows yet."
+            "No local audit rows yet."
         )
 
     # ------------------------------------------------------------------------
@@ -3334,18 +3982,8 @@ def main() -> None:
 
         try:
 
-            health_rows = bus._request(
-                "GET",
-                "consumer_heartbeats",
-                query=(
-                    "select="
-                    "consumer_name,"
-                    "status,"
-                    "heartbeat_timestamp,"
-                    "updated_at"
-                    "&order=updated_at.desc"
-                    "&limit=50"
-                ),
+            health_rows = (
+                bus.consumer_health()
             )
 
             if health_rows:
@@ -3379,23 +4017,21 @@ def main() -> None:
         )
 
     # ------------------------------------------------------------------------
-    # PRODUCER HEARTBEAT
+    # PRODUCER HEALTH
     # ------------------------------------------------------------------------
 
-    health_payload = (
-        publish_producer_health(
-            bus,
-            kotak,
-            yahoo,
-        )
+    payload = publish_producer_health(
+        bus,
+        kotak,
+        yahoo,
     )
 
     st.divider()
 
     st.caption(
         "Producer heartbeat: "
-        f"{health_payload['heartbeat_timestamp']}"
-        " • Producer version: "
+        f"{payload['heartbeat_timestamp']}"
+        " • Producer: "
         f"{PRODUCER_VERSION}"
         " • Raw schema: "
         f"{RAW_SCHEMA_VERSION}"
@@ -3403,9 +4039,9 @@ def main() -> None:
 
     st.caption(
         "STRICT ISOLATION: "
-        "Producer publishes raw observations only. "
-        "NIFTY, Next-Day Alpha and GSR compute their "
-        "own independent intelligence."
+        "This application publishes RAW observations only. "
+        "NIFTY, Next-Day Alpha and GSR independently calculate "
+        "their own intelligence."
     )
 
 
