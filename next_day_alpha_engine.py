@@ -10,7 +10,7 @@ Purpose
 A completely isolated stock-selection engine for:
 
 1. Market-close / day-ahead scan
-2. Selecting exactly up to TOP 5 high-quality stock candidates
+2. Selecting up to TOP 15 high-quality stock candidates
 3. Assigning directional bias (LONG / SHORT)
 4. Next morning 09:15-09:20 confirmation
 5. Producing FINAL 2 / FINAL 1 / NO TRADE
@@ -101,7 +101,7 @@ numpy
 pandas
 requests
 optional: yfinance (historical fallback only)
-optional: neo_api_client (preferred live/intraday)
+common raw-data producer (live/intraday; external to this engine)
 
 PUBLIC API
 ----------
@@ -109,7 +109,7 @@ engine = NextDayAlphaEngine()
 
 engine.run_if_due()
 engine.latest()
-engine.live_top5()
+engine.live_top15()
 engine.start_if_due_background()
 
 CLI:
@@ -141,11 +141,10 @@ from zoneinfo import ZoneInfo
 import numpy as np
 import pandas as pd
 
-try:
-    from neo_api_client import NeoAPI
-except Exception:
-    NeoAPI = None
-
+# IMPORTANT ARCHITECTURE NOTE:
+# This engine deliberately has NO broker SDK, Kotak credentials, TOTP/MPIN,
+# broker login, quote call, or order API. Live raw observations are supplied
+# by the common raw-data producer and read from the shared raw-data boundary.
 
 # ============================================================================
 # CONFIGURATION
@@ -171,12 +170,13 @@ NIFTY_TICKER = "^NSEI"
 SHARED_RAW_CACHE_DIR = Path(os.getenv("SHARED_RAW_CACHE_DIR", "./shared_raw_cache"))
 SHARED_RAW_CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
-# Kotak Neo is the preferred live/intraday source. Yahoo is retained only as a
-# historical/fallback source for fields that are not available in the raw cache.
-KOTAK_ENVIRONMENT = os.getenv("KOTAK_ENVIRONMENT", "prod")
-KOTAK_USE_LIVE = os.getenv("NEXT_DAY_KOTAK_LIVE", "1") != "0"
-KOTAK_CAPTURE_SECONDS = int(os.getenv("NEXT_DAY_KOTAK_CAPTURE_SECONDS", "3"))
-KOTAK_MAX_QUOTE_BATCH = int(os.getenv("NEXT_DAY_KOTAK_MAX_QUOTE_BATCH", "100"))
+# COMMON RAW-DATA SOURCE
+# ----------------------
+# The producer is outside this engine. It may be app.py/Kotak, a websocket,
+# another approved raw-feed service, or a replay source. This engine never
+# knows broker credentials or broker API details.
+COMMON_RAW_SOURCE_NAME = os.getenv("COMMON_RAW_SOURCE_NAME", "COMMON_RAW_MARKET_SOURCE")
+COMMON_RAW_MAX_AGE_SECONDS = max(1.0, float(os.getenv("COMMON_RAW_MAX_AGE_SECONDS", "30")))
 
 # Trusted catalyst sources. Exchange/regulator/company-origin information is
 # preferred; generic keyword news is deliberately not used as a primary score.
@@ -193,8 +193,13 @@ MIN_AVG_VOLUME = 100_000
 # ----------------------------- Ranking -------------------------------------
 
 DAY_AHEAD_MIN_SCORE = 68.0
-# No forced trade rule: fewer than 5 may be returned if quality gates fail.
-TOP5_COUNT = 5
+# Day-ahead display/selection is TOP 15. Quality gates may still yield fewer
+# than 15; the engine never fabricates candidates.
+DAY_AHEAD_TOP_N = max(1, int(os.getenv("NEXT_DAY_TOP_N", "15")))
+TOP15_COUNT = DAY_AHEAD_TOP_N
+# Backward-compatible alias for existing callers/UI code. It now means the
+# complete day-ahead basket size, not five.
+TOP5_COUNT = DAY_AHEAD_TOP_N
 
 # ----------------------------- Morning confirmation ------------------------
 
@@ -236,7 +241,6 @@ FEED_MAX_AGE_SECONDS = max(1, float(os.getenv("NEXT_DAY_FEED_MAX_AGE_SECONDS", "
 LOG_FILE = ROOT / "next_day_alpha.log"
 LOG_MAX_BYTES = max(1_000_000, int(os.getenv("NEXT_DAY_LOG_MAX_BYTES", str(5 * 1024 * 1024))))
 LOG_BACKUP_COUNT = max(1, int(os.getenv("NEXT_DAY_LOG_BACKUP_COUNT", "5")))
-NEXT_DAY_REQUIRE_KOTAK = os.getenv("NEXT_DAY_REQUIRE_KOTAK", "0") == "1"
 DAY_AHEAD_RUN_MINUTE = 31
 DAY_AHEAD_SNAPSHOT_START_MINUTE = 15
 DAY_AHEAD_SNAPSHOT_END_MINUTE = 30
@@ -244,8 +248,8 @@ DAY_AHEAD_SNAPSHOT_END_MINUTE = 30
 LOCK = threading.Lock()
 
 _DATA_SOURCE_HEALTH: Dict[str, Any] = {
-    "YFINANCE": {"status": "NOT_TESTED", "last_success_ist": None, "last_attempt_ist": None, "symbols_ok": 0, "error": None, "mode": "HISTORICAL"},
-    "KOTAK_NEO": {"status": "NOT_TESTED", "last_success_ist": None, "last_attempt_ist": None, "quotes_ok": 0, "error": None, "mode": "LIVE/INTRADAY"},
+    "YFINANCE": {"status": "NOT_TESTED", "last_success_ist": None, "last_attempt_ist": None, "symbols_ok": 0, "error": None, "mode": "HISTORICAL_RAW"},
+    "COMMON_RAW": {"status": "NOT_TESTED", "last_success_ist": None, "last_attempt_ist": None, "quotes_ok": 0, "error": None, "mode": "LIVE_RAW_READ_ONLY", "source": COMMON_RAW_SOURCE_NAME},
 }
 
 def _set_source_health(source: str, **updates: Any) -> None:
@@ -358,8 +362,7 @@ def validate_config() -> Dict[str, Any]:
     """Validate startup configuration before background work begins."""
     errors, warnings = [], []
     numeric_checks = {
-        "NEXT_DAY_KOTAK_CAPTURE_SECONDS": KOTAK_CAPTURE_SECONDS,
-        "NEXT_DAY_KOTAK_MAX_QUOTE_BATCH": KOTAK_MAX_QUOTE_BATCH,
+        "COMMON_RAW_MAX_AGE_SECONDS": COMMON_RAW_MAX_AGE_SECONDS,
         "NEXT_DAY_API_MAX_RETRIES": API_MAX_RETRIES,
         "NEXT_DAY_API_BACKOFF_BASE": API_BACKOFF_BASE,
         "NEXT_DAY_API_BACKOFF_MAX": API_BACKOFF_MAX,
@@ -375,15 +378,8 @@ def validate_config() -> Dict[str, Any]:
                 errors.append(f"Not a directory: {directory}")
         except Exception as exc:
             errors.append(f"Cannot access directory {directory}: {exc}")
-    if KOTAK_USE_LIVE:
-        missing = [k for k in ("KOTAK_CONSUMER_KEY", "KOTAK_MOBILE", "KOTAK_UCC", "KOTAK_TOTP", "KOTAK_MPIN")
-                   if not os.getenv(k, "").strip()]
-        if missing:
-            message = "Missing Kotak credentials: " + ", ".join(missing)
-            if NEXT_DAY_REQUIRE_KOTAK:
-                errors.append(message)
-            else:
-                warnings.append(message + " (live Kotak disabled by fallback policy)")
+    # No broker credential validation is permitted here. The common producer
+    # owns authentication; this engine only consumes raw observations.
     report = {"ok": not errors, "errors": errors, "warnings": warnings}
     if errors:
         for msg in errors:
@@ -3032,7 +3028,7 @@ def score_candidates(
 
 
 # ============================================================================
-# TOP-5 SELECTION
+# DAY-AHEAD SHORTLIST SELECTION
 # ============================================================================
 
 def select_top5(
@@ -3127,10 +3123,10 @@ def select_top5(
             + 1
         )
 
-        if len(selected) >= TOP5_COUNT:
+        if len(selected) >= DAY_AHEAD_TOP_N:
             break
 
-    # If strict selection produced fewer than five,
+    # If strict selection produced fewer than the requested shortlist size,
     # fill with strongest remaining candidates.
     if len(selected) < TOP5_COUNT:
 
@@ -3161,7 +3157,7 @@ def select_top5(
 
             existing.add(symbol)
 
-            if len(selected) >= TOP5_COUNT:
+            if len(selected) >= DAY_AHEAD_TOP_N:
                 break
 
     return (
@@ -3499,7 +3495,7 @@ def build_day_ahead_watchlist() -> Dict[str, Any]:
 
     result = {
         "engine": "NEXT_DAY_ALPHA_ENGINE",
-        "version": "FINAL_V2_ISOLATED_KOTAK_TRUSTED_CATALYST",
+        "version": "FINAL_V2_COMMON_RAW_TRUSTED_CATALYST",
         "generated_at": timestamp.isoformat(),
         "data_as_of": timestamp.strftime(
             "%Y-%m-%d"
@@ -3516,8 +3512,8 @@ def build_day_ahead_watchlist() -> Dict[str, Any]:
             "shared_raw_fields_only": True,
             "next_day_can_write_to_nifty_engine": False,
             "next_day_can_read_nifty_calculations": False,
-            "live_intraday_primary": "KOTAK_NEO",
-            "historical_fallback": "YFINANCE_OPTIONAL",
+            "live_intraday_primary": "COMMON_RAW_SOURCE",
+            "historical_raw_source": "YFINANCE_EXTERNAL_RAW",
             "catalyst_primary": "NSE_CORPORATE_FILINGS",
             "catalyst_regulatory_context": "SEBI",
         },
@@ -3532,9 +3528,9 @@ def build_day_ahead_watchlist() -> Dict[str, Any]:
             "scored_symbols": len(
                 scored
             ),
-            "top5_count": len(
-                candidates
-            ),
+            "top15_count": len(candidates),
+            "top15": candidates,
+            "top5_count": len(candidates),
             "top5": candidates,
         },
 
@@ -3564,16 +3560,35 @@ def build_day_ahead_watchlist() -> Dict[str, Any]:
 
 
 # ============================================================================
-# COMMON RAW-DATA BRIDGE + KOTAK NEO LIVE ADAPTER
+# COMMON RAW-DATA BRIDGE
 # ============================================================================
 
+# Only raw market observations are permitted to cross this boundary.
+# No alpha, score, prediction, regime, signal, decision, or engine opinion.
 _RAW_ALLOWED = {
-    "timestamp", "received_at", "timestamp_source", "feed_age_seconds", "feed_stale", "token", "exchange", "symbol", "display_symbol", "ltp",
-    "open", "high", "low", "close", "volume", "oi", "vwap", "raw_source",
+    "timestamp", "received_at", "timestamp_source", "feed_age_seconds", "feed_stale",
+    "token", "exchange", "symbol", "display_symbol", "ltp", "open", "high", "low",
+    "close", "volume", "oi", "vwap", "upper_circuit", "lower_circuit",
+    "upper_price_band", "lower_price_band", "bid", "ask", "bid_qty", "ask_qty",
+    "last_traded_time", "raw_source", "instrument_type",
+}
+
+_FORBIDDEN_CROSS_ENGINE_FIELDS = {
+    "alpha", "alpha_score", "alpha_probability", "confidence", "confidence_score",
+    "prediction", "predicted_direction", "predicted_return", "signal", "signal_score",
+    "signal_type", "regime", "regime_label", "regime_score", "external_regime",
+    "position", "position_size", "decision", "trade_decision", "entry_signal",
+    "exit_signal", "model_score", "model_prediction", "engine_opinion", "recommendation",
+    "weight", "weights", "selection_score", "day_ahead_score", "v7_score",
 }
 
 
 def _raw_only(record: Dict[str, Any]) -> Dict[str, Any]:
+    if not isinstance(record, dict):
+        return {}
+    keys = {str(k).lower() for k in record.keys()}
+    if keys & _FORBIDDEN_CROSS_ENGINE_FIELDS:
+        raise ValueError("Opinion-contaminated observation rejected at common raw boundary")
     return {k: record[k] for k in _RAW_ALLOWED if k in record}
 
 
@@ -3583,29 +3598,42 @@ def shared_raw_path(symbol: str, date_string: Optional[str] = None) -> Path:
     return SHARED_RAW_CACHE_DIR / f"{safe}_{date_string}_raw.jsonl"
 
 
-def write_shared_raw(symbol: str, records: List[Dict[str, Any]]) -> None:
-    path = shared_raw_path(symbol)
-    payload = "".join(
-        json.dumps(_raw_only(record), ensure_ascii=False, default=str) + "\n"
-        for record in records
-    )
-    _atomic_write_text(path, payload)
-
-
-def read_shared_raw_intraday(symbol: str, max_age_seconds: Optional[float] = None) -> Optional[pd.DataFrame]:
+def _read_shared_raw_records(symbol: str) -> List[Dict[str, Any]]:
     path = shared_raw_path(symbol)
     if not path.exists():
-        return None
-    rows = []
+        return []
+    rows: List[Dict[str, Any]] = []
     try:
         with path.open("r", encoding="utf-8") as fh:
             for line in fh:
-                if line.strip():
-                    rows.append(json.loads(line))
-        if not rows:
-            return None
+                if not line.strip():
+                    continue
+                try:
+                    row = json.loads(line)
+                    clean = _raw_only(row)
+                    if clean:
+                        rows.append(clean)
+                except Exception:
+                    continue
+    except Exception:
+        return []
+    return rows
+
+
+# IMPORTANT: there is intentionally NO writer in this engine.
+# The common raw producer owns publication of observations.
+
+
+def read_shared_raw_intraday(symbol: str, max_age_seconds: Optional[float] = None) -> Optional[pd.DataFrame]:
+    rows = _read_shared_raw_records(symbol)
+    if not rows:
+        return None
+    try:
         raw = pd.DataFrame(rows)
-        raw["DateTime"] = pd.to_datetime(raw.get("timestamp"), errors="coerce")
+        ts_col = raw.get("timestamp")
+        if ts_col is None:
+            return None
+        raw["DateTime"] = pd.to_datetime(ts_col, errors="coerce")
         if raw["DateTime"].dt.tz is None:
             raw["DateTime"] = raw["DateTime"].dt.tz_localize(IST, ambiguous="NaT", nonexistent="NaT")
         else:
@@ -3615,303 +3643,85 @@ def read_shared_raw_intraday(symbol: str, max_age_seconds: Optional[float] = Non
         raw = raw.dropna(subset=["DateTime", "LTP"]).sort_values("DateTime")
         if raw.empty:
             return None
-        if max_age_seconds is not None:
-            latest_ts = raw["DateTime"].iloc[-1].to_pydatetime()
-            fresh, age = _freshness(latest_ts, float(max_age_seconds))
-            if not fresh:
-                LOGGER.warning("STALE SHARED FEED %s: age=%s sec limit=%s sec",
-                                symbol, "unknown" if age is None else round(age, 2), max_age_seconds)
-                return None
-
-        # Kotak quote volume is generally cumulative. Convert it to incremental
-        # volume before building 1-minute bars; never treat repeated cumulative
-        # volume as fresh traded volume.
+        latest_ts = raw["DateTime"].iloc[-1].to_pydatetime()
+        fresh, age = _freshness(latest_ts, COMMON_RAW_MAX_AGE_SECONDS if max_age_seconds is None else float(max_age_seconds))
+        if not fresh:
+            _set_source_health("COMMON_RAW", status="STALE", last_attempt_ist=now_ist().isoformat(), error=f"latest raw observation age={age}")
+            return None
         raw["VolumeDelta"] = raw["VolumeRaw"].diff()
-        first_vol = raw["VolumeRaw"].iloc[0]
-        raw.loc[raw.index[0], "VolumeDelta"] = max(first_vol, 0.0)
+        raw.loc[raw.index[0], "VolumeDelta"] = max(safe_float(raw["VolumeRaw"].iloc[0], 0.0), 0.0)
         raw["VolumeDelta"] = raw["VolumeDelta"].where(raw["VolumeDelta"] >= 0, 0.0)
         raw["Minute"] = raw["DateTime"].dt.floor("min")
-
-        grouped = raw.groupby("Minute", sort=True)
-        bars = grouped.agg(
-            Open=("LTP", "first"),
-            High=("LTP", "max"),
-            Low=("LTP", "min"),
-            Close=("LTP", "last"),
-            Volume=("VolumeDelta", "sum"),
+        bars = raw.groupby("Minute", sort=True).agg(
+            Open=("LTP", "first"), High=("LTP", "max"), Low=("LTP", "min"),
+            Close=("LTP", "last"), Volume=("VolumeDelta", "sum")
         ).reset_index().rename(columns={"Minute": "DateTime"})
+        _set_source_health("COMMON_RAW", status="CONNECTED", last_success_ist=latest_ts.isoformat(), quotes_ok=len(raw), error=None)
         return normalize_intraday(bars[["DateTime", "Open", "High", "Low", "Close", "Volume"]])
-    except Exception:
+    except Exception as exc:
+        _set_source_health("COMMON_RAW", status="ERROR", error=f"{type(exc).__name__}: {exc}")
         return None
 
 
-def generate_live_totp(secret_or_otp: str) -> str:
-    raw = str(secret_or_otp or "").strip().replace(" ", "").upper()
-    if raw.isdigit() and len(raw) == 6:
-        return raw
-    try:
-        if len(raw) % 8:
-            raw += "=" * (8 - len(raw) % 8)
-        key = base64.b32decode(raw, casefold=True)
-        counter = int(time.time() // 30)
-        digest = hmac.new(key, struct.pack(">Q", counter), hashlib.sha1).digest()
-        offset = digest[19] & 15
-        token = (struct.unpack(">I", digest[offset:offset + 4])[0] & 0x7fffffff) % 1000000
-        return f"{token:06d}"
-    except Exception:
-        return raw
+def read_shared_raw_quote(symbol: str) -> Optional[Dict[str, Any]]:
+    rows = _read_shared_raw_records(symbol)
+    if not rows:
+        return None
+    rows.sort(key=lambda x: str(x.get("timestamp", "")))
+    row = rows[-1]
+    ts = _parse_feed_timestamp(row.get("timestamp"))
+    fresh, age = _freshness(ts, COMMON_RAW_MAX_AGE_SECONDS)
+    if not fresh:
+        return None
+    return row
 
 
-def _record_list(payload: Any) -> List[Dict[str, Any]]:
-    if isinstance(payload, list):
-        return [x for x in payload if isinstance(x, dict)]
-    if isinstance(payload, dict):
-        for key in ("data", "records", "result", "response"):
-            value = payload.get(key)
-            if isinstance(value, list):
-                return [x for x in value if isinstance(x, dict)]
-            if isinstance(value, dict):
-                nested = _record_list(value)
-                if nested:
-                    return nested
-    return []
+class CommonRawDataSource:
+    """Read-only source facade for the common raw-data boundary.
 
-
-def _first(row: Dict[str, Any], keys: Tuple[str, ...], default=None):
-    for key in keys:
-        if key in row and row[key] not in (None, ""):
-            return row[key]
-    return default
-
-
-class KotakRawAdapter:
-    """Small isolated Kotak adapter used only by this engine.
-
-    It never imports or calls the NIFTY 3-Min Engine. It writes only raw quote
-    fields into the shared raw cache; all indicators and scores stay local.
+    This class deliberately contains no broker login, credentials, SDK, token
+    resolution, order API, or data-derived opinion. A producer outside this
+    engine is responsible for publishing raw observations.
     """
-    def __init__(self):
-        self.client = None
-        self.connected = False
-        self.consumer_key = os.getenv("KOTAK_CONSUMER_KEY", "")
-        self.mobile = os.getenv("KOTAK_MOBILE", "")
-        self.ucc = os.getenv("KOTAK_UCC", "")
-        self.totp = os.getenv("KOTAK_TOTP", "")
-        self.mpin = os.getenv("KOTAK_MPIN", "")
-        self.token_cache: Dict[str, str] = {}
-        self.login_attempted_at: Optional[str] = None
-        self.last_login_error: str = ""
-        self.last_quote_at: Optional[str] = None
-        self.last_quote_symbol: str = ""
-        self.last_quote_error: str = ""
-
-    def login(self) -> bool:
-        self.login_attempted_at = now_ist().isoformat()
-        self.last_login_error = ""
-        self.connected = False
-        if not KOTAK_USE_LIVE or NeoAPI is None:
-            self.last_login_error = "LIVE_DISABLED_OR_SDK_MISSING"
-            return False
-        if not all([self.consumer_key, self.mobile, self.ucc, self.totp, self.mpin]):
-            self.last_login_error = "MISSING_KOTAK_CREDENTIALS"
-            return False
-        try:
-            self.client = NeoAPI(
-                environment=KOTAK_ENVIRONMENT,
-                access_token=None,
-                neo_fin_key=None,
-                consumer_key=self.consumer_key,
-            )
-            step1 = self.client.totp_login(
-                mobile_number=self.mobile,
-                ucc=self.ucc,
-                totp=generate_live_totp(self.totp),
-            )
-            if isinstance(step1, dict) and step1.get("error"):
-                raise RuntimeError(str(step1))
-            step2 = self.client.totp_validate(mpin=self.mpin)
-            if isinstance(step2, dict) and step2.get("error"):
-                raise RuntimeError(str(step2))
-            self.connected = True
-            return True
-        except Exception as exc:
-            self.connected = False
-            self.last_login_error = f"{type(exc).__name__}: {exc}"
-            raise
-
-    def health(self, probe_symbol: str = "NIFTY 50") -> Dict[str, Any]:
-        """Return non-sensitive Kotak Neo connectivity and raw quote health."""
-        try:
-            if not self.connected:
-                self.login()
-        except Exception:
-            pass
-        quote = None
-        if self.connected:
-            try:
-                quote = self.quote(probe_symbol)
-            except Exception as exc:
-                self.last_quote_error = f"{type(exc).__name__}: {exc}"
-        return {
-            "sdk_available": NeoAPI is not None,
-            "live_enabled": bool(KOTAK_USE_LIVE),
-            "credentials_present": all([self.consumer_key, self.mobile, self.ucc, self.totp, self.mpin]),
-            "connected": bool(self.connected),
-            "login_attempted_at": self.login_attempted_at,
-            "login_error": self.last_login_error or None,
-            "quote_received": bool(quote),
-            "last_quote_at": self.last_quote_at,
-            "last_quote_symbol": self.last_quote_symbol,
-            "last_quote_error": self.last_quote_error or None,
-            "source": "KOTAK_NEO_REAL" if quote else ("KOTAK_NEO" if self.connected else "UNAVAILABLE"),
-            "probe_ltp": safe_float(quote.get("ltp"), np.nan) if quote else np.nan,
-        }
-
-    def resolve_token(self, symbol: str) -> Optional[str]:
-        symbol = str(symbol).upper().strip()
-        if symbol in self.token_cache:
-            return self.token_cache[symbol]
-        if not self.connected or self.client is None:
-            return None
-        try:
-            response = self.client.search_scrip(
-                exchange_segment="nse_cm",
-                symbol=symbol,
-                expiry=None,
-                option_type=None,
-                strike_price=None,
-            )
-            rows = _record_list(response)
-            for row in rows:
-                token = _first(row, ("tk", "token", "instrument_token", "pSymbol"))
-                display = str(_first(row, ("display_symbol", "pTrdSymbol", "tradingSymbol", "symbol"), "")).upper()
-                if token and (symbol in display or not display):
-                    self.token_cache[symbol] = str(token)
-                    return str(token)
-            if rows:
-                token = _first(rows[0], ("tk", "token", "instrument_token", "pSymbol"))
-                if token:
-                    self.token_cache[symbol] = str(token)
-                    return str(token)
-        except Exception:
-            return None
-        return None
-
     def quote(self, symbol: str) -> Optional[Dict[str, Any]]:
-        token = self.resolve_token(symbol)
-        if not token or not self.connected or self.client is None:
-            return None
-        try:
-            payload = self.client.quotes(
-                instrument_tokens=[{"instrument_token": token, "exchange_segment": "nse_cm"}],
-                quote_type="all",
-            )
-            rows = _record_list(payload)
-            if not rows:
-                return None
-            r = rows[0]
-            received_at = now_ist()
-            feed_ts = _parse_feed_timestamp(_first(
-                r, ("timestamp", "feed_timestamp", "lastTradedTime", "ltt", "lttime", "exchangeTime")
-            ))
-            if feed_ts is None:
-                feed_ts = received_at
-                timestamp_source = "RECEIPT_TIME"
-            else:
-                timestamp_source = "EXCHANGE_FEED"
-            fresh, age = _freshness(feed_ts)
-            if timestamp_source == "EXCHANGE_FEED" and not fresh:
-                LOGGER.warning("STALE KOTAK QUOTE %s: age=%.2fs", symbol, age or -1)
-                return None
-            result = _raw_only({
-                "timestamp": feed_ts.isoformat(),
-                "received_at": received_at.isoformat(),
-                "timestamp_source": timestamp_source,
-                "feed_age_seconds": round(age, 3) if age is not None else None,
-                "feed_stale": False,
-                "token": token,
-                "exchange": "nse_cm",
-                "symbol": symbol,
-                "display_symbol": _first(r, ("display_symbol", "pTrdSymbol", "tradingSymbol", "symbol"), symbol),
-                "ltp": safe_float(_first(r, ("ltp", "lastPrice", "iv", "c"))),
-                "open": safe_float(_first(r, ("o", "open", "openingPrice"))),
-                "high": safe_float(_first(r, ("h", "high", "highPrice"))),
-                "low": safe_float(_first(r, ("l", "low", "lowPrice"))),
-                "close": safe_float(_first(r, ("c", "close", "previousClose", "pdc"))),
-                "volume": safe_float(_first(r, ("v", "volume", "tradedVolume")), 0.0),
-                "oi": safe_float(_first(r, ("oi", "openInterest", "pOpenInterest"))),
-                "vwap": safe_float(_first(r, ("ap", "vwap"))),
-                "raw_source": "KOTAK_NEO",
-            })
-        except Exception:
-            return None
+        return read_shared_raw_quote(symbol)
 
-    def get_intraday_capture(self, symbol: str) -> Optional[pd.DataFrame]:
-        # Prefer previously captured raw data; no API replay is needed.
-        cached = read_shared_raw_intraday(symbol)
-        if cached is not None and not cached.empty:
-            return cached
-        return None
+    def intraday(self, symbol: str) -> Optional[pd.DataFrame]:
+        return read_shared_raw_intraday(symbol)
 
-    def capture_snapshot(self, symbols: List[str]) -> Dict[str, Dict[str, Any]]:
-        out = {}
-        for symbol in symbols:
-            row = self.quote(symbol)
-            if row:
-                out[symbol] = row
-                write_shared_raw(symbol, [row])
-        return out
+    def health(self) -> Dict[str, Any]:
+        health = get_data_source_health().get("COMMON_RAW", {}).copy()
+        health["source"] = COMMON_RAW_SOURCE_NAME
+        health["credentials_owned_by_engine"] = False
+        return health
 
 
-_KOTAK_SINGLETON = None
+_COMMON_RAW_SOURCE = CommonRawDataSource()
 
 
-def get_kotak_adapter() -> Optional[KotakRawAdapter]:
-    global _KOTAK_SINGLETON
-    if _KOTAK_SINGLETON is None:
-        _KOTAK_SINGLETON = KotakRawAdapter()
-        try:
-            _KOTAK_SINGLETON.login()
-        except Exception as exc:
-            LOGGER.exception("[NEXT-DAY KOTAK] login unavailable")
-            _KOTAK_SINGLETON = None
-    return _KOTAK_SINGLETON
+def get_common_raw_source() -> CommonRawDataSource:
+    return _COMMON_RAW_SOURCE
+
+
+# Backward-compatible function names. They now mean common raw-source reads;
+# they do NOT instantiate or contact Kotak.
+def fetch_intraday(symbol: str) -> Optional[pd.DataFrame]:
+    return get_common_raw_source().intraday(symbol)
 
 
 def capture_kotak_day_ahead_snapshot(symbols: List[str]) -> Dict[str, Dict[str, Any]]:
-    adapter = get_kotak_adapter()
-    if adapter is None or not adapter.connected:
-        return {}
-    try:
-        return adapter.capture_snapshot(symbols)
-    except Exception as exc:
-        LOGGER.exception("[NEXT-DAY KOTAK] snapshot failed")
-        return {}
+    """Compatibility shim: read existing common raw quotes only."""
+    out: Dict[str, Dict[str, Any]] = {}
+    for symbol in symbols:
+        q = get_common_raw_source().quote(symbol)
+        if q:
+            out[str(symbol).upper()] = q
+    return out
 
 
 def capture_kotak_opening_window(symbols: List[str]) -> None:
-    """Capture 09:15-09:20 raw quotes for only the current TOP 5.
-
-    This keeps the critical morning confirmation on Kotak rather than a
-    delayed 1-minute provider. The loop is harmless if the engine is not live.
-    """
-    adapter = get_kotak_adapter()
-    if adapter is None or not adapter.connected:
-        return
-    records: Dict[str, List[Dict[str, Any]]] = {s: [] for s in symbols}
-    start = datetime(now_ist().year, now_ist().month, now_ist().day, 9, 15, tzinfo=IST)
-    end = datetime(now_ist().year, now_ist().month, now_ist().day, 9, 20, tzinfo=IST)
-    while now_ist() < start:
-        time.sleep(1)
-    while now_ist() < end:
-        for symbol in symbols:
-            row = adapter.quote(symbol)
-            if row:
-                records[symbol].append(row)
-        time.sleep(max(1, KOTAK_CAPTURE_SECONDS))
-    for symbol, rows in records.items():
-        if rows:
-            write_shared_raw(symbol, rows)
+    """No-op by design: opening capture belongs to the common raw producer."""
+    return None
 
 
 # ============================================================================
@@ -3919,19 +3729,8 @@ def capture_kotak_opening_window(symbols: List[str]) -> None:
 # ============================================================================
 
 def fetch_intraday(symbol: str) -> Optional[pd.DataFrame]:
-    """Kotak-first intraday source; Yahoo only as explicit fallback."""
-    kotak = get_kotak_adapter()
-    if kotak is not None and kotak.connected:
-        try:
-            return kotak.get_intraday_capture(symbol)
-        except Exception:
-            pass
-
-    shared = read_shared_raw_intraday(symbol)
-    if shared is not None and not shared.empty:
-        return shared
-
-    return fetch_yahoo_chart(f"{symbol}.NS", days=1, interval="1m")
+    """Read live intraday observations from the common raw source only."""
+    return get_common_raw_source().intraday(symbol)
 
 
 def normalize_intraday(
@@ -4096,25 +3895,15 @@ def intraday_vwap(
 # ============================================================================
 
 def market_gap(ticker: str) -> float:
-    # For NIFTY opening gap, use Kotak raw quote when available.
-    if ticker == NIFTY_TICKER:
-        adapter = get_kotak_adapter()
-        if adapter is not None and adapter.connected:
-            q = adapter.quote("Nifty 50")
-            if q:
-                previous_close = safe_float(q.get("close"))
-                open_price = safe_float(q.get("open"))
-                if np.isfinite(previous_close) and previous_close != 0 and np.isfinite(open_price):
-                    return (open_price / previous_close - 1.0) * 100.0
-
-    df = fetch_yahoo_chart(ticker, days=5, interval="1d")
-    if df is None or len(df) < 2:
-        return np.nan
-    previous_close = safe_float(df["Close"].iloc[-2])
-    today_open = safe_float(df["Open"].iloc[-1])
-    if not np.isfinite(previous_close) or previous_close == 0 or not np.isfinite(today_open):
-        return np.nan
-    return (today_open / previous_close - 1.0) * 100.0
+    """Read the opening gap from the common raw source only."""
+    symbol = "Nifty 50" if ticker == NIFTY_TICKER else str(ticker).replace(".NS", "")
+    q = get_common_raw_source().quote(symbol)
+    if q:
+        previous_close = safe_float(q.get("close"), np.nan)
+        open_price = safe_float(q.get("open"), np.nan)
+        if np.isfinite(previous_close) and previous_close != 0 and np.isfinite(open_price):
+            return (open_price / previous_close - 1.0) * 100.0
+    return np.nan
 
 
 def confirm_candidate(
@@ -4828,7 +4617,6 @@ def append_outcome(
 # override only the day-ahead/morning orchestration points, while preserving all
 # existing adapters, helpers, catalyst logic, UI and storage contracts.
 
-import contextlib
 
 V7_VERSION = "FINAL_V7_FULL_MTF_MACRO_RISK_AUDIT"
 V7_BASKET_SIZE = max(10, int(os.getenv("NEXT_DAY_V7_BASKET_SIZE", "30")))
@@ -4847,7 +4635,6 @@ V7_VIX_CAUTION_CONFIRM_BONUS = float(os.getenv("NEXT_DAY_V7_VIX_CAUTION_CONFIRM_
 V7_AUDIT_FILE = ROOT / "audit_summary.json"
 V7_MTF_CACHE_DIR = ROOT / "mtf_cache"
 V7_MTF_CACHE_DIR.mkdir(parents=True, exist_ok=True)
-V7_LOCK_FILE = SHARED_RAW_CACHE_DIR / ".shared_raw.lock"
 
 # Extra raw fields only. These are still raw quote values; no calculated field
 # from either engine is allowed across the isolation boundary.
@@ -4856,40 +4643,8 @@ _RAW_ALLOWED.update({
     "bid", "ask", "bid_qty", "ask_qty", "last_traded_time",
 })
 
-@contextlib.contextmanager
-def _v7_process_lock(path: Path):
-    """Best-effort cross-process lock; fcntl on Linux, thread lock fallback."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fh = None
-    try:
-        fh = path.open("a+")
-        try:
-            import fcntl
-            fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
-            yield fh
-            fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
-        except ImportError:
-            with LOCK:
-                yield fh
-    finally:
-        if fh is not None:
-            fh.close()
 
-
-def write_shared_raw(symbol: str, records: List[Dict[str, Any]]) -> None:
-    """Append raw JSONL safely; never writes calculated features/scores."""
-    if not records:
-        return
-    path = shared_raw_path(symbol)
-    payload = "".join(
-        json.dumps(_raw_only(record), ensure_ascii=False, default=str) + "\n"
-        for record in records
-    )
-    with _v7_process_lock(V7_LOCK_FILE):
-        with path.open("a", encoding="utf-8") as handle:
-            handle.write(payload)
-            handle.flush()
-            os.fsync(handle.fileno())
+# Common raw source remains producer-owned; this engine is read-only.
 
 
 def _v7_sector_bucket(industry: Any) -> str:
@@ -5224,20 +4979,51 @@ def _v7_enrich_basket(basket: pd.DataFrame) -> pd.DataFrame:
 
 
 def _v7_select_final5(enriched: pd.DataFrame) -> pd.DataFrame:
-    if enriched.empty: return enriched
-    x = enriched.copy()
-    # Hard exclusions: no direction, no structural RR, or invalidation too close.
-    x = x[x["Direction"].isin(["LONG", "SHORT"])].copy()
-    x = x[x["hard_rr_pass"] == True].copy()
-    if x.empty: return x
-    selected, sector_count = [], {}
-    for _, row in x.sort_values("V7Score", ascending=False).iterrows():
+    """Build the overnight TOP 15 shortlist.
+
+    Hard R:R is a trade-readiness gate, not a reason to collapse the overnight
+    research shortlist to five names. Hard-pass candidates are ranked first;
+    remaining directional candidates can stay in the shortlist as WATCH_ONLY.
+    Morning confirmation still requires the hard R:R gate before FINAL 1/2.
+    """
+    if enriched.empty:
+        return enriched
+    x = enriched[enriched["Direction"].isin(["LONG", "SHORT"])].copy()
+    if x.empty:
+        return x
+
+    x["hard_rr_pass"] = x["hard_rr_pass"].fillna(False).astype(bool)
+    x = x.sort_values(["hard_rr_pass", "V7Score"], ascending=[False, False])
+
+    selected = []
+    sector_count: Dict[str, int] = {}
+    for _, row in x.iterrows():
         sector = str(row.get("SectorBucket", "UNKNOWN"))
-        if sector_count.get(sector, 0) >= 2: continue
-        selected.append(row)
+        if sector_count.get(sector, 0) >= 2:
+            continue
+        item = row.copy()
+        item["OvernightEligibility"] = "TRADE_READY" if bool(item.get("hard_rr_pass")) else "WATCH_ONLY"
+        selected.append(item)
         sector_count[sector] = sector_count.get(sector, 0) + 1
-        if len(selected) >= TOP5_COUNT: break
-    return pd.DataFrame(selected).reset_index(drop=True).head(TOP5_COUNT)
+        if len(selected) >= DAY_AHEAD_TOP_N:
+            break
+
+    # If sector diversification prevents 15, fill remaining slots without the
+    # sector cap; never fabricate a candidate.
+    if len(selected) < DAY_AHEAD_TOP_N:
+        used = {str(r["Symbol"]) for r in selected}
+        for _, row in x.iterrows():
+            symbol = str(row["Symbol"])
+            if symbol in used:
+                continue
+            item = row.copy()
+            item["OvernightEligibility"] = "TRADE_READY" if bool(item.get("hard_rr_pass")) else "WATCH_ONLY"
+            selected.append(item)
+            used.add(symbol)
+            if len(selected) >= DAY_AHEAD_TOP_N:
+                break
+
+    return pd.DataFrame(selected).reset_index(drop=True).head(DAY_AHEAD_TOP_N)
 
 
 def _v7_risk_profile(row: Dict[str, Any], vix: Dict[str, Any]) -> Dict[str, Any]:
@@ -5268,16 +5054,16 @@ def _v7_risk_profile(row: Dict[str, Any], vix: Dict[str, Any]) -> Dict[str, Any]
 
 
 def _v7_circuit_gate(symbol: str, opening: pd.DataFrame) -> Tuple[bool, str]:
-    """Reject only when a raw circuit/price-band field proves a lock.
-    Unknown is not treated as locked because some broker quote schemas omit bands.
-    """
-    adapter = get_kotak_adapter()
-    if adapter is not None and adapter.connected:
-        q = adapter.quote(symbol)
-        if q:
-            ltp = safe_float(q.get("ltp")); upper = safe_float(q.get("upper_circuit", q.get("upper_price_band"))); lower = safe_float(q.get("lower_circuit", q.get("lower_price_band")))
-            if np.isfinite(ltp) and np.isfinite(upper) and upper > 0 and ltp >= upper * 0.999: return False, "CIRCUIT_LOCKED_UPPER"
-            if np.isfinite(ltp) and np.isfinite(lower) and lower > 0 and ltp <= lower * 1.001: return False, "CIRCUIT_LOCKED_LOWER"
+    """Use only raw circuit/price-band fields from the common raw source."""
+    q = get_common_raw_source().quote(symbol)
+    if q:
+        ltp = safe_float(q.get("ltp"), np.nan)
+        upper = safe_float(q.get("upper_circuit", q.get("upper_price_band")), np.nan)
+        lower = safe_float(q.get("lower_circuit", q.get("lower_price_band")), np.nan)
+        if np.isfinite(ltp) and np.isfinite(upper) and upper > 0 and ltp >= upper * 0.999:
+            return False, "CIRCUIT_LOCKED_UPPER"
+        if np.isfinite(ltp) and np.isfinite(lower) and lower > 0 and ltp <= lower * 1.001:
+            return False, "CIRCUIT_LOCKED_LOWER"
     return True, "OK_OR_BAND_UNAVAILABLE"
 
 
@@ -5360,10 +5146,10 @@ def _v7_build_day_ahead_watchlist() -> Dict[str, Any]:
     if not enriched.empty:
         enriched["MacroVIXRegime"] = vix.get("regime","UNAVAILABLE")
     top5=_v7_select_final5(enriched)
-    kotak_snapshot=capture_kotak_day_ahead_snapshot([str(x).upper() for x in top5["Symbol"].tolist()] if not top5.empty else [])
+    common_raw_snapshot=capture_kotak_day_ahead_snapshot([str(x).upper() for x in top5["Symbol"].tolist()] if not top5.empty else [])
     candidates=[]
     for rank,(_,row) in enumerate(top5.iterrows(),start=1):
-        d=row.to_dict(); sym=str(row["Symbol"]); q=kotak_snapshot.get(sym,{})
+        d=row.to_dict(); sym=str(row["Symbol"]); q=common_raw_snapshot.get(sym,{})
         if np.isfinite(safe_float(q.get("ltp"))): d["LTP"]=safe_float(q.get("ltp"))
         d["sector_bucket"]=_v7_sector_bucket(d.get("Industry")); d["risk_profile"]=_v7_risk_profile(d,vix)
         candidates.append({
@@ -5380,24 +5166,26 @@ def _v7_build_day_ahead_watchlist() -> Dict[str, Any]:
             "mtf_score":round(safe_float(d.get("mtf_score"),50),2),"support":safe_float(d.get("support"),np.nan),"resistance":safe_float(d.get("resistance"),np.nan),
             "invalidation":safe_float(d.get("invalidation"),np.nan),"target":safe_float(d.get("target"),np.nan),"rr":round(safe_float(d.get("rr"),np.nan),3),
             "invalidation_atr":round(safe_float(d.get("invalidation_atr"),np.nan),3),"pattern_conflicts":int(d.get("pattern_conflicts",0)),"pattern_supports":int(d.get("pattern_supports",0)),
+            "hard_rr_pass":bool(d.get("hard_rr_pass",False)),"overnight_eligibility":str(d.get("OvernightEligibility","WATCH_ONLY")),
             "risk_profile":d["risk_profile"],"thesis":"THESIS_PENDING_MORNING_CONFIRMATION","invalidation_rule":"Structural S/R or ATR fallback; hard R:R gate applies."
         })
     basket_records=[]
     for _,row in enriched.iterrows():
         basket_records.append({"symbol":str(row["Symbol"]),"sector_bucket":str(row.get("SectorBucket",_v7_sector_bucket(row.get("Industry")))),"direction":str(row.get("Direction")),"day_ahead_score":round(safe_float(row.get("DayAheadScore"),0),2),"v7_score":round(safe_float(row.get("V7Score"),0),2),"mtf_score":round(safe_float(row.get("mtf_score"),50),2),"rr":round(safe_float(row.get("rr"),np.nan),3),"hard_rr_pass":bool(row.get("hard_rr_pass",False))})
-    result={"engine":"NEXT_DAY_ALPHA_ENGINE","version":V7_VERSION,"generated_at":timestamp.isoformat(),"data_as_of":timestamp.strftime("%Y-%m-%d"),"architecture":{"nifty_3min_engine_modified":False,"shared_raw_data_allowed":True,"shared_calculated_features":False,"shared_scores":False,"shared_regime_decisions":False,"shared_decisions":False,"shared_labels":False,"shared_predictions":False,"shared_raw_fields_only":True,"next_day_can_write_to_nifty_engine":False,"next_day_can_read_nifty_calculations":False},"macro_regime":vix,"day_ahead":{"universe_size":len(symbols),"usable_symbols":len(frame),"scored_symbols":len(scored),"bet_basket_size":len(basket_records),"bet_basket_30":basket_records,"top5_count":min(TOP5_COUNT,len(candidates)),"top5":candidates[:TOP5_COUNT]},"morning_confirmation":{"status":"PENDING","final":[]},"probability_note":"Quality scores are not win probabilities. VIX is not a directional predictor. Historical calibration is required before any probability claim.","quality_controls":{"hard_rr_gate":V7_MIN_RR,"min_invalidation_atr":V7_MIN_INVALIDATION_DISTANCE_ATR,"max_invalidation_atr":V7_MAX_INVALIDATION_DISTANCE_ATR,"mtf_timeframes":["W","D","4H","1H","15M"],"sector_basket_max_per_sector":V7_MAX_STOCKS_PER_SECTOR,"no_trade_allowed":True}}
+    result={"engine":"NEXT_DAY_ALPHA_ENGINE","version":V7_VERSION + "_COMMON_RAW","generated_at":timestamp.isoformat(),"data_as_of":timestamp.strftime("%Y-%m-%d"),"architecture":{"nifty_3min_engine_modified":False,"shared_raw_data_allowed":True,"shared_calculated_features":False,"shared_scores":False,"shared_regime_decisions":False,"shared_decisions":False,"shared_labels":False,"shared_predictions":False,"shared_raw_fields_only":True,"common_raw_source":COMMON_RAW_SOURCE_NAME,"broker_credentials_in_engine":False,"next_day_can_write_to_nifty_engine":False,"next_day_can_read_nifty_calculations":False,"next_day_direct_broker_access":False},"macro_regime":vix,"day_ahead":{"universe_size":len(symbols),"usable_symbols":len(frame),"scored_symbols":len(scored),"bet_basket_size":len(basket_records),"bet_basket_30":basket_records,"top15_count":min(DAY_AHEAD_TOP_N,len(candidates)),"top15":candidates[:DAY_AHEAD_TOP_N],
+            "top5_count":min(DAY_AHEAD_TOP_N,len(candidates)),"top5":candidates[:DAY_AHEAD_TOP_N]},"morning_confirmation":{"status":"PENDING","final":[]},"probability_note":"Quality scores are not win probabilities. VIX is not a directional predictor. Historical calibration is required before any probability claim.","quality_controls":{"hard_rr_gate":V7_MIN_RR,"min_invalidation_atr":V7_MIN_INVALIDATION_DISTANCE_ATR,"max_invalidation_atr":V7_MAX_INVALIDATION_DISTANCE_ATR,"mtf_timeframes":["W","D","4H","1H","15M"],"sector_basket_max_per_sector":V7_MAX_STOCKS_PER_SECTOR,"no_trade_allowed":True}}
     _atomic_write_text(CACHE_JSON,json.dumps(result,ensure_ascii=False,indent=2,default=str))
     return result
 
 
-# Override the original orchestration without removing its implementation.
+# Override the original orchestration with the validated V7 implementation.
 build_day_ahead_watchlist = _v7_build_day_ahead_watchlist
 
 
 def _v7_run_morning_confirmation() -> Dict[str, Any]:
     latest=load_latest()
     if not latest: return {"status":"NO_DAY_AHEAD_DATA","final":[]}
-    candidates=latest.get("day_ahead",{}).get("top5",[])
+    candidates=latest.get("day_ahead",{}).get("top15", latest.get("day_ahead",{}).get("top5",[]))
     if not candidates: return {"status":"NO_CANDIDATES","final":[],"confirmations":[]}
     nifty_gap=market_gap(NIFTY_TICKER)
     vix=latest.get("macro_regime",{})
@@ -5420,8 +5208,11 @@ def _v7_run_morning_confirmation() -> Dict[str, Any]:
     for item in confirmations:
         score=safe_float(item.get("confirmation_score"),0)
         sector_ok=item.get("sector_live_alignment") is True
+        candidate_hard_rr = bool(next((c.get("hard_rr_pass",False) for c in candidates if str(c.get("symbol")) == str(item.get("symbol"))), False))
         # In neutral sectors the original confirmation may still stand; opposite live sectors are hard rejection.
-        if item.get("sector_live_regime") in ("BULLISH","BEARISH") and not sector_ok:
+        if not candidate_hard_rr:
+            item["status"]="REJECTED"; item["reason"]="Overnight R:R gate not passed"
+        elif item.get("sector_live_regime") in ("BULLISH","BEARISH") and not sector_ok:
             item["status"]="REJECTED"; item["reason"]="Live sector regime contradicts thesis"
         elif score >= required and item.get("status") not in ("REJECTED","DATA_NOT_READY") and (item.get("acceptance") or item.get("breakout")):
             item["status"]="CONFIRMED"; item["reason"]="Thesis + morning price acceptance + sector + VWAP aligned"; confirmed.append(item)
@@ -5471,22 +5262,7 @@ class NextDayAlphaEngine:
 
     def data_source_health(self) -> Dict[str, Dict[str, Any]]:
         health = get_data_source_health()
-        adapter = get_kotak_adapter()
-        if adapter is not None:
-            try:
-                kh = adapter.health()
-                health["KOTAK_NEO"] = {
-                    "status": "CONNECTED" if kh.get("quote_received") else ("LOGIN_OK_NO_QUOTE" if kh.get("connected") else "ERROR"),
-                    "last_success_ist": kh.get("last_quote_at"),
-                    "last_attempt_ist": kh.get("login_attempted_at"),
-                    "quotes_ok": 1 if kh.get("quote_received") else 0,
-                    "error": kh.get("last_quote_error") or kh.get("login_error"),
-                    "mode": "LIVE/INTRADAY",
-                    "probe_ltp": kh.get("probe_ltp"),
-                    "probe_symbol": kh.get("last_quote_symbol") or "NIFTY 50",
-                }
-            except Exception as exc:
-                health["KOTAK_NEO"] = {"status": "ERROR", "error": f"{type(exc).__name__}: {exc}", "mode": "LIVE/INTRADAY"}
+        health["COMMON_RAW"] = get_common_raw_source().health()
         return health
 
     def latest(
@@ -5553,43 +5329,27 @@ class NextDayAlphaEngine:
             run_morning_confirmation()
         )
 
+    def common_raw_health(self, probe_symbol: str = "Nifty 50") -> Dict[str, Any]:
+        q = get_common_raw_source().quote(probe_symbol)
+        health = get_common_raw_source().health()
+        health["quote_received"] = bool(q)
+        health["probe_symbol"] = probe_symbol
+        health["probe_ltp"] = safe_float(q.get("ltp"), np.nan) if q else np.nan
+        return health
+
+    # Backward-compatible API name. It reports common raw health and never
+    # attempts a broker login or reads broker credentials.
     def kotak_health(self, probe_symbol: str = "NIFTY 50") -> Dict[str, Any]:
-        """Non-sensitive Kotak Neo health for the standalone dashboard."""
-        adapter = get_kotak_adapter()
-        if adapter is None:
-            return {
-                "sdk_available": NeoAPI is not None,
-                "live_enabled": bool(KOTAK_USE_LIVE),
-                "credentials_present": all([
-                    os.getenv("KOTAK_CONSUMER_KEY", ""),
-                    os.getenv("KOTAK_MOBILE", ""),
-                    os.getenv("KOTAK_UCC", ""),
-                    os.getenv("KOTAK_TOTP", ""),
-                    os.getenv("KOTAK_MPIN", ""),
-                ]),
-                "connected": False,
-                "quote_received": False,
-                "source": "UNAVAILABLE",
-            }
-        return adapter.health(probe_symbol)
+        return self.common_raw_health("Nifty 50" if probe_symbol == "NIFTY 50" else probe_symbol)
 
-    def live_top5(
-        self,
-    ) -> List[Dict[str, Any]]:
-
+    def live_top15(self) -> List[Dict[str, Any]]:
         latest = load_latest()
+        day = latest.get("day_ahead", {})
+        return day.get("top15", day.get("top5", []))
 
-        return (
-            latest
-            .get(
-                "day_ahead",
-                {},
-            )
-            .get(
-                "top5",
-                [],
-            )
-        )
+    def live_top5(self) -> List[Dict[str, Any]]:
+        # Compatibility alias; the day-ahead engine now publishes TOP 15.
+        return self.live_top15()
 
     def live_basket30(self) -> List[Dict[str, Any]]:
         latest = load_latest()
@@ -5631,26 +5391,8 @@ class NextDayAlphaEngine:
 
                 current = now_ist()
 
-                # Capture raw opening-window quotes for TOP 5 using Kotak.
-                # Only raw fields are written to the shared cache.
-                if current.hour == 9 and 15 <= current.minute < 20:
-                    try:
-                        basket_now = self.live_basket30()
-                        symbols_now = [str(x.get("symbol", "")) for x in basket_now if x.get("symbol")]
-                        adapter = get_kotak_adapter()
-                        if adapter is not None and adapter.connected:
-                            for symbol in symbols_now:
-                                row = adapter.quote(symbol)
-                                if row:
-                                    existing = read_shared_raw_intraday(symbol)
-                                    rows = []
-                                    if existing is not None and not existing.empty:
-                                        for _, rr in existing.iterrows():
-                                            rows.append({"timestamp": str(rr.get("DateTime")), "ltp": rr.get("Close"), "open": rr.get("Open"), "high": rr.get("High"), "low": rr.get("Low"), "volume": rr.get("Volume")})
-                                    rows.append(row)
-                                    write_shared_raw(symbol, rows[-300:])
-                    except Exception as exc:
-                        LOGGER.exception("[NEXT-DAY OPEN CAPTURE] failed")
+                # The common raw producer owns 09:15-09:20 capture. This engine
+                # only reads the resulting raw observations.
 
                 # Automatic morning confirmation after 09:20.
                 if (
@@ -5728,26 +5470,26 @@ def print_day_ahead(
     )
 
     print(
-        "DAY-AHEAD TOP 5"
+        "DAY-AHEAD TOP 15"
     )
 
     print(
         "=" * 72
     )
 
-    top5 = (
+    top15 = (
         result
         .get(
             "day_ahead",
             {}
         )
         .get(
-            "top5",
-            [],
+            "top15",
+            result.get("day_ahead", {}).get("top5", []),
         )
     )
 
-    if not top5:
+    if not top15:
 
         print(
             "NO QUALIFIED CANDIDATE"
@@ -5755,7 +5497,7 @@ def print_day_ahead(
 
         return
 
-    for item in top5:
+    for item in top15:
 
         print(
             f"{item['rank']}. "
@@ -5843,26 +5585,26 @@ def run_streamlit_dashboard() -> None:
 
     st.set_page_config(page_title="Next-Day Stock Alpha Engine", layout="wide")
     st.title("NEXT-DAY STOCK ALPHA ENGINE")
-    st.caption("Standalone â€¢ Raw-data sharing only â€¢ Kotak Neo live â€¢ Trusted catalyst layer")
+    st.caption("Standalone | Common raw-data source only | Trusted catalyst layer")
 
     result = load_latest()
     day = result.get("day_ahead", {})
     morning = result.get("morning_confirmation", {})
 
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("TOP 5", len(day.get("top5", [])))
+    c1.metric("TOP 15", len(day.get("top15", day.get("top5", []))))
     c2.metric("Morning Status", morning.get("status", "PENDING"))
     c3.metric("FINAL", len(morning.get("final", [])))
     c4.metric("Engine", result.get("version", "UNKNOWN"))
 
-    st.subheader("DAY-AHEAD TOP 5")
-    top5 = day.get("top5", [])
-    if top5:
-        st.dataframe(pd.DataFrame(top5), use_container_width=True, hide_index=True)
+    st.subheader("DAY-AHEAD TOP 15")
+    top15 = day.get("top15", day.get("top5", []))
+    if top15:
+        st.dataframe(pd.DataFrame(top15), use_container_width=True, hide_index=True)
     else:
         st.warning("NO QUALIFIED CANDIDATE")
 
-    st.subheader("09:15â€“09:20 CONFIRMATION")
+    st.subheader("09:15-09:20 CONFIRMATION")
     confirmations = morning.get("confirmations", [])
     if confirmations:
         st.dataframe(pd.DataFrame(confirmations), use_container_width=True, hide_index=True)
@@ -5871,9 +5613,12 @@ def run_streamlit_dashboard() -> None:
         st.success("FINAL TRADE CANDIDATES")
         st.dataframe(pd.DataFrame(final), use_container_width=True, hide_index=True)
     else:
-        st.info("NO TRADE â€” engine never forces two trades.")
+        st.info("NO TRADE - engine never forces two trades.")
 
     st.caption("A score is a quality score, not a guaranteed win probability. Historical calibration is required before any probability claim.")
+
+    st.subheader("COMMON RAW DATA SOURCE HEALTH")
+    st.json(get_common_raw_source().health())
 
 
 # ============================================================================
