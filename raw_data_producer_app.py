@@ -149,80 +149,87 @@ class KotakConnector:
         
         self.logs.clear()
         
-        # Flexible & Robust Active Nifty Future Token Resolution
-        res = self.client.search_scrip(exchange_segment="nse_fo", symbol="NIFTY")
-        records = res.get("result", res.get("data", [])) if isinstance(res, dict) else []
-        now_d = now_ist().date()
+        # 1. Resolve Active Nifty Future Token with full diagnostic logging
+        try:
+            res = self.client.search_scrip(exchange_segment="nse_fo", symbol="NIFTY")
+            self.logs.append(f"API Response Type: {type(res)}")
+        except Exception as e:
+            raise RuntimeError(f"search_scrip API call failed: {e}")
+            
+        records = []
+        if isinstance(res, dict):
+            records = res.get("result", res.get("data", res.get("values", [])))
+        elif isinstance(res, list):
+            records = res
+            
+        self.logs.append(f"Total scrip records found in nse_fo: {len(records) if isinstance(records, list) else 'Not a list'}")
         
+        if not isinstance(records, list) or len(records) == 0:
+            try:
+                res2 = self.client.search_scrip(exchange_segment="nse_fo", symbol="Nifty")
+                if isinstance(res2, dict):
+                    records = res2.get("result", res2.get("data", res2.get("values", [])))
+                elif isinstance(res2, list):
+                    records = res2
+                self.logs.append(f"Fallback search records found: {len(records) if isinstance(records, list) else 0}")
+            except Exception:
+                pass
+
         futures = []
         for r in records:
-            sym = str(r.get("pTrdSymbol", r.get("ts", r.get("symbol", "")))).upper().strip()
-            inst = str(r.get("pInstType", "")).upper()
+            if not isinstance(r, dict):
+                continue
+            sym = str(r.get("pTrdSymbol", r.get("ts", r.get("symbol", r.get("tradingSymbol", ""))))).upper().strip()
+            tok = str(r.get("pSymbolToken", r.get("instrument_token", r.get("token", r.get("symbolToken", "")))))
             
-            # Check if it's a Nifty Index Future and NOT bank/fin/midcap
-            if "NIFTY" in sym and ("FUT" in sym or "FUTIDX" in inst):
-                if not any(x in sym for x in ["BANK", "FIN", "MID", "IT", "SENSEX", "FPI"]):
-                    exp_val = r.get("pExpiryDate", r.get("expiryDate", r.get("lExpiryDate")))
-                    try:
-                        # Try parsing various expiry formats safely
-                        exp_dt = None
-                        if exp_val:
-                            for fmt in ["%d%b%Y", "%d%b%y", "%Y-%m-%d", "%d-%m-%Y"]:
-                                try:
-                                    exp_dt = datetime.strptime(str(exp_val).upper(), fmt).date()
-                                    break
-                                except Exception:
-                                    pass
-                        
-                        if exp_dt is None or exp_dt >= now_d:
-                            tok = str(r.get("pSymbolToken", r.get("instrument_token", r.get("token", ""))))
-                            if tok:
-                                futures.append((exp_dt if exp_dt else now_d, tok, sym))
-                    except Exception:
-                        pass
+            if "NIFTY" in sym and tok and "FUT" in sym:
+                futures.append((tok, sym))
         
-        if not futures:
-            raise RuntimeError("Active NIFTY future contract could not be discovered. Check if nse_fo segment search is returning records.")
-        
-        # Sort by expiry to pick the nearest active contract
-        futures.sort(key=lambda x: x[0])
-        self.future_token = futures[0][1]
-        self.logs.append(f"Discovered Active Nifty Future: {futures[0][2]} (Token: {self.future_token})")
-
+        if futures:
+            self.future_token = futures[0][0]
+            self.logs.append(f"Successfully bound Nifty Future: {futures[0][1]} (Token: {self.future_token})")
+        else:
+            sample_symbols = [str(r.get("pTrdSymbol", "")) for r in records[:5]] if isinstance(records, list) else []
+            raise RuntimeError(f"Could not find Nifty Future. Sample symbols returned by API: {sample_symbols}")
 
         # 2. PCR & Option Discovery (Raw Only)
-        spot_res = self.client.quotes(instrument_tokens=[{"instrument_token": "Nifty 50", "exchange_segment": "nse_cm"}], quote_type="all")
-        spot_recs = spot_res.get("result", spot_res.get("data", [])) if isinstance(spot_res, dict) else []
-        spot_price = 24300.0
-        for sr in spot_recs:
-            lp = float(sr.get("lp", sr.get("ltp", 0)))
-            if lp > 0:
-                spot_price = lp
-                break
-        
-        step = CONFIG["pcr_strike_step"]
-        atm = round(spot_price / step) * step
-        count = CONFIG["pcr_strike_count"]
-        target_strikes = {atm + (i * step) for i in range(-count, count + 1)}
+        try:
+            spot_res = self.client.quotes(instrument_tokens=[{"instrument_token": "Nifty 50", "exchange_segment": "nse_cm"}], quote_type="all")
+            spot_recs = spot_res.get("result", spot_res.get("data", [])) if isinstance(spot_res, dict) else []
+            spot_price = 24300.0
+            for sr in spot_recs:
+                lp = float(sr.get("lp", sr.get("ltp", 0)))
+                if lp > 0:
+                    spot_price = lp
+                    break
+            
+            step = CONFIG["pcr_strike_step"]
+            atm = round(spot_price / step) * step
+            count = CONFIG["pcr_strike_count"]
+            target_strikes = {atm + (i * step) for i in range(-count, count + 1)}
 
-        opt_discovered = []
-        for r in records:
-            sym = str(r.get("pTrdSymbol", "")).upper().strip()
-            if "NIFTY" in sym and (sym.endswith("CE") or sym.endswith("PE")):
-                if not any(x in sym for x in ["BANK", "FIN", "MID", "IT", "SENSEX"]):
-                    try:
-                        strike_val = float(r.get("dStrikePrice", 0))
-                        if strike_val > 1000000: strike_val /= 100.0
-                        if strike_val in target_strikes:
-                            tok = str(r.get("pSymbolToken", r.get("instrument_token", "")))
-                            if tok:
-                                opt_discovered.append(tok)
-                    except Exception:
-                        pass
-        
-        self.pcr_tokens = list(set(opt_discovered))
-        self.logs.append(f"Discovered {len(self.pcr_tokens)} raw option strikes around ATM {atm}")
+            opt_discovered = []
+            for r in records:
+                sym = str(r.get("pTrdSymbol", "")).upper().strip()
+                if "NIFTY" in sym and (sym.endswith("CE") or sym.endswith("PE")):
+                    if not any(x in sym for x in ["BANK", "FIN", "MID", "IT", "SENSEX"]):
+                        try:
+                            strike_val = float(r.get("dStrikePrice", 0))
+                            if strike_val > 1000000: strike_val /= 100.0
+                            if strike_val in target_strikes:
+                                tok = str(r.get("pSymbolToken", r.get("instrument_token", "")))
+                                if tok:
+                                    opt_discovered.append(tok)
+                        except Exception:
+                            pass
+            
+            self.pcr_tokens = list(set(opt_discovered))
+            self.logs.append(f"Discovered {len(self.pcr_tokens)} raw option strikes around ATM {atm}")
+        except Exception as e:
+            self.logs.append(f"Option discovery warning: {e}")
+            
         return True
+
 
     def fetch_raw_quotes(self) -> List[Dict[str, Any]]:
         if not self.connected or not self.client:
