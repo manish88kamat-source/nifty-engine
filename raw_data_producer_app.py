@@ -143,7 +143,7 @@ class KotakConnector:
         self.connected = True
         return True
 
-        def discover_instruments(self):
+    def discover_instruments(self):
         if not self.connected or not self.client:
             raise RuntimeError("Kotak connector is not authenticated.")
         
