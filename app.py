@@ -188,6 +188,10 @@ def is_valid_number(value):
     except Exception:
         return False
 
+def _safe(v, default=0.0):
+    x = safe_float(v, default)
+    return float(x) if is_valid_number(x) else float(default)
+
 def env_or_secret(name, default=""):
     value = os.getenv(name, "")
     if value:
@@ -1403,11 +1407,6 @@ class IntegratedMarketReasoningEngine:
         except Exception:
             return 0.0
 
-    @staticmethod
-    def _safe(v, default=0.0):
-        x = safe_float(v, default)
-        return float(x) if is_valid_number(x) else float(default)
-
     def _adaptive_extremes(self, price, atr, adx, stretch):
         rsi_hi = 70.0 + min(8.0, max(0.0, adx - 25.0) * 0.25)
         rsi_lo = 30.0 - min(8.0, max(0.0, adx - 25.0) * 0.25)
@@ -1455,28 +1454,28 @@ class IntegratedMarketReasoningEngine:
         return demand, supply, demand_sweep, supply_sweep, demand_reclaim, supply_reject, demand_dist, supply_dist
 
     def compute(self, candle, prev, f):
-        price = self._safe(candle.spot_c, 0.0)
+        price = _safe(candle.spot_c, 0.0)
         spot_range = max(candle.spot_h-candle.spot_l, 1.0)
-        atr = max(self._safe(f.get("spot_atr_14"), spot_range), 1e-9)
-        rsi = self._safe(f.get("rsi_14"), 50.0)
-        macd = self._safe(f.get("macd"), 0.0)
-        adx = self._safe(f.get("adx_14"), 0.0)
-        slope = self._safe(f.get("stretch_slope_3"), 0.0)
-        kstretch = self._safe(f.get("kalman_stretch"), 0.0)
-        kv = self._safe(f.get("kalman_velocity"), 0.0)
-        vwap = self._safe(f.get("fut_vwap"), price)
-        volz = self._safe(f.get("volume_zscore"), 0.0)
-        twc = self._safe(f.get("twc"), 0.0)
-        breadth = self._safe(f.get("breadth_10"), 0.5)
-        obi = self._safe(f.get("order_book_imbalance"), 0.0)
-        oi_cover = self._safe(f.get("oi_short_covering"), 0.0)
-        oi_unwind = self._safe(f.get("oi_long_unwinding"), 0.0)
-        atm_imb = self._safe(f.get("atm_oi_imbalance"), 0.0)
-        gex = self._safe(f.get("gex_proxy"), 0.0)
-        vanna = self._safe(f.get("dealer_vanna_flow"), 0.0)
-        charm = self._safe(f.get("dealer_charm_flow"), 0.0)
-        vp_val = self._safe(f.get("vp_val"), np.nan)
-        vp_vah = self._safe(f.get("vp_vah"), np.nan)
+        atr = max(_safe(f.get("spot_atr_14"), spot_range), 1e-9)
+        rsi = _safe(f.get("rsi_14"), 50.0)
+        macd = _safe(f.get("macd"), 0.0)
+        adx = _safe(f.get("adx_14"), 0.0)
+        slope = _safe(f.get("stretch_slope_3"), 0.0)
+        kstretch = _safe(f.get("kalman_stretch"), 0.0)
+        kv = _safe(f.get("kalman_velocity"), 0.0)
+        vwap = _safe(f.get("fut_vwap"), price)
+        volz = _safe(f.get("volume_zscore"), 0.0)
+        twc = _safe(f.get("twc"), 0.0)
+        breadth = _safe(f.get("breadth_10"), 0.5)
+        obi = _safe(f.get("order_book_imbalance"), 0.0)
+        oi_cover = _safe(f.get("oi_short_covering"), 0.0)
+        oi_unwind = _safe(f.get("oi_long_unwinding"), 0.0)
+        atm_imb = _safe(f.get("atm_oi_imbalance"), 0.0)
+        gex = _safe(f.get("gex_proxy"), 0.0)
+        vanna = _safe(f.get("dealer_vanna_flow"), 0.0)
+        charm = _safe(f.get("dealer_charm_flow"), 0.0)
+        vp_val = _safe(f.get("vp_val"), np.nan)
+        vp_vah = _safe(f.get("vp_vah"), np.nan)
 
         if not is_valid_number(self.session_high): self.session_high = candle.spot_h
         else: self.session_high = max(self.session_high, candle.spot_h)
@@ -1496,7 +1495,7 @@ class IntegratedMarketReasoningEngine:
 
         levels = []
         if is_valid_number(vwap) and is_valid_number(f.get("fut_c")):
-            fut_atr=max(self._safe(f.get("atr_14_prev"),1.0),1e-9)
+            fut_atr=max(_safe(f.get("atr_14_prev"),1.0),1e-9)
             levels.append(("FUT_VWAP_REFERENCE",float(vwap),abs(float(f.get("fut_c"))-float(vwap))/fut_atr))
         supports = sorted([x for x in levels if x[1] <= price], key=lambda x:x[2])
         resistances = sorted([x for x in levels if x[1] >= price], key=lambda x:x[2])
@@ -3152,8 +3151,8 @@ def _v11_side_score(f,side):
     dsw=safe_float(f.get("demand_liquidity_sweep"),0);drec=safe_float(f.get("demand_reclaim"),0);ssw=safe_float(f.get("supply_liquidity_sweep"),0);srej=safe_float(f.get("supply_rejection"),0)
     loc=min(1.0,0.65*(dsw+drec if side=="CE" else ssw+srej))
     opp=min(1.0,0.65*(ssw+srej if side=="CE" else dsw+drec))
-    sm=0.35*_v11_sig(sign*(spot_rsi-50),10)+0.30*_v11_sig(sign*spot_macd,1)+0.20*_v11_sig(sign*spot_slope,0.08)+0.15*(1 if bos==sign else 0)
-    pm=0.45*_v11_sig(sign*(rsi-50),10)+0.35*_v11_sig(sign*slope,max(0.5,(atr if is_valid_number(atr) else 1)*0.10))+0.20*(1 if is_valid_number(ltp) and is_valid_number(ovwap) and ltp>ovwap else -0.5)
+    sm=0.35*_v9_sig(sign*(spot_rsi-50),10)+0.30*_v9_sig(sign*spot_macd,1)+0.20*_v9_sig(sign*spot_slope,0.08)+0.15*(1 if bos==sign else 0)
+    pm=0.45*_v9_sig(sign*(rsi-50),10)+0.35*_v9_sig(sign*slope,max(0.5,(atr if is_valid_number(atr) else 1)*0.10))+0.20*(1 if is_valid_number(ltp) and is_valid_number(ovwap) and ltp>ovwap else -0.5)
     room=0.0
     if is_valid_number(ltp) and is_valid_number(res) and res>ltp:room=min(1,max(0,(res-ltp)/max(ltp*CONFIG["option_sr_max_distance_pct"],1e-6)))
     support_room=0.0
@@ -3296,7 +3295,7 @@ def main():
     t1.metric("NIFTY SPOT", f"Rs. {spot_val}")
     t2.metric("NIFTY FUT", f"Rs. {fut_val}")
     t3.metric("FUT OPEN INTEREST", f"{int(fut_oi):,}" if isinstance(fut_oi, (int, float)) and np.isfinite(fut_oi) else str(fut_oi))
-    t4.metric("TICKS INGESTED", f"{ticks_count:,}")
+    t4.metric("TICLES INGESTED", f"{ticks_count:,}")
 
     st.markdown('<div class="terminal-card">', unsafe_allow_html=True)
     st.markdown("### TACTICAL DECISION")
