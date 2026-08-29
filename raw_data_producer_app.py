@@ -95,7 +95,7 @@ CONFIG = {
     "pcr_strike_count": 5,
     "pcr_strike_step": 50.0,
     "supabase_url": os.getenv("SUPABASE_URL", "").strip(),
-    "supabase_key": os.getenv("SUPABASE_KEY", "").strip(),
+    "supabase_key": (os.getenv("SUPABASE_KEY", "").strip() or os.getenv("SUPABASE_ANON_KEY", "").strip()),
     "poll_interval_sec": 3.0,
     "macro_every_n_cycles": 10,
     # Raw-history coverage required by the three current engines.
@@ -203,20 +203,53 @@ class KotakConnector:
     def login(self, totp_override: str = "") -> bool:
         if NeoAPI is None:
             raise RuntimeError("neo_api_client library is not installed.")
-        
+
         totp = totp_override.strip() or self.totp_secret
         if not all([self.consumer_key, self.mobile, self.ucc, totp, self.mpin]):
             raise RuntimeError("Missing Kotak Neo authentication credentials.")
 
-        self.client = NeoAPI(environment=CONFIG["neo_environment"], consumer_key=self.consumer_key)
-        
-        step1 = self.client.totp_login(mobile_number=self.mobile, ucc=self.ucc, totp=generate_live_totp(totp))
+        try:
+            self.client = NeoAPI(
+                environment=CONFIG["neo_environment"],
+                access_token=None,
+                neo_fin_key=None,
+                consumer_key=self.consumer_key,
+            )
+            step1 = self.client.totp_login(
+                mobile_number=self.mobile,
+                ucc=self.ucc,
+                totp=generate_live_totp(totp),
+            )
+        except Exception as exc:
+            msg = str(exc)
+            if "invalid character '<'" in msg.lower() or "unmarsh" in msg.lower():
+                raise RuntimeError(
+                    "Kotak Login Step 1 received a non-JSON/HTML response. "
+                    "This is a Kotak API/SDK transport problem, not a Supabase "
+                    "credential problem. Check the pinned Neo v2 SDK/API endpoint."
+                ) from exc
+            raise RuntimeError(f"Kotak Login Step 1 failed: {msg}") from exc
+
         if isinstance(step1, dict) and (step1.get("error") or step1.get("Error")):
-            raise RuntimeError(f"Login Step 1 Error: {step1.get('error') or step1.get('Error')}")
-            
-        step2 = self.client.totp_validate(mpin=self.mpin)
+            raise RuntimeError(
+                f"Login Step 1 Error: {step1.get('error') or step1.get('Error')}"
+            )
+
+        try:
+            step2 = self.client.totp_validate(mpin=self.mpin)
+        except Exception as exc:
+            msg = str(exc)
+            if "invalid character '<'" in msg.lower() or "unmarsh" in msg.lower():
+                raise RuntimeError(
+                    "Kotak Login Step 2 received a non-JSON/HTML response. "
+                    "Check the Neo v2 SDK/API endpoint."
+                ) from exc
+            raise RuntimeError(f"Kotak Login Step 2 failed: {msg}") from exc
+
         if isinstance(step2, dict) and (step2.get("error") or step2.get("Error")):
-            raise RuntimeError(f"Login Step 2 Error: {step2.get('error') or step2.get('Error')}")
+            raise RuntimeError(
+                f"Login Step 2 Error: {step2.get('error') or step2.get('Error')}"
+            )
 
         self.connected = True
         self.log("Kotak authentication successful.")
@@ -853,7 +886,7 @@ class SupabasePublisher:
     """Append-only raw bus publisher. Calculations never happen here."""
     def __init__(self):
         self.url = env_or_secret("SUPABASE_URL", CONFIG["supabase_url"])
-        self.key = env_or_secret("SUPABASE_KEY", CONFIG["supabase_key"])
+        self.key = (env_or_secret("SUPABASE_KEY", "") or env_or_secret("SUPABASE_ANON_KEY", "") or CONFIG["supabase_key"])
 
     def _headers(self):
         return {
@@ -896,6 +929,36 @@ class SupabasePublisher:
     def publish_observation(self, source: str, symbol: str, token: str, raw_payload: dict) -> bool:
         return self.publish_observations_batch(source, symbol, token, [raw_payload]) == 1
 
+
+
+def test_supabase_connection() -> Tuple[bool, str]:
+    """Connectivity-only test; never writes or transforms market data."""
+    publisher = SupabasePublisher()
+    if not publisher.url:
+        return False, "SUPABASE_URL is missing."
+    if not publisher.key:
+        return False, "SUPABASE_KEY / SUPABASE_ANON_KEY is missing."
+
+    try:
+        endpoint = f"{publisher.url.rstrip('/')}/rest/v1/raw_observations"
+        response = requests.get(
+            endpoint,
+            headers={
+                "apikey": publisher.key,
+                "Authorization": f"Bearer {publisher.key}",
+                "Accept": "application/json",
+            },
+            params={"select": "id", "limit": "1"},
+            timeout=10,
+        )
+        if response.status_code in (200, 206):
+            return True, "Supabase RAW BUS reachable."
+        return False, (
+            f"Supabase returned HTTP {response.status_code}: "
+            f"{response.text[:200]}"
+        )
+    except Exception as exc:
+        return False, f"Supabase connection error: {exc}"
 
 
 def main():
@@ -1042,3 +1105,9 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+# SOURCE COVERAGE CONTRACT:
+# Next-Day 180d x 1h remains the exact requested historical window.
+# If yfinance returns less, publish only actual raw observations.
+# Never fabricate, duplicate, relabel, or silently resample the missing range.
