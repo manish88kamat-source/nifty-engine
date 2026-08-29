@@ -8,4 +8,4 @@ scikit-learn>=1.3.0
 lightgbm>=4.0.0
 requests>=2.31.0
 git+https://github.com/Kotak-Neo/Kotak-neo-api-v2.git@v2.0.2#egg=neo_api_client
-yfinance==0.2.38
+yfinance==1.6.0
