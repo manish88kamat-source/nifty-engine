@@ -1,4 +1,4 @@
-#!/usr/init/env python3
+#!/usr/bin/env python3
 """
 Leak-Proof Raw Data Producer | Institutional Research Bus
 - Zero local calculations, zero indicators, zero ML.
