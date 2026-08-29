@@ -95,7 +95,7 @@ CONFIG = {
     "pcr_strike_count": 5,
     "pcr_strike_step": 50.0,
     "supabase_url": os.getenv("SUPABASE_URL", "").strip(),
-    "supabase_key": os.getenv("SUPABASE_KEY", "").strip(),
+    "supabase_key": (os.getenv("SUPABASE_KEY", "").strip() or os.getenv("SUPABASE_ANON_KEY", "").strip()),
     "poll_interval_sec": 3.0,
     "macro_every_n_cycles": 10,
     # Raw-history coverage required by the three current engines.
@@ -154,126 +154,6 @@ def env_or_secret(name, default=""):
     return default
 
 
-def _normalize_scrip_record(record: Dict[str, Any]) -> Dict[str, Any]:
-    """Normalize only scrip-master column spelling/whitespace."""
-    out: Dict[str, Any] = {}
-    for key, value in record.items():
-        clean_key = str(key).strip().lstrip("\ufeff").strip()
-        if clean_key.endswith(";"):
-            clean_key = clean_key[:-1]
-        out[clean_key] = value.strip() if isinstance(value, str) else value
-    return out
-
-
-def _normalize_kotak_nfo_expiry(record: Dict[str, Any]) -> Dict[str, Any]:
-    """Mirror Kotak Neo v2 SDK's NFO expiry normalization for fallback rows."""
-    key = "pExpiryDate"
-    value = record.get(key)
-    if value is None:
-        return record
-
-    raw = str(value).strip().replace(";", "")
-    if not raw:
-        return record
-
-    # Already normalized by a server/CSV variant.
-    for fmt in ("%d%b%Y", "%d-%b-%Y", "%d/%b/%Y", "%Y-%m-%d"):
-        try:
-            parsed = datetime.strptime(raw, fmt)
-            record[key] = parsed.strftime("%d%b%Y").upper()
-            return record
-        except Exception:
-            pass
-
-    # Kotak Neo v2 converts NSE-FO epoch seconds using this offset before
-    # formatting as DDMMMYYYY. Keep the exact SDK convention.
-    try:
-        epoch = float(raw)
-        if epoch > 0:
-            epoch_seconds = epoch + 315511200
-            parsed = datetime.fromtimestamp(epoch_seconds)
-            record[key] = parsed.strftime("%d%b%Y").upper()
-    except Exception:
-        pass
-
-    return record
-
-
-def _csv_text_to_records(csv_text: str) -> List[Dict[str, Any]]:
-    """Parse Kotak scrip-master CSV, including its JSON-envelope variant."""
-    if not isinstance(csv_text, str):
-        return []
-    text_value = csv_text.lstrip("\ufeff\r\n\t ")
-    if not text_value:
-        return []
-
-    if text_value.startswith("{"):
-        try:
-            envelope = json.loads(text_value)
-            if isinstance(envelope, dict):
-                for key in ("nse", "NSE", "nse_fo", "NSE_FO"):
-                    payload = envelope.get(key)
-                    if isinstance(payload, str) and payload.strip():
-                        csv_text = payload
-                        break
-        except Exception:
-            pass
-
-    try:
-        reader = csv.DictReader(io.StringIO(str(csv_text).lstrip("\ufeff")))
-        records: List[Dict[str, Any]] = []
-        for row in reader:
-            if not row:
-                continue
-            normalized = _normalize_scrip_record(dict(row))
-            if (
-                str(normalized.get("pSymbol", "")).strip()
-                and str(normalized.get("pTrdSymbol", "")).strip()
-            ):
-                records.append(_normalize_kotak_nfo_expiry(normalized))
-        return records
-    except Exception:
-        return []
-
-
-def _scrip_master_urls(response: Any) -> List[str]:
-    """Accept both current documented URL and filesPaths response shapes."""
-    urls: List[str] = []
-
-    def add(value: Any) -> None:
-        if isinstance(value, str):
-            value = value.strip()
-            if value.startswith(("http://", "https://")) and value not in urls:
-                urls.append(value)
-        elif isinstance(value, (list, tuple)):
-            for item in value:
-                add(item)
-
-    if isinstance(response, str):
-        add(response)
-    elif isinstance(response, dict):
-        add(response.get("filesPaths"))
-        add(response.get("filePath"))
-        add(response.get("url"))
-        add(response.get("nse_fo"))
-        add(response.get("NSE_FO"))
-    return urls
-
-
-def _extract_nfo_csv_payload(response: Any) -> List[Dict[str, Any]]:
-    """Parse an already-returned CSV or JSON-envelope payload."""
-    if isinstance(response, str):
-        return _csv_text_to_records(response)
-    if isinstance(response, dict):
-        for key in ("nse", "NSE", "nse_fo", "NSE_FO"):
-            value = response.get(key)
-            if isinstance(value, str):
-                parsed = _csv_text_to_records(value)
-                if parsed:
-                    return parsed
-    return []
-
-
 def extract_records(response: Any) -> List[Dict[str, Any]]:
     if response is None:
         return []
@@ -288,9 +168,6 @@ def extract_records(response: Any) -> List[Dict[str, Any]]:
                 nested = extract_records(value)
                 if nested:
                     return nested
-        return _extract_nfo_csv_payload(response)
-    if isinstance(response, str):
-        return _csv_text_to_records(response)
     return []
 
 
@@ -307,10 +184,7 @@ class KotakConnector:
         self.future_token = None
         self.future_symbol = None
         self.future_expiry: Optional[date] = None
-        # Kotak Neo does not use Zerodha's numeric NIFTY spot token (26000).
-        # Keep the real Kotak spot identifier separate from the ATM reference fallback.
-        self.spot_token = "Nifty 50"
-        self.atm_reference_price = None
+        self.spot_token = "26000"
         self.pcr_tokens = []
         self.option_contracts = {}
         self.nfo_records = []
@@ -329,31 +203,185 @@ class KotakConnector:
     def login(self, totp_override: str = "") -> bool:
         if NeoAPI is None:
             raise RuntimeError("neo_api_client library is not installed.")
-        
+
         totp = totp_override.strip() or self.totp_secret
         if not all([self.consumer_key, self.mobile, self.ucc, totp, self.mpin]):
             raise RuntimeError("Missing Kotak Neo authentication credentials.")
 
-        self.client = NeoAPI(environment=CONFIG["neo_environment"], consumer_key=self.consumer_key)
-        
-        step1 = self.client.totp_login(mobile_number=self.mobile, ucc=self.ucc, totp=generate_live_totp(totp))
+        try:
+            self.client = NeoAPI(
+                environment=CONFIG["neo_environment"],
+                access_token=None,
+                neo_fin_key=None,
+                consumer_key=self.consumer_key,
+            )
+            step1 = self.client.totp_login(
+                mobile_number=self.mobile,
+                ucc=self.ucc,
+                totp=generate_live_totp(totp),
+            )
+        except Exception as exc:
+            msg = str(exc)
+            if "invalid character '<'" in msg.lower() or "unmarsh" in msg.lower():
+                raise RuntimeError(
+                    "Kotak Login Step 1 received a non-JSON/HTML response. "
+                    "This is a Kotak API/SDK transport problem, not a Supabase "
+                    "credential problem. Check the pinned Neo v2 SDK/API endpoint."
+                ) from exc
+            raise RuntimeError(f"Kotak Login Step 1 failed: {msg}") from exc
+
         if isinstance(step1, dict) and (step1.get("error") or step1.get("Error")):
-            raise RuntimeError(f"Login Step 1 Error: {step1.get('error') or step1.get('Error')}")
-            
-        step2 = self.client.totp_validate(mpin=self.mpin)
+            raise RuntimeError(
+                f"Login Step 1 Error: {step1.get('error') or step1.get('Error')}"
+            )
+
+        try:
+            step2 = self.client.totp_validate(mpin=self.mpin)
+        except Exception as exc:
+            msg = str(exc)
+            if "invalid character '<'" in msg.lower() or "unmarsh" in msg.lower():
+                raise RuntimeError(
+                    "Kotak Login Step 2 received a non-JSON/HTML response. "
+                    "Check the Neo v2 SDK/API endpoint."
+                ) from exc
+            raise RuntimeError(f"Kotak Login Step 2 failed: {msg}") from exc
+
         if isinstance(step2, dict) and (step2.get("error") or step2.get("Error")):
-            raise RuntimeError(f"Login Step 2 Error: {step2.get('error') or step2.get('Error')}")
+            raise RuntimeError(
+                f"Login Step 2 Error: {step2.get('error') or step2.get('Error')}"
+            )
 
         self.connected = True
         self.log("Kotak authentication successful.")
         return True
 
+    def _download_nfo_scrip_master(self) -> List[Dict[str, Any]]:
+        """
+        Fallback to Kotak's official NFO scrip-master CSV when search_scrip
+        returns an empty/unstructured response. This is raw instrument
+        metadata parsing only; no selection or market calculation occurs here.
+        """
+        try:
+            response = self.client.scrip_master(exchange_segment="nse_fo")
+        except Exception as exc:
+            self.log(f"NFO scrip_master() failed: {exc}")
+            return []
+
+        urls: List[str] = []
+
+        def collect_urls(value: Any):
+            if isinstance(value, str):
+                low = value.lower()
+                if low.startswith(("http://", "https://")) and (
+                    low.endswith(".csv") or "scrip" in low
+                ):
+                    urls.append(value)
+                return
+            if isinstance(value, list):
+                for item in value:
+                    collect_urls(item)
+                return
+            if isinstance(value, dict):
+                for item in value.values():
+                    if isinstance(item, (dict, list, str)):
+                        collect_urls(item)
+
+        collect_urls(response)
+        urls = list(dict.fromkeys(urls))
+
+        if not urls:
+            self.log(
+                "NFO scrip_master() returned no downloadable CSV URL."
+            )
+            return []
+
+        records: List[Dict[str, Any]] = []
+
+        for url in urls:
+            try:
+                csv_response = requests.get(url, timeout=20)
+                csv_response.raise_for_status()
+
+                from io import StringIO
+
+                # Kotak has recently returned the CSV endpoint itself as a
+                # JSON envelope in some environments, e.g.
+                # {"nse": "pSymbol,pGroup,...\\n..."}.
+                # Accept both the normal CSV response and that raw CSV
+                # envelope. This is source-format handling only; no
+                # instrument selection or calculation happens here.
+                csv_text = csv_response.text
+
+                try:
+                    envelope = csv_response.json()
+                except Exception:
+                    envelope = None
+
+                if isinstance(envelope, dict):
+                    candidates_text = []
+
+                    def collect_csv_text(value):
+                        if isinstance(value, str):
+                            if "pSymbol" in value and (
+                                "pTrdSymbol" in value
+                                or "pInstType" in value
+                            ):
+                                candidates_text.append(value)
+                        elif isinstance(value, dict):
+                            for item in value.values():
+                                collect_csv_text(item)
+                        elif isinstance(value, list):
+                            for item in value:
+                                collect_csv_text(item)
+
+                    collect_csv_text(envelope)
+
+                    if candidates_text:
+                        csv_text = max(candidates_text, key=len)
+
+                frame = pd.read_csv(
+                    StringIO(csv_text),
+                    dtype=str,
+                    keep_default_na=False,
+                )
+
+                # Kotak's scrip-master has historically exposed whitespace
+                # and the stable dStrikePrice; column spelling.
+                frame.columns = [
+                    str(col).strip().rstrip(";")
+                    for col in frame.columns
+                ]
+
+                # Normalize whitespace around values without changing values.
+                for col in frame.columns:
+                    frame[col] = frame[col].map(
+                        lambda value: value.strip()
+                        if isinstance(value, str)
+                        else value
+                    )
+
+                parsed = frame.to_dict(orient="records")
+                records.extend(
+                    row for row in parsed if isinstance(row, dict)
+                )
+                self.log(
+                    f"NFO scrip master downloaded: {len(parsed)} rows"
+                )
+            except Exception as exc:
+                self.log(
+                    f"NFO scrip master CSV download/parse failed "
+                    f"for {url}: {exc}"
+                )
+
+        return records
+
     def load_nfo_scrip_master(self) -> List[Dict[str, Any]]:
         if not self.connected:
             raise RuntimeError("Kotak connector is not authenticated.")
 
-        # Primary: existing tested search_scrip path.
         records: List[Dict[str, Any]] = []
+
+        # Existing fast search path remains first.
         try:
             response = self.client.search_scrip(
                 exchange_segment="nse_fo",
@@ -363,7 +391,6 @@ class KotakConnector:
         except Exception as exc:
             self.log(f"Primary search_scrip failed: {exc}")
 
-        # Secondary: same tested path with alternate casing.
         if not records:
             try:
                 response = self.client.search_scrip(
@@ -374,77 +401,28 @@ class KotakConnector:
             except Exception as exc:
                 self.log(f"Secondary search_scrip failed: {exc}")
 
-        if records:
-            self.nfo_records = records
-            self.log(f"Total raw NFO scrip records retrieved: {len(records)}")
-            return records
+        # Neo v2 can return no structured rows from search_scrip even while
+        # the official NFO scrip-master is available. Use that master as the
+        # authoritative fallback rather than stopping discovery.
+        if not records:
+            self.log(
+                "search_scrip returned no structured NFO rows; "
+                "falling back to Kotak NFO scrip_master CSV."
+            )
+            records = self._download_nfo_scrip_master()
 
-        # Surgical fallback only: Kotak's official scrip_master contract can
-        # return either a direct CSV URL or a filesPaths list. Some deployments
-        # have also returned the CSV inside an {"nse": "..."} JSON envelope.
-        try:
-            master_response = self.client.scrip_master(
-                exchange_segment="nse_fo"
+        if not records:
+            raise RuntimeError(
+                "Kotak NFO discovery returned no usable records. "
+                "search_scrip and the downloaded scrip_master response "
+                "were both empty/unparseable. Check the producer log for "
+                "the exact scrip-master URL/HTTP response."
             )
 
-            records = _extract_nfo_csv_payload(master_response)
-            if records:
-                self.nfo_records = records
-                self.log(
-                    f"NFO fallback payload parsed directly: {len(records)} records"
-                )
-                return records
+        self.nfo_records = records
+        self.log(f"Total raw scrip records retrieved: {len(records)}")
+        return records
 
-            urls = _scrip_master_urls(master_response)
-            self.log(f"NFO scrip_master fallback URLs discovered: {len(urls)}")
-
-            nfo_urls = [u for u in urls if "nse_fo" in u.lower()]
-            urls = nfo_urls or urls
-
-            for url in urls:
-                try:
-                    # Match the official Kotak Neo v2 SDK behavior:
-                    # scrip_master() authenticates the API call that resolves
-                    # the URL; the returned CDN/file URL is downloaded directly.
-                    response = requests.get(
-                        url,
-                        headers={
-                            "Accept": "text/csv,application/json,*/*",
-                        },
-                        timeout=25,
-                    )
-                    self.log(
-                        f"NFO scrip-master download: HTTP "
-                        f"{response.status_code}, bytes={len(response.content)}"
-                    )
-                    if response.status_code >= 400:
-                        continue
-
-                    parsed = _extract_nfo_csv_payload(response.text)
-
-                    if not parsed:
-                        try:
-                            parsed = _extract_nfo_csv_payload(response.json())
-                        except Exception:
-                            pass
-
-                    if parsed:
-                        self.nfo_records = parsed
-                        self.log(
-                            f"NFO scrip-master fallback parsed: "
-                            f"{len(parsed)} raw records"
-                        )
-                        return parsed
-                except Exception as exc:
-                    self.log(f"NFO scrip-master URL fallback failed: {exc}")
-
-        except Exception as exc:
-            self.log(f"NFO scrip_master fallback failed: {exc}")
-
-        raise RuntimeError(
-            "Kotak NFO discovery returned no usable records after the "
-            "tested search_scrip path and official scrip_master fallback."
-        )
 
     def discover_instruments(self) -> bool:
         if not self.connected or not self.client:
@@ -547,70 +525,25 @@ class KotakConnector:
         # --------------------------------------------------------
         # OPTIONS DISCOVERY (Around ATM)
         # --------------------------------------------------------
-        # Primary reference: Kotak's native NIFTY spot identifier.
-        # If that quote is unavailable, use the already discovered active
-        # NIFTY future LTP ONLY as the ATM reference. This does not create a
-        # synthetic spot observation and does not alter the engine calculations.
         spot_price = None
         try:
-            spot_res = self.client.quotes(
-                instrument_tokens=[
-                    {"instrument_token": self.spot_token, "exchange_segment": "nse_cm"}
-                ],
-                quote_type="ltp",
-            )
+            spot_res = self.client.quotes(instrument_tokens=[{"instrument_token": self.spot_token, "exchange_segment": "nse_cm"}], quote_type="ltp")
             spot_recs = extract_records(spot_res)
             for sr in spot_recs:
-                for k in ("lp", "last_price", "ltp", "c", "close"):
-                    try:
-                        val = float(sr.get(k, 0))
-                    except Exception:
-                        val = 0.0
+                for k in ("lp", "last_price", "ltp"):
+                    val = float(sr.get(k, 0))
                     if val > 0:
                         spot_price = val
                         break
-                if spot_price:
-                    break
-        except Exception as exc:
-            self.log(f"Native NIFTY spot quote unavailable: {exc}")
+        except Exception:
+            pass
 
         if spot_price is None or spot_price <= 0:
-            # No hardcoded token and no fabricated price. Reuse the LTP of the
-            # future contract that was just resolved from Kotak's live master.
-            try:
-                fut_res = self.client.quotes(
-                    instrument_tokens=[
-                        {"instrument_token": str(self.future_token), "exchange_segment": "nse_fo"}
-                    ],
-                    quote_type="ltp",
-                )
-                fut_recs = extract_records(fut_res)
-                for fr in fut_recs:
-                    for k in ("lp", "last_price", "ltp", "c", "close"):
-                        try:
-                            val = float(fr.get(k, 0))
-                        except Exception:
-                            val = 0.0
-                        if val > 0:
-                            spot_price = val
-                            break
-                    if spot_price:
-                        break
-                if spot_price and spot_price > 0:
-                    self.log(
-                        f"NIFTY spot quote unavailable; using active future LTP "
-                        f"{spot_price:.2f} as ATM reference (Token: {self.future_token})."
-                    )
-            except Exception as exc:
-                self.log(f"Active NIFTY future LTP fallback unavailable: {exc}")
-
-        if spot_price is None or spot_price <= 0:
-            self.log("No valid NIFTY price reference; PCR option mapping skipped.")
+            self.log("Spot unavailable; PCR option mapping skipped rather than using a fabricated ATM.")
             self.option_contracts = {}
             self.pcr_tokens = []
             return True
 
-        self.atm_reference_price = float(spot_price)
         step = CONFIG["pcr_strike_step"]
         atm = round(spot_price / step) * step
         count = CONFIG["pcr_strike_count"]
@@ -639,21 +572,6 @@ class KotakConnector:
             
             if opt_type not in ("CE", "PE"):
                 continue
-
-            # PCR must stay on the same current/nearest expiry as the bound
-            # NIFTY future. Never mix strikes from another expiry.
-            option_expiry_text = str(r.get("pExpiryDate", "")).replace(";", "").strip()
-            option_expiry = None
-            if option_expiry_text:
-                for fmt in ("%d%b%Y", "%d-%b-%Y", "%d/%b/%Y", "%Y-%m-%d"):
-                    try:
-                        option_expiry = datetime.strptime(option_expiry_text, fmt).date()
-                        break
-                    except Exception:
-                        pass
-            if self.future_expiry is not None and option_expiry is not None:
-                if option_expiry != self.future_expiry:
-                    continue
 
             strike_val = None
             for sk in ("dStrikePrice;", "dStrikePrice", "strike_price", "strikePrice"):
@@ -720,6 +638,8 @@ class KotakConnector:
 class YahooConnector:
     """Historical/raw Yahoo producer. No indicators, scores, resampling, or engine calculations."""
 
+    last_diagnostics: Dict[str, Any] = {}
+
     @staticmethod
     def _download(
         ticker: str,
@@ -743,17 +663,53 @@ class YahooConnector:
                 "threads": False,
             }
 
+            requested_start = None
+            requested_end = None
             if period:
                 kwargs["period"] = period
             elif days is not None:
-                end = now_ist()
-                start = end - pd.Timedelta(days=int(days))
-                kwargs["start"] = start.to_pydatetime()
-                kwargs["end"] = end.to_pydatetime()
+                requested_end = now_ist()
+                requested_start = requested_end - pd.Timedelta(days=int(days))
+                kwargs["start"] = requested_start.to_pydatetime()
+                kwargs["end"] = requested_end.to_pydatetime()
 
+            method = "download_start_end" if days is not None else "download_period"
             df = yf.download(ticker, **kwargs)
 
+            # Some yfinance/Yahoo combinations intermittently return an empty
+            # frame for an explicit start/end request even though the same
+            # daily instrument is available through the normal period endpoint.
+            # Retry DAILY only with a bounded 1y source window. We never use
+            # period=max and never fabricate missing observations.
+            if (df is None or df.empty) and interval == "1d" and days is not None:
+                method = "ticker_history_1y_fallback"
+                try:
+                    df = yf.Ticker(ticker).history(
+                        period="1y",
+                        interval="1d",
+                        auto_adjust=False,
+                        actions=False,
+                    )
+                except Exception as fallback_exc:
+                    YahooConnector.last_diagnostics = {
+                        "ticker": ticker,
+                        "interval": interval,
+                        "requested_days": days,
+                        "method": method,
+                        "rows": 0,
+                        "error": str(fallback_exc),
+                    }
+                    return pd.DataFrame()
+
             if df is None or df.empty:
+                YahooConnector.last_diagnostics = {
+                    "ticker": ticker,
+                    "interval": interval,
+                    "requested_days": days,
+                    "method": method,
+                    "rows": 0,
+                    "error": "Yahoo returned no rows",
+                }
                 return pd.DataFrame()
 
             if isinstance(df.columns, pd.MultiIndex):
@@ -811,38 +767,43 @@ class YahooConnector:
                 .reset_index(drop=True)
             )
 
+            # If the bounded 1y fallback was used, retain only the original
+            # requested calendar window. This is a filter, not a resample or
+            # synthetic extension. The stored rows remain exactly source rows.
+            if requested_start is not None and requested_end is not None:
+                start_ts = pd.Timestamp(requested_start)
+                end_ts = pd.Timestamp(requested_end)
+                start_utc = start_ts.tz_convert("UTC") if start_ts.tzinfo else start_ts.tz_localize(IST).tz_convert("UTC")
+                end_utc = end_ts.tz_convert("UTC") if end_ts.tzinfo else end_ts.tz_localize(IST).tz_convert("UTC")
+                ts_utc = df["event_timestamp"].dt.tz_convert("UTC")
+                df = df.loc[(ts_utc >= start_utc) & (ts_utc <= end_utc)].reset_index(drop=True)
+
+            YahooConnector.last_diagnostics = {
+                "ticker": ticker,
+                "interval": interval,
+                "requested_days": days,
+                "method": method,
+                "rows": len(df),
+                "first_timestamp": str(df["event_timestamp"].iloc[0]) if not df.empty else None,
+                "last_timestamp": str(df["event_timestamp"].iloc[-1]) if not df.empty else None,
+                "error": None,
+            }
             return df
 
         except Exception as exc:
+            YahooConnector.last_diagnostics = {
+                "ticker": ticker,
+                "interval": interval,
+                "requested_days": days,
+                "method": "exception",
+                "rows": 0,
+                "error": str(exc),
+            }
             print(
                 f"Yahoo history error for {ticker} "
                 f"[{interval}, requested_days={days}]: {exc}"
             )
             return pd.DataFrame()
-
-    @classmethod
-    def health_probe(cls) -> Dict[str, Any]:
-        """Small real-source probes; never fabricate or persist probe data."""
-        probes = [
-            ("NIFTY daily", "^NSEI", 320, "1d"),
-            ("Representative 1h", "RELIANCE.NS", 180, "1h"),
-            ("Representative 15m", "RELIANCE.NS", 55, "15m"),
-            ("India VIX daily", "^INDIAVIX", 320, "1d"),
-        ]
-        out: Dict[str, Any] = {}
-        for label, ticker, days, interval in probes:
-            df = cls._download(ticker, days=days, interval=interval)
-            out[label] = {
-                "ticker": ticker,
-                "requested_days": days,
-                "interval": interval,
-                "returned_rows": int(len(df)),
-                "first_timestamp": str(df.iloc[0]["event_timestamp"]) if not df.empty else None,
-                "last_timestamp": str(df.iloc[-1]["event_timestamp"]) if not df.empty else None,
-                "status": "AVAILABLE" if not df.empty else "NO_DATA",
-                "coverage_policy": "actual returned rows only",
-            }
-        return out
 
     @classmethod
     def fetch_symbol_history(
@@ -1039,12 +1000,18 @@ class HistoricalRawProducer:
             days=CONFIG["nifty_history_days"],
             interval="1d",
         )
-        return self.publish_history(
+        count = self.publish_history(
             "NIFTY_SPOT",
             df,
             "1d",
             "nifty_spot_daily",
         )
+        self.last_stats["nifty_spot_daily:__producer__"] = {
+            **YahooConnector.last_diagnostics,
+            "published_rows": count,
+            "source": "yfinance",
+        }
+        return count
 
     def publish_next_day_universe_history(
         self,
@@ -1134,11 +1101,9 @@ class HistoricalRawProducer:
 
 class SupabasePublisher:
     """Append-only raw bus publisher. Calculations never happen here."""
-    def __init__(self, url_override: str = "", key_override: str = ""):
-        # UI overrides are session-scoped only. Environment/Streamlit secrets
-        # remain the non-UI fallback. No credentials are written into source.
-        self.url = str(url_override or env_or_secret("SUPABASE_URL", CONFIG["supabase_url"])).strip()
-        self.key = str(key_override or env_or_secret("SUPABASE_KEY", CONFIG["supabase_key"])).strip()
+    def __init__(self):
+        self.url = env_or_secret("SUPABASE_URL", CONFIG["supabase_url"])
+        self.key = (env_or_secret("SUPABASE_KEY", "") or env_or_secret("SUPABASE_ANON_KEY", "") or CONFIG["supabase_key"])
 
     def _headers(self):
         return {
@@ -1147,30 +1112,6 @@ class SupabasePublisher:
             "Content-Type": "application/json",
             "Prefer": "return=minimal",
         }
-
-    def health(self) -> Dict[str, Any]:
-        if not self.url or not self.key:
-            return {"configured": False, "reachable": False, "error": "Supabase URL/Key missing"}
-        endpoint = f"{self.url.rstrip('/')}/rest/v1/raw_observations"
-        try:
-            response = requests.get(
-                endpoint,
-                headers={
-                    "apikey": self.key,
-                    "Authorization": f"Bearer {self.key}",
-                    "Accept": "application/json",
-                },
-                params={"select": "id", "limit": "1"},
-                timeout=float(CONFIG["supabase_timeout_sec"]),
-            )
-            return {
-                "configured": True,
-                "reachable": response.status_code in (200, 206),
-                "http_status": response.status_code,
-                "error": "" if response.status_code in (200, 206) else response.text[:250],
-            }
-        except Exception as exc:
-            return {"configured": True, "reachable": False, "error": str(exc)}
 
     def publish_observations_batch(self, source: str, symbol: str, token: str, raw_payloads: List[dict]) -> int:
         if not self.url or not self.key or not raw_payloads:
@@ -1207,6 +1148,36 @@ class SupabasePublisher:
 
 
 
+def test_supabase_connection() -> Tuple[bool, str]:
+    """Connectivity-only test; never writes or transforms market data."""
+    publisher = SupabasePublisher()
+    if not publisher.url:
+        return False, "SUPABASE_URL is missing."
+    if not publisher.key:
+        return False, "SUPABASE_KEY / SUPABASE_ANON_KEY is missing."
+
+    try:
+        endpoint = f"{publisher.url.rstrip('/')}/rest/v1/raw_observations"
+        response = requests.get(
+            endpoint,
+            headers={
+                "apikey": publisher.key,
+                "Authorization": f"Bearer {publisher.key}",
+                "Accept": "application/json",
+            },
+            params={"select": "id", "limit": "1"},
+            timeout=10,
+        )
+        if response.status_code in (200, 206):
+            return True, "Supabase RAW BUS reachable."
+        return False, (
+            f"Supabase returned HTTP {response.status_code}: "
+            f"{response.text[:200]}"
+        )
+    except Exception as exc:
+        return False, f"Supabase connection error: {exc}"
+
+
 def main():
     if st is None:
         print("Streamlit not available.")
@@ -1223,41 +1194,12 @@ def main():
         st.session_state.historical_running = False
 
     kotak: KotakConnector = st.session_state.kotak
+    supabase = SupabasePublisher()
+    historical = HistoricalRawProducer(supabase)
 
     with st.sidebar:
         st.header("🔑 Authentication")
         totp_input = st.text_input("Live TOTP Code", type="password")
-
-        st.markdown("---")
-        st.header("🗄️ Supabase RAW BUS")
-        supabase_url_input = st.text_input(
-            "Supabase URL",
-            value=st.session_state.get("supabase_url_input", env_or_secret("SUPABASE_URL", "")),
-            key="supabase_url_input",
-            placeholder="https://your-project.supabase.co",
-        )
-        supabase_key_input = st.text_input(
-            "Supabase Key",
-            value=st.session_state.get("supabase_key_input", env_or_secret("SUPABASE_KEY", "")),
-            type="password",
-            key="supabase_key_input",
-            placeholder="Supabase anon/service key",
-        )
-        supabase = SupabasePublisher(
-            url_override=supabase_url_input,
-            key_override=supabase_key_input,
-        )
-        historical = HistoricalRawProducer(supabase)
-
-        if st.button("Test Supabase RAW BUS"):
-            health = supabase.health()
-            if health.get("reachable"):
-                st.success("Supabase RAW BUS reachable.")
-            else:
-                st.error(health.get("error", "Supabase connection failed."))
-
-        st.markdown("---")
-        st.header("📡 Live Raw Producer")
         c1, c2 = st.columns(2)
         with c1:
             if st.button("Connect Kotak"):
@@ -1274,6 +1216,8 @@ def main():
                 except Exception as exc:
                     st.error(str(exc))
 
+        st.markdown("---")
+        st.header("📡 Live Raw Producer")
         can_start = bool(kotak.connected and kotak.future_token and supabase.url and supabase.key)
         if not st.session_state.producer_running:
             if st.button("Start Raw Producer Loop", type="primary", disabled=not can_start):
@@ -1284,57 +1228,21 @@ def main():
                 st.session_state.producer_running = False
                 st.rerun()
 
-        if st.button(
-            "Test Live Raw → Supabase",
-            disabled=not can_start,
-        ):
-            try:
-                raw_quotes = kotak.fetch_raw_quotes()
-                published = 0
-                for quote in raw_quotes:
-                    if not isinstance(quote, dict):
-                        continue
-                    token = str(
-                        quote.get(
-                            "exchange_token",
-                            quote.get("instrument_token", quote.get("pSymbol", quote.get("pSymbolToken", "UNKNOWN")))
-                        )
-                    )
-                    symbol = str(
-                        quote.get(
-                            "display_symbol",
-                            quote.get("pTrdSymbol", quote.get("tradingSymbol", "UNKNOWN"))
-                        )
-                    )
-                    if supabase.publish_observation("kotak_live", symbol, token, quote):
-                        published += 1
-                st.session_state["last_live_test"] = {
-                    "kotak_quotes_received": len(raw_quotes),
-                    "supabase_rows_published": published,
-                    "active_future": kotak.future_token,
-                    "pcr_contracts": len(kotak.pcr_tokens),
-                    "status": "PASS" if raw_quotes and published else "PARTIAL/NO_DATA",
-                }
-            except Exception as exc:
-                st.session_state["last_live_test"] = {"status": "ERROR", "error": str(exc)}
-        if st.session_state.get("last_live_test"):
-            st.json(st.session_state["last_live_test"])
-
         st.markdown("---")
         st.header("📚 Historical Raw Producer")
-        st.caption("yfinance → Supabase only. Requested windows are preserved; only actual returned source history is published.")
-        if st.button("Test yfinance Data Source"):
-            with st.spinner("Probing yfinance source coverage..."):
-                yf_health = YahooConnector.health_probe()
-            st.session_state["yf_health"] = yf_health
-        if st.session_state.get("yf_health"):
-            st.json(st.session_state["yf_health"])
+        st.caption("yfinance → Supabase only. Requested 180d×1h is preserved; unavailable source history is never fabricated/resampled.")
         hist_symbols_text = st.text_area("NIFTY-500 symbols (one per line)", height=120, key="hist_symbols")
         mtf_symbols_text = st.text_area("MTF basket symbols (one per line)", height=100, key="mtf_symbols")
         if st.button("Publish NIFTY History", disabled=not (supabase.url and supabase.key)):
             with st.spinner("Publishing NIFTY historical raw data..."):
                 count = historical.publish_nifty_history()
-            st.success(f"NIFTY historical rows published: {count}")
+            diag = historical.last_stats.get("nifty_spot_daily:__producer__", {})
+            if count > 0:
+                st.success(f"NIFTY historical rows published: {count}")
+            else:
+                st.error("NIFTY historical source returned 0 rows; nothing was fabricated or published.")
+            if diag:
+                st.json(diag)
 
         if st.button("Publish Next-Day 500 History", disabled=not (supabase.url and supabase.key)):
             try:
@@ -1363,18 +1271,6 @@ def main():
     col2.metric("Active Future", kotak.future_token or "NOT DISCOVERED")
     col3.metric("PCR Contracts", len(kotak.pcr_tokens))
     col4.metric("Supabase", "READY" if supabase.url and supabase.key else "NOT CONFIGURED")
-
-    st.markdown("### Live Raw Bus Health")
-    live_status = "READY" if (kotak.connected and kotak.future_token) else "NOT READY"
-    sup_health = supabase.health()
-    st.write({
-        "Kotak": "CONNECTED" if kotak.connected else "DISCONNECTED",
-        "Active Future": kotak.future_token or "NOT DISCOVERED",
-        "NFO Master Records": len(kotak.nfo_records),
-        "PCR Contracts": len(kotak.pcr_tokens),
-        "Supabase": "REACHABLE" if sup_health.get("reachable") else "NOT READY",
-        "Live Raw Producer": live_status,
-    })
 
     st.markdown("### Required Data Coverage Audit")
     coverage = HistoricalRawProducer.coverage_report()
@@ -1432,3 +1328,9 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+# SOURCE COVERAGE CONTRACT:
+# Next-Day 180d x 1h remains the exact requested historical window.
+# If yfinance returns less, publish only actual raw observations.
+# Never fabricate, duplicate, relabel, or silently resample the missing range.
