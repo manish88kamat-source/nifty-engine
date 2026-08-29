@@ -17,15 +17,11 @@ import base64
 import hmac
 import hashlib
 import struct
-import csv
-import io
-import zipfile
 from datetime import datetime, timezone, date
 from pathlib import Path
 from typing import Dict, List, Any, Optional, Tuple
 from zoneinfo import ZoneInfo
 
-import numpy as np
 import pandas as pd
 import yfinance as yf
 import requests
@@ -102,6 +98,7 @@ CONFIG = {
     "supabase_key": os.getenv("SUPABASE_KEY", "").strip(),
     "poll_interval_sec": 3.0,
     "macro_every_n_cycles": 10,
+    # Raw-history coverage required by the three current engines.
     "next_day_daily_days": 320,
     "next_day_mtf_hourly_days": 180,
     "next_day_mtf_15m_days": 55,
@@ -157,113 +154,8 @@ def env_or_secret(name, default=""):
     return default
 
 
-def parse_expiry(value):
-    if value is None:
-        return None
-    if isinstance(value, datetime):
-        return value.astimezone(IST)
-    try:
-        x = float(value)
-        if x > 10_000_000_000:
-            return datetime.fromtimestamp(x / 1000, tz=IST)
-        if x > 1_000_000_000:
-            return datetime.fromtimestamp(x, tz=IST)
-    except Exception:
-        pass
-    text = str(value).strip()
-    if not text:
-        return None
-    for fmt in ["%d%b%Y", "%d%b%y", "%Y-%m-%d", "%d-%m-%Y", "%d/%m/%Y",
-                "%d%b%Y %H:%M:%S", "%Y-%m-%d %H:%M:%S", "%Y%m%d"]:
-        try:
-            dt = datetime.strptime(text.upper(), fmt)
-            return dt.replace(tzinfo=IST)
-        except Exception:
-            pass
-    return None
-
-
-def expiry_from_record(record):
-    for key in ["pExpiryDate", "lExpiryDate", "pMaturityDate", "pLastTradingDate", "expiryDate", "expiry", "expiry_date"]:
-        dt = parse_expiry(record.get(key))
-        if dt is not None:
-            return dt
-    return None
-
-
-def option_type_from_record(record):
-    val = str(record.get("pOptionType") or record.get("optType") or record.get("option_type") or "").upper().strip()
-    if "CE" in val or "CALL" in val:
-        return "CE"
-    if "PE" in val or "PUT" in val:
-        return "PE"
-    symbol = str(record.get("pTrdSymbol", record.get("ts", record.get("display_symbol", "")))).upper()
-    if symbol.endswith("CE"):
-        return "CE"
-    if symbol.endswith("PE"):
-        return "PE"
-    return ""
-
-
-def strike_from_record(record):
-    for key in ["dStrikePrice", "dStrikePrice;", "strike_price", "strikePrice", "dStrike", "strike", "pStrikePrice"]:
-        value = safe_float(record.get(key))
-        if is_valid_number(value) and value > 0:
-            if value > 1_000_000:
-                value /= 100.0
-            return value
-    return np.nan
-
-
-def token_from_record(record):
-    if not isinstance(record, dict):
-        return ""
-    for key in ("exchange_token", "pSymbol", "pSymbolToken", "instrument_token", "instrumentToken", "tok", "token", "pToken", "tk"):
-        value = record.get(key)
-        if value is not None and str(value).strip():
-            return str(value).strip()
-    return ""
-
-
-def safe_float(value, default=np.nan):
-    try:
-        if value is None:
-            return default
-        if isinstance(value, (int, float)):
-            return float(value)
-        if isinstance(value, str):
-            value = value.replace(",", "").strip()
-            if not value:
-                return default
-        return float(value)
-    except Exception:
-        return default
-
-
-def is_valid_number(value):
-    try:
-        return value is not None and np.isfinite(float(value))
-    except Exception:
-        return False
-
-
-def record_list(response):
-    if isinstance(response, list):
-        return response
-    if not isinstance(response, dict):
-        return []
-    for key in ("data", "result", "records", "data_list", "scrips", "list", "message", "values"):
-        value = response.get(key)
-        if isinstance(value, list):
-            return value
-        if isinstance(value, dict):
-            for k in ("data", "records", "result", "scrips", "values"):
-                if isinstance(value.get(k), list):
-                    return value[k]
-    return []
-
-
 def _normalize_scrip_record(record: Dict[str, Any]) -> Dict[str, Any]:
+    """Normalize only scrip-master column spelling/whitespace."""
     out: Dict[str, Any] = {}
     for key, value in record.items():
         clean_key = str(key).strip().lstrip("\ufeff").strip()
@@ -273,7 +165,42 @@ def _normalize_scrip_record(record: Dict[str, Any]) -> Dict[str, Any]:
     return out
 
 
+def _normalize_kotak_nfo_expiry(record: Dict[str, Any]) -> Dict[str, Any]:
+    """Mirror Kotak Neo v2 SDK's NFO expiry normalization for fallback rows."""
+    key = "pExpiryDate"
+    value = record.get(key)
+    if value is None:
+        return record
+
+    raw = str(value).strip().replace(";", "")
+    if not raw:
+        return record
+
+    # Already normalized by a server/CSV variant.
+    for fmt in ("%d%b%Y", "%d-%b-%Y", "%d/%b/%Y", "%Y-%m-%d"):
+        try:
+            parsed = datetime.strptime(raw, fmt)
+            record[key] = parsed.strftime("%d%b%Y").upper()
+            return record
+        except Exception:
+            pass
+
+    # Kotak Neo v2 converts NSE-FO epoch seconds using this offset before
+    # formatting as DDMMMYYYY. Keep the exact SDK convention.
+    try:
+        epoch = float(raw)
+        if epoch > 0:
+            epoch_seconds = epoch + 315511200
+            parsed = datetime.fromtimestamp(epoch_seconds)
+            record[key] = parsed.strftime("%d%b%Y").upper()
+    except Exception:
+        pass
+
+    return record
+
+
 def _csv_text_to_records(csv_text: str) -> List[Dict[str, Any]]:
+    """Parse Kotak scrip-master CSV, including its JSON-envelope variant."""
     if not isinstance(csv_text, str):
         return []
     text_value = csv_text.lstrip("\ufeff\r\n\t ")
@@ -284,13 +211,11 @@ def _csv_text_to_records(csv_text: str) -> List[Dict[str, Any]]:
         try:
             envelope = json.loads(text_value)
             if isinstance(envelope, dict):
-                for key in ("nse", "NSE", "nse_fo", "NSE_FO", "data", "result", "records", "values"):
+                for key in ("nse", "NSE", "nse_fo", "NSE_FO"):
                     payload = envelope.get(key)
                     if isinstance(payload, str) and payload.strip():
                         csv_text = payload
                         break
-                    elif isinstance(payload, list):
-                        return [x for x in payload if isinstance(x, dict)]
         except Exception:
             pass
 
@@ -301,58 +226,52 @@ def _csv_text_to_records(csv_text: str) -> List[Dict[str, Any]]:
             if not row:
                 continue
             normalized = _normalize_scrip_record(dict(row))
-            has_token = any(str(normalized.get(k, "")).strip() for k in ("pSymbol", "instrument_token", "token", "symbol_token", "pSymbolToken"))
-            has_symbol = any(str(normalized.get(k, "")).strip() for k in ("pTrdSymbol", "tradingSymbol", "trading_symbol", "symbol", "ts"))
-            if has_token and has_symbol:
-                records.append(normalized)
+            if (
+                str(normalized.get("pSymbol", "")).strip()
+                and str(normalized.get("pTrdSymbol", "")).strip()
+            ):
+                records.append(_normalize_kotak_nfo_expiry(normalized))
         return records
     except Exception:
         return []
 
 
-def _extract_nfo_csv_payload(response: Any) -> List[Dict[str, Any]]:
-    if response is None:
-        return []
+def _scrip_master_urls(response: Any) -> List[str]:
+    """Accept both current documented URL and filesPaths response shapes."""
+    urls: List[str] = []
 
-    raw_bytes = None
-    text_value = ""
-    if hasattr(response, "content") and hasattr(response, "text"):
-        raw_bytes = response.content
-        text_value = response.text
-    elif isinstance(response, bytes):
-        raw_bytes = response
-        try:
-            text_value = response.decode("utf-8", errors="ignore")
-        except Exception:
-            text_value = ""
-    elif isinstance(response, str):
-        text_value = response
-        raw_bytes = response.encode("utf-8", errors="ignore")
+    def add(value: Any) -> None:
+        if isinstance(value, str):
+            value = value.strip()
+            if value.startswith(("http://", "https://")) and value not in urls:
+                urls.append(value)
+        elif isinstance(value, (list, tuple)):
+            for item in value:
+                add(item)
+
+    if isinstance(response, str):
+        add(response)
     elif isinstance(response, dict):
-        for key in ("nse", "NSE", "nse_fo", "NSE_FO", "data", "file", "result", "records", "values"):
+        add(response.get("filesPaths"))
+        add(response.get("filePath"))
+        add(response.get("url"))
+        add(response.get("nse_fo"))
+        add(response.get("NSE_FO"))
+    return urls
+
+
+def _extract_nfo_csv_payload(response: Any) -> List[Dict[str, Any]]:
+    """Parse an already-returned CSV or JSON-envelope payload."""
+    if isinstance(response, str):
+        return _csv_text_to_records(response)
+    if isinstance(response, dict):
+        for key in ("nse", "NSE", "nse_fo", "NSE_FO"):
             value = response.get(key)
-            if value is not None:
-                parsed = _extract_nfo_csv_payload(value)
+            if isinstance(value, str):
+                parsed = _csv_text_to_records(value)
                 if parsed:
                     return parsed
-        return []
-    else:
-        return []
-
-    if raw_bytes and raw_bytes.startswith(b"PK\x03\x04"):
-        try:
-            with zipfile.ZipFile(io.BytesIO(raw_bytes)) as z:
-                for filename in z.namelist():
-                    if filename.endswith(".csv"):
-                        with z.open(filename) as f:
-                            csv_text = f.read().decode("utf-8", errors="ignore")
-                            parsed = _csv_text_to_records(csv_text)
-                            if parsed:
-                                return parsed
-        except Exception:
-            pass
-
-    return _csv_text_to_records(text_value)
+    return []
 
 
 def extract_records(response: Any) -> List[Dict[str, Any]]:
@@ -430,62 +349,98 @@ class KotakConnector:
         if not self.connected:
             raise RuntimeError("Kotak connector is not authenticated.")
 
+        # Primary: existing tested search_scrip path.
         records: List[Dict[str, Any]] = []
+        try:
+            response = self.client.search_scrip(
+                exchange_segment="nse_fo",
+                symbol="NIFTY",
+            )
+            records = extract_records(response)
+        except Exception as exc:
+            self.log(f"Primary search_scrip failed: {exc}")
 
-        # Strategy 1: Proven robust search_scrip query across exchange segments and symbol variations
-        for sym_query in ("NIFTY", "Nifty", "NIFTY 50"):
-            for seg in ("nse_fo", "NFO", "NSE_FO"):
-                try:
-                    response = self.client.search_scrip(exchange_segment=seg, symbol=sym_query)
-                    recs = extract_records(response)
-                    if recs:
-                        records.extend(recs)
-                except Exception as exc:
-                    self.log(f"search_scrip(seg={seg}, symbol={sym_query}) failed: {exc}")
-
-        # Deduplicate records by token
-        unique_records = {}
-        for r in records:
-            tok = token_from_record(r)
-            if tok:
-                unique_records[tok] = r
-
-        if unique_records:
-            self.nfo_records = list(unique_records.values())
-            self.log(f"Total raw NFO scrip records retrieved via search: {len(self.nfo_records)}")
-            return self.nfo_records
-
-        # Strategy 2: SDK scrip_master() endpoints
-        for seg in ("nse_fo", "NFO", "NSE_FO", None):
+        # Secondary: same tested path with alternate casing.
+        if not records:
             try:
-                resp = self.client.scrip_master(exchange_segment=seg) if seg else self.client.scrip_master()
-                parsed = _extract_nfo_csv_payload(resp)
-                if parsed:
-                    self.nfo_records = parsed
-                    self.log(f"NFO scrip_master parsed successfully: {len(parsed)} records")
-                    return parsed
+                response = self.client.search_scrip(
+                    exchange_segment="nse_fo",
+                    symbol="Nifty",
+                )
+                records = extract_records(response)
             except Exception as exc:
-                self.log(f"scrip_master attempt failed: {exc}")
+                self.log(f"Secondary search_scrip failed: {exc}")
 
-        # Strategy 3: Direct public CDN rolling fallback (weekend-proof)
-        today_date = today_ist()
-        for delta_days in range(6):
-            d = today_date - pd.Timedelta(days=delta_days)
-            date_str = d.strftime("%Y-%m-%d")
-            url = f"https://lapi.kotaksecurities.com/wso2-scripmaster/v1/prod/{date_str}/transformed/nse_fo.csv"
-            try:
-                res = requests.get(url, timeout=15)
-                if res.status_code == 200:
-                    parsed = _extract_nfo_csv_payload(res)
+        if records:
+            self.nfo_records = records
+            self.log(f"Total raw NFO scrip records retrieved: {len(records)}")
+            return records
+
+        # Surgical fallback only: Kotak's official scrip_master contract can
+        # return either a direct CSV URL or a filesPaths list. Some deployments
+        # have also returned the CSV inside an {"nse": "..."} JSON envelope.
+        try:
+            master_response = self.client.scrip_master(
+                exchange_segment="nse_fo"
+            )
+
+            records = _extract_nfo_csv_payload(master_response)
+            if records:
+                self.nfo_records = records
+                self.log(
+                    f"NFO fallback payload parsed directly: {len(records)} records"
+                )
+                return records
+
+            urls = _scrip_master_urls(master_response)
+            self.log(f"NFO scrip_master fallback URLs discovered: {len(urls)}")
+
+            nfo_urls = [u for u in urls if "nse_fo" in u.lower()]
+            urls = nfo_urls or urls
+
+            for url in urls:
+                try:
+                    # Match the official Kotak Neo v2 SDK behavior:
+                    # scrip_master() authenticates the API call that resolves
+                    # the URL; the returned CDN/file URL is downloaded directly.
+                    response = requests.get(
+                        url,
+                        headers={
+                            "Accept": "text/csv,application/json,*/*",
+                        },
+                        timeout=25,
+                    )
+                    self.log(
+                        f"NFO scrip-master download: HTTP "
+                        f"{response.status_code}, bytes={len(response.content)}"
+                    )
+                    if response.status_code >= 400:
+                        continue
+
+                    parsed = _extract_nfo_csv_payload(response.text)
+
+                    if not parsed:
+                        try:
+                            parsed = _extract_nfo_csv_payload(response.json())
+                        except Exception:
+                            pass
+
                     if parsed:
                         self.nfo_records = parsed
-                        self.log(f"NFO fallback CDN downloaded for {date_str}: {len(parsed)} records")
+                        self.log(
+                            f"NFO scrip-master fallback parsed: "
+                            f"{len(parsed)} raw records"
+                        )
                         return parsed
-            except Exception:
-                pass
+                except Exception as exc:
+                    self.log(f"NFO scrip-master URL fallback failed: {exc}")
+
+        except Exception as exc:
+            self.log(f"NFO scrip_master fallback failed: {exc}")
 
         raise RuntimeError(
-            "Kotak NFO discovery returned no usable records after trying search_scrip API, scrip_master endpoints, and CDN fallbacks."
+            "Kotak NFO discovery returned no usable records after the "
+            "tested search_scrip path and official scrip_master fallback."
         )
 
     def discover_instruments(self) -> bool:
@@ -509,10 +464,10 @@ class KotakConnector:
             if not isinstance(r, dict):
                 continue
             
-            sym = str(r.get("pTrdSymbol", r.get("tradingSymbol", r.get("trading_symbol", r.get("ts", r.get("symbol", "")))))).upper().strip()
-            token = str(r.get("pSymbol", r.get("pSymbolToken", r.get("instrument_token", r.get("token", r.get("symbol_token", ""))))))
-            inst_type = str(r.get("pInstType", r.get("instrument_type", ""))).upper()
-            option_type = str(r.get("pOptionType", r.get("option_type", ""))).upper()
+            sym = str(r.get("pTrdSymbol", r.get("tradingSymbol", r.get("ts", r.get("symbol", ""))) )).upper().strip()
+            token = str(r.get("pSymbol", r.get("pSymbolToken", r.get("instrument_token", r.get("token", "")))))
+            inst_type = str(r.get("pInstType", "")).upper()
+            option_type = str(r.get("pOptionType", "")).upper()
 
             if not token or not sym:
                 continue
@@ -532,7 +487,7 @@ class KotakConnector:
                 candidates.append((sym, token, r))
 
         if not candidates:
-            raise RuntimeError("Active NIFTY future contract could not be discovered from scrip records.")
+            raise RuntimeError("Active NIFTY future contract could not be discovered from scrip master.")
 
         # --------------------------------------------------------
         # SELECT NEAREST NON-EXPIRED NIFTY FUTURE
@@ -541,7 +496,7 @@ class KotakConnector:
         parsed_candidates = []
 
         for sym, token, record in candidates:
-            expiry_text = str(record.get("pExpiryDate", record.get("expiry", record.get("expiry_date", "")))).replace(";", "").strip()
+            expiry_text = str(record.get("pExpiryDate", "")).replace(";", "").strip()
             expiry = None
 
             if expiry_text:
@@ -617,8 +572,8 @@ class KotakConnector:
         for r in records:
             if not isinstance(r, dict):
                 continue
-            sym = str(r.get("pTrdSymbol", r.get("tradingSymbol", r.get("trading_symbol", "")))).upper().strip()
-            token = str(r.get("pSymbol", r.get("pSymbolToken", r.get("instrument_token", ""))))
+            sym = str(r.get("pTrdSymbol", r.get("tradingSymbol", ""))).upper().strip()
+            token = str(r.get("pSymbol", r.get("pSymbolToken", "")))
             if not sym or not token:
                 continue
             
@@ -627,7 +582,7 @@ class KotakConnector:
             if any(x in sym for x in ["BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX"]):
                 continue
 
-            opt_type = str(r.get("pOptionType", r.get("option_type", ""))).upper()
+            opt_type = str(r.get("pOptionType", "")).upper()
             if opt_type not in ("CE", "PE"):
                 if sym.endswith("CE"):
                     opt_type = "CE"
@@ -638,7 +593,7 @@ class KotakConnector:
                 continue
 
             strike_val = None
-            for sk in ("dStrikePrice;", "dStrikePrice", "strike_price", "strikePrice", "strike"):
+            for sk in ("dStrikePrice;", "dStrikePrice", "strike_price", "strikePrice"):
                 if sk in r:
                     try:
                         v = float(str(r.get(sk)).replace(";", "").replace(",", ""))
@@ -709,6 +664,14 @@ class YahooConnector:
         days: Optional[int] = None,
         interval: str = "1d",
     ) -> pd.DataFrame:
+        """
+        Fetch raw Yahoo/yfinance observations only.
+
+        IMPORTANT:
+        - The caller's requested window is preserved.
+        - No synthetic extension is made when Yahoo returns less history.
+        - Intraday requests are not relabelled as longer coverage.
+        """
         try:
             kwargs = {
                 "interval": interval,
@@ -731,6 +694,7 @@ class YahooConnector:
                 return pd.DataFrame()
 
             if isinstance(df.columns, pd.MultiIndex):
+                # For a single ticker, retain the field level only.
                 if len(set(df.columns.get_level_values(-1))) == 1:
                     df.columns = [c[0] for c in df.columns]
                 else:
@@ -825,7 +789,23 @@ class YahooConnector:
 
 
 class HistoricalRawProducer:
-    """Fetch and publish raw historical observations required by the engines."""
+    """
+    Fetch and publish raw historical observations required by the engines.
+
+    This class deliberately performs NO:
+      - indicators
+      - feature engineering
+      - scoring
+      - regime detection
+      - labels
+      - signals
+      - strategy logic
+      - timeframe resampling
+
+    A requested history window is never silently represented as complete when
+    the source returned less data. The actual returned timestamps/row count
+    are preserved in the raw payload and coverage audit.
+    """
 
     def __init__(self, publisher):
         self.publisher = publisher
@@ -869,6 +849,7 @@ class HistoricalRawProducer:
                 "raw_source": source,
             }
 
+            # Deterministic identity for the raw observation.
             payload["observation_id"] = hashlib.sha256(
                 (
                     f"{source}|{dataset}|{symbol}|"
@@ -882,6 +863,12 @@ class HistoricalRawProducer:
 
     @staticmethod
     def coverage_report() -> Dict[str, Any]:
+        """
+        Source/request audit only.
+
+        180d x 1h remains the V7 requested contract. We explicitly do NOT
+        downgrade it to 60d and do NOT fabricate the unavailable portion.
+        """
         return {
             "contracts": {
                 "next_day_daily": {
@@ -1059,7 +1046,7 @@ class HistoricalRawProducer:
 
 
 class SupabasePublisher:
-    """Append-only raw bus publisher."""
+    """Append-only raw bus publisher. Calculations never happen here."""
     def __init__(self):
         self.url = env_or_secret("SUPABASE_URL", CONFIG["supabase_url"])
         self.key = env_or_secret("SUPABASE_KEY", CONFIG["supabase_key"])
@@ -1104,6 +1091,7 @@ class SupabasePublisher:
 
     def publish_observation(self, source: str, symbol: str, token: str, raw_payload: dict) -> bool:
         return self.publish_observations_batch(source, symbol, token, [raw_payload]) == 1
+
 
 
 def main():
@@ -1158,7 +1146,7 @@ def main():
 
         st.markdown("---")
         st.header("📚 Historical Raw Producer")
-        st.caption("yfinance → Supabase only.")
+        st.caption("yfinance → Supabase only. Requested 180d×1h is preserved; unavailable source history is never fabricated/resampled.")
         hist_symbols_text = st.text_area("NIFTY-500 symbols (one per line)", height=120, key="hist_symbols")
         mtf_symbols_text = st.text_area("MTF basket symbols (one per line)", height=100, key="mtf_symbols")
         if st.button("Publish NIFTY History", disabled=not (supabase.url and supabase.key)):
@@ -1228,6 +1216,7 @@ def main():
                     if supabase.publish_observation("kotak_live", symbol, token, quote):
                         published_count += 1
 
+                # Macro raw data is supplementary market context; it remains raw and uncalculated.
                 if poll_cycle % CONFIG["macro_every_n_cycles"] == 0:
                     for ticker, df in YahooConnector.fetch_macro_data().items():
                         if df.empty:
@@ -1244,6 +1233,7 @@ def main():
             except Exception as exc:
                 log_container.error(f"Producer loop exception: {exc}")
             time.sleep(float(CONFIG["poll_interval_sec"]))
+
 
 
 if __name__ == "__main__":
