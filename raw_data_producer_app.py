@@ -255,30 +255,125 @@ class KotakConnector:
         self.log("Kotak authentication successful.")
         return True
 
+    def _download_nfo_scrip_master(self) -> List[Dict[str, Any]]:
+        """
+        Fallback to Kotak's official NFO scrip-master CSV when search_scrip
+        returns an empty/unstructured response. This is raw instrument
+        metadata parsing only; no selection or market calculation occurs here.
+        """
+        try:
+            response = self.client.scrip_master(exchange_segment="nse_fo")
+        except Exception as exc:
+            self.log(f"NFO scrip_master() failed: {exc}")
+            return []
+
+        urls: List[str] = []
+
+        def collect_urls(value: Any):
+            if isinstance(value, str):
+                low = value.lower()
+                if low.startswith(("http://", "https://")) and (
+                    low.endswith(".csv") or "scrip" in low
+                ):
+                    urls.append(value)
+                return
+            if isinstance(value, list):
+                for item in value:
+                    collect_urls(item)
+                return
+            if isinstance(value, dict):
+                for item in value.values():
+                    if isinstance(item, (dict, list, str)):
+                        collect_urls(item)
+
+        collect_urls(response)
+        urls = list(dict.fromkeys(urls))
+
+        if not urls:
+            self.log(
+                "NFO scrip_master() returned no downloadable CSV URL."
+            )
+            return []
+
+        records: List[Dict[str, Any]] = []
+
+        for url in urls:
+            try:
+                csv_response = requests.get(url, timeout=20)
+                csv_response.raise_for_status()
+
+                from io import StringIO
+                frame = pd.read_csv(
+                    StringIO(csv_response.text),
+                    dtype=str,
+                    keep_default_na=False,
+                )
+                frame.columns = [
+                    str(col).strip().rstrip(";")
+                    for col in frame.columns
+                ]
+
+                parsed = frame.to_dict(orient="records")
+                records.extend(
+                    row for row in parsed if isinstance(row, dict)
+                )
+                self.log(
+                    f"NFO scrip master downloaded: {len(parsed)} rows"
+                )
+            except Exception as exc:
+                self.log(
+                    f"NFO scrip master CSV download/parse failed "
+                    f"for {url}: {exc}"
+                )
+
+        return records
+
     def load_nfo_scrip_master(self) -> List[Dict[str, Any]]:
         if not self.connected:
             raise RuntimeError("Kotak connector is not authenticated.")
-        
-        records = []
+
+        records: List[Dict[str, Any]] = []
+
+        # Existing fast search path remains first.
         try:
-            response = self.client.search_scrip(exchange_segment="nse_fo", symbol="NIFTY")
+            response = self.client.search_scrip(
+                exchange_segment="nse_fo",
+                symbol="NIFTY",
+            )
             records = extract_records(response)
         except Exception as exc:
             self.log(f"Primary search_scrip failed: {exc}")
 
         if not records:
             try:
-                response = self.client.search_scrip(exchange_segment="nse_fo", symbol="Nifty")
+                response = self.client.search_scrip(
+                    exchange_segment="nse_fo",
+                    symbol="Nifty",
+                )
                 records = extract_records(response)
             except Exception as exc:
                 self.log(f"Secondary search_scrip failed: {exc}")
 
+        # Neo v2 can return no structured rows from search_scrip even while
+        # the official NFO scrip-master is available. Use that master as the
+        # authoritative fallback rather than stopping discovery.
         if not records:
-            raise RuntimeError("Kotak returned no structured NFO scrip records.")
+            self.log(
+                "search_scrip returned no structured NFO rows; "
+                "falling back to Kotak NFO scrip_master CSV."
+            )
+            records = self._download_nfo_scrip_master()
+
+        if not records:
+            raise RuntimeError(
+                "Kotak NFO discovery returned no usable records from "
+                "search_scrip or scrip_master CSV."
+            )
 
         self.nfo_records = records
         self.log(f"Total raw scrip records retrieved: {len(records)}")
         return records
+
 
     def discover_instruments(self) -> bool:
         if not self.connected or not self.client:
