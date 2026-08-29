@@ -101,7 +101,6 @@ CONFIG = {
     "supabase_key": os.getenv("SUPABASE_KEY", "").strip(),
     "poll_interval_sec": 3.0,
     "macro_every_n_cycles": 10,
-    # Raw-history coverage required by the three current engines.
     "next_day_daily_days": 320,
     "next_day_mtf_hourly_days": 180,
     "next_day_mtf_15m_days": 55,
@@ -157,8 +156,113 @@ def env_or_secret(name, default=""):
     return default
 
 
+def parse_expiry(value):
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value.astimezone(IST)
+    try:
+        x = float(value)
+        if x > 10_000_000_000:
+            return datetime.fromtimestamp(x / 1000, tz=IST)
+        if x > 1_000_000_000:
+            return datetime.fromtimestamp(x, tz=IST)
+    except Exception:
+        pass
+    text = str(value).strip()
+    if not text:
+        return None
+    for fmt in ["%d%b%Y", "%d%b%y", "%Y-%m-%d", "%d-%m-%Y", "%d/%m/%Y",
+                "%d%b%Y %H:%M:%S", "%Y-%m-%d %H:%M:%S", "%Y%m%d"]:
+        try:
+            dt = datetime.strptime(text.upper(), fmt)
+            return dt.replace(tzinfo=IST)
+        except Exception:
+            pass
+    return None
+
+
+def expiry_from_record(record):
+    for key in ["pExpiryDate", "lExpiryDate", "pMaturityDate", "pLastTradingDate", "expiryDate", "expiry", "expiry_date"]:
+        dt = parse_expiry(record.get(key))
+        if dt is not None:
+            return dt
+    return None
+
+
+def option_type_from_record(record):
+    val = str(record.get("pOptionType") or record.get("optType") or record.get("option_type") or "").upper().strip()
+    if "CE" in val or "CALL" in val:
+        return "CE"
+    if "PE" in val or "PUT" in val:
+        return "PE"
+    symbol = str(record.get("pTrdSymbol", record.get("ts", record.get("display_symbol", "")))).upper()
+    if symbol.endswith("CE"):
+        return "CE"
+    if symbol.endswith("PE"):
+        return "PE"
+    return ""
+
+
+def strike_from_record(record):
+    for key in ["dStrikePrice", "dStrikePrice;", "strike_price", "strikePrice", "dStrike", "strike", "pStrikePrice"]:
+        value = safe_float(record.get(key))
+        if is_valid_number(value) and value > 0:
+            if value > 1_000_000:
+                value /= 100.0
+            return value
+    return np.nan
+
+
+def token_from_record(record):
+    if not isinstance(record, dict):
+        return ""
+    for key in ("exchange_token", "pSymbol", "pSymbolToken", "instrument_token", "instrumentToken", "tok", "token", "pToken", "tk"):
+        value = record.get(key)
+        if value is not None and str(value).strip():
+            return str(value).strip()
+    return ""
+
+
+def safe_float(value, default=np.nan):
+    try:
+        if value is None:
+            return default
+        if isinstance(value, (int, float)):
+            return float(value)
+        if isinstance(value, str):
+            value = value.replace(",", "").strip()
+            if not value:
+                return default
+        return float(value)
+    except Exception:
+        return default
+
+
+def is_valid_number(value):
+    try:
+        return value is not None and np.isfinite(float(value))
+    except Exception:
+        return False
+
+
+def record_list(response):
+    if isinstance(response, list):
+        return response
+    if not isinstance(response, dict):
+        return []
+    for key in ("data", "result", "records", "data_list", "scrips", "list", "message", "values"):
+        value = response.get(key)
+        if isinstance(value, list):
+            return value
+        if isinstance(value, dict):
+            for k in ("data", "records", "result", "scrips", "values"):
+                if isinstance(value.get(k), list):
+                    return value[k]
+    return []
+
+
 def _normalize_scrip_record(record: Dict[str, Any]) -> Dict[str, Any]:
-    """Normalize only scrip-master column spelling/whitespace."""
     out: Dict[str, Any] = {}
     for key, value in record.items():
         clean_key = str(key).strip().lstrip("\ufeff").strip()
@@ -169,7 +273,6 @@ def _normalize_scrip_record(record: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _csv_text_to_records(csv_text: str) -> List[Dict[str, Any]]:
-    """Parse Kotak scrip-master CSV, including its JSON-envelope variant with relaxed key matching."""
     if not isinstance(csv_text, str):
         return []
     text_value = csv_text.lstrip("\ufeff\r\n\t ")
@@ -180,7 +283,7 @@ def _csv_text_to_records(csv_text: str) -> List[Dict[str, Any]]:
         try:
             envelope = json.loads(text_value)
             if isinstance(envelope, dict):
-                for key in ("nse", "NSE", "nse_fo", "NSE_FO", "data", "result", "records"):
+                for key in ("nse", "NSE", "nse_fo", "NSE_FO", "data", "result", "records", "values"):
                     payload = envelope.get(key)
                     if isinstance(payload, str) and payload.strip():
                         csv_text = payload
@@ -206,36 +309,7 @@ def _csv_text_to_records(csv_text: str) -> List[Dict[str, Any]]:
         return []
 
 
-def _scrip_master_urls(response: Any) -> List[str]:
-    """Accept both current documented URL and filesPaths response shapes."""
-    urls: List[str] = []
-
-    def add(value: Any) -> None:
-        if isinstance(value, str):
-            value = value.strip()
-            if value.startswith(("http://", "https://")) and value not in urls:
-                urls.append(value)
-        elif isinstance(value, (list, tuple)):
-            for item in value:
-                add(item)
-
-    if isinstance(response, str):
-        add(response)
-    elif isinstance(response, dict):
-        add(response.get("filesPaths"))
-        add(response.get("filePath"))
-        add(response.get("url"))
-        add(response.get("nse_fo"))
-        add(response.get("NSE_FO"))
-        add(response.get("data"))
-        for v in response.values():
-            if isinstance(v, (list, str)):
-                add(v)
-    return urls
-
-
 def _extract_nfo_csv_payload(response: Any) -> List[Dict[str, Any]]:
-    """Parse an already-returned CSV, ZIP archive bytes, or JSON-envelope payload."""
     if response is None:
         return []
 
@@ -254,7 +328,7 @@ def _extract_nfo_csv_payload(response: Any) -> List[Dict[str, Any]]:
         text_value = response
         raw_bytes = response.encode("utf-8", errors="ignore")
     elif isinstance(response, dict):
-        for key in ("nse", "NSE", "nse_fo", "NSE_FO", "data", "file"):
+        for key in ("nse", "NSE", "nse_fo", "NSE_FO", "data", "file", "result", "records", "values"):
             value = response.get(key)
             if value is not None:
                 parsed = _extract_nfo_csv_payload(value)
@@ -357,75 +431,42 @@ class KotakConnector:
 
         records: List[Dict[str, Any]] = []
 
-        # Strategy 1: SDK scrip_master() with no arguments
-        try:
-            resp = self.client.scrip_master()
-            parsed = _extract_nfo_csv_payload(resp)
-            if parsed:
-                self.nfo_records = parsed
-                self.log(f"NFO scrip_master() parsed successfully: {len(parsed)} records")
-                return parsed
-            urls = _scrip_master_urls(resp)
-            for url in urls:
-                if "nse_fo" in url.lower() or not urls:
-                    try:
-                        res = requests.get(url, timeout=20)
-                        parsed = _extract_nfo_csv_payload(res)
-                        if parsed:
-                            self.nfo_records = parsed
-                            self.log(f"NFO scrip_master URL downloaded: {len(parsed)} records")
-                            return parsed
-                    except Exception:
-                        pass
-        except Exception as exc:
-            self.log(f"scrip_master() attempt failed: {exc}")
+        # Strategy 1: Proven robust search_scrip query across exchange segments and symbol variations
+        for sym_query in ("NIFTY", "Nifty", "NIFTY 50"):
+            for seg in ("nse_fo", "NFO", "NSE_FO"):
+                try:
+                    response = self.client.search_scrip(exchange_segment=seg, symbol=sym_query)
+                    recs = extract_records(response)
+                    if recs:
+                        records.extend(recs)
+                except Exception as exc:
+                    self.log(f"search_scrip(seg={seg}, symbol={sym_query}) failed: {exc}")
 
-        # Strategy 2: SDK scrip_master with exchange segment arguments
-        for seg in ("nse_fo", "NFO", "NSE_FO"):
+        # Deduplicate records by token
+        unique_records = {}
+        for r in records:
+            tok = token_from_record(r)
+            if tok:
+                unique_records[tok] = r
+
+        if unique_records:
+            self.nfo_records = list(unique_records.values())
+            self.log(f"Total raw NFO scrip records retrieved via search: {len(self.nfo_records)}")
+            return self.nfo_records
+
+        # Strategy 2: SDK scrip_master() endpoints
+        for seg in ("nse_fo", "NFO", "NSE_FO", None):
             try:
-                resp = self.client.scrip_master(exchange_segment=seg)
+                resp = self.client.scrip_master(exchange_segment=seg) if seg else self.client.scrip_master()
                 parsed = _extract_nfo_csv_payload(resp)
                 if parsed:
                     self.nfo_records = parsed
-                    self.log(f"NFO scrip_master({seg}) parsed: {len(parsed)} records")
+                    self.log(f"NFO scrip_master parsed successfully: {len(parsed)} records")
                     return parsed
-                urls = _scrip_master_urls(resp)
-                for url in urls:
-                    try:
-                        res = requests.get(url, timeout=20)
-                        parsed = _extract_nfo_csv_payload(res)
-                        if parsed:
-                            self.nfo_records = parsed
-                            self.log(f"NFO URL downloaded for {seg}: {len(parsed)} records")
-                            return parsed
-                    except Exception:
-                        pass
             except Exception as exc:
-                self.log(f"scrip_master({seg}) attempt failed: {exc}")
+                self.log(f"scrip_master attempt failed: {exc}")
 
-        # Strategy 3: search_scrip or scrip_search across different keyword signatures
-        search_methods = ["search_scrip", "scrip_search"]
-        search_args = [
-            {"exchange_segment": "nse_fo", "symbol": "NIFTY"},
-            {"exchange_segment": "nse_fo", "scrip": "NIFTY"},
-            {"exchange_segment": "nse_fo"},
-            {"exchange": "nse_fo", "symbol": "NIFTY"},
-        ]
-        for meth_name in search_methods:
-            meth = getattr(self.client, meth_name, None)
-            if callable(meth):
-                for args in search_args:
-                    try:
-                        resp = meth(**args)
-                        parsed = extract_records(resp)
-                        if parsed:
-                            self.nfo_records = parsed
-                            self.log(f"NFO found via {meth_name}({args}): {len(parsed)} records")
-                            return parsed
-                    except Exception:
-                        pass
-
-        # Strategy 4: Direct public CDN fallback trying recent rolling days (supports weekends)
+        # Strategy 3: Direct public CDN rolling fallback (weekend-proof)
         today_date = today_ist()
         for delta_days in range(6):
             d = today_date - pd.Timedelta(days=delta_days)
@@ -443,7 +484,7 @@ class KotakConnector:
                 pass
 
         raise RuntimeError(
-            "Kotak NFO discovery returned no usable records after trying all API methods and direct CDN fallbacks."
+            "Kotak NFO discovery returned no usable records after trying search_scrip API, scrip_master endpoints, and CDN fallbacks."
         )
 
     def discover_instruments(self) -> bool:
@@ -490,7 +531,7 @@ class KotakConnector:
                 candidates.append((sym, token, r))
 
         if not candidates:
-            raise RuntimeError("Active NIFTY future contract could not be discovered from scrip master.")
+            raise RuntimeError("Active NIFTY future contract could not be discovered from scrip records.")
 
         # --------------------------------------------------------
         # SELECT NEAREST NON-EXPIRED NIFTY FUTURE
