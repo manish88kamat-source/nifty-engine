@@ -1,10 +1,9 @@
 #!/usr/init/env python3
 """
-NIFTY 3-Min Micro Engine | v7.0 Institutional Prop-Grade Architecture
-SUPABASE-BACKED CONSUMER DESK:
-- Price action, Kalman filter, ATR, and slope strictly use Future (fut_vwap / fut_c).
-- PCR, OI changes, Greeks (Vanna/Charm), and GEX strictly use Option Chain (22 strikes).
-- Ingests clean institutional feed directly from Supabase `raw_observations`.
+Nifty Engine Consumer UI | Supabase-Backed Live Stream
+- Zero direct broker connection (eliminates Kotak session collision).
+- Polls Supabase `raw_observations` for real-time institutional feed.
+- Identical UI layout, metrics, and tactical decision journal.
 """
 
 from __future__ import annotations
@@ -189,7 +188,7 @@ def is_valid_number(value):
     except Exception:
         return False
 
-def env_or_secret(name):
+def env_or_secret(name, default=""):
     value = os.getenv(name, "")
     if value:
         return value
@@ -200,7 +199,7 @@ def env_or_secret(name):
                 return str(value)
         except Exception:
             pass
-    return ""
+    return default
 
 def floor_bar_timestamp(ts: datetime, minutes=3) -> datetime:
     ts = to_ist(ts)
@@ -244,60 +243,6 @@ def calc_3bar_slope(series: List[float]) -> float:
     if not np.all(np.isfinite(y)):
         return 0.0
     return float((y[2] - y[0]) / 2.0)
-
-def parse_expiry(value):
-    if value is None:
-        return None
-    if isinstance(value, datetime):
-        return to_ist(value)
-    try:
-        x = float(value)
-        if x > 10_000_000_000:
-            return datetime.fromtimestamp(x / 1000, tz=IST)
-        if x > 1_000_000_000:
-            return datetime.fromtimestamp(x, tz=IST)
-    except Exception:
-        pass
-    text = str(value).strip()
-    if not text:
-        return None
-    for fmt in ["%d%b%Y", "%d%b%y", "%Y-%m-%d", "%d-%m-%Y", "%d/%m/%Y",
-                "%d%b%Y %H:%M:%S", "%Y-%m-%d %H:%M:%S", "%Y%m%d"]:
-        try:
-            dt = datetime.strptime(text.upper(), fmt)
-            return dt.replace(tzinfo=IST)
-        except Exception:
-            pass
-    return None
-
-def expiry_from_record(record):
-    for key in ["pExpiryDate", "lExpiryDate", "pMaturityDate", "pLastTradingDate", "expiryDate", "expiry", "expiry_date"]:
-        dt = parse_expiry(record.get(key))
-        if dt is not None:
-            return dt
-    return None
-
-def option_type_from_record(record):
-    val = str(record.get("pOptionType") or record.get("optType") or record.get("option_type") or "").upper().strip()
-    if "CE" in val or "CALL" in val:
-        return "CE"
-    if "PE" in val or "PUT" in val:
-        return "PE"
-    symbol = str(record.get("pTrdSymbol", record.get("ts", record.get("display_symbol", "")))).upper()
-    if symbol.endswith("CE"):
-        return "CE"
-    if symbol.endswith("PE"):
-        return "PE"
-    return ""
-
-def strike_from_record(record):
-    for key in ["dStrikePrice", "dStrikePrice;", "strike_price", "strikePrice", "dStrike", "strike", "pStrikePrice"]:
-        value = safe_float(record.get(key))
-        if is_valid_number(value) and value > 0:
-            if value > 1_000_000:
-                value /= 100.0
-            return value
-    return np.nan
 
 def token_from_record(record):
     if not isinstance(record, dict):
@@ -2048,11 +1993,9 @@ class PaperTradingDesk:
 # =========================================================
 
 class KotakNeoAdapter:
-    """Supabase-backed consumer adapter that mimics the exact interface of the original Kotak Neo Adapter,
-    preventing any session collision while preserving all calculation engines and UI components."""
     def __init__(self):
-        self.url = env_or_secret("SUPABASE_URL") or CONFIG["supabase_url"]
-        self.key = env_or_secret("SUPABASE_KEY") or CONFIG["supabase_key"]
+        self.url = ""
+        self.key = ""
 
         self.connected = False
         self.conn_state = "DISCONNECTED"
@@ -2110,9 +2053,12 @@ class KotakNeoAdapter:
                         return val
         return np.nan
 
-    def login(self, live_totp_override=""):
+    def login(self, url_override="", key_override=""):
+        self.url = (url_override or "").strip() or env_or_secret("SUPABASE_URL") or CONFIG["supabase_url"]
+        self.key = (key_override or "").strip() or env_or_secret("SUPABASE_KEY") or CONFIG["supabase_key"]
+
         if not self.url or not self.key:
-            raise RuntimeError("Missing SUPABASE_URL or SUPABASE_KEY in environment/secrets.")
+            raise RuntimeError("Missing SUPABASE_URL or SUPABASE_KEY in inputs/environment/secrets.")
         self.connected = True
         self.conn_state = "AUTHENTICATED"
         self.discovery_log.append("OK Connected to Supabase Data Bus (Zero Broker Session Collision)")
@@ -2134,13 +2080,11 @@ class KotakNeoAdapter:
         self.discovery_log.append(f"OK Configured Active Future Token: {self.future_token}")
 
         if auto_pcr:
-            # Map default ATM strikes around 24300 for PCR computation
             step = CONFIG["pcr_strike_step"]
             atm = 24300.0
             count = CONFIG["pcr_strike_count"]
             target_strikes = [atm + (i * step) for i in range(-count, count + 1)]
             
-            # Generate mock/structured PCR tokens mapping for the 22 option strikes
             self.pcr_tokens = []
             dummy_tok_counter = 70000
             for strike in target_strikes:
@@ -3236,7 +3180,7 @@ def _v11_apply(self,feats,d):
     else:target=stop=0.0
     conf=min(0.95,max(0.25,0.50+0.45*abs(edge)+(0.08 if action in ("CE","PE") else 0)))
     d.action=action;d.confidence=round(conf,3);d.ce_evidence_score=round(ce_pct,2);d.pe_evidence_score=round(pe_pct,2);d.net_ce_pe_edge=round(edge,4);d.effective_delta=round(delta,3);d.option_strike=safe_float(feats.get(f"{p}_option_strike"),np.nan) if p else np.nan;d.option_entry_estimate=entry;d.option_target_pts=round(target,2);d.option_stop_pts=round(stop,2);d.option_target_price=entry+target if action!="SKIP" and is_valid_number(entry) else np.nan;d.option_stop_price=entry-stop if action!="SKIP" and is_valid_number(entry) else np.nan;d.option_support=support;d.option_resistance=res;d.option_premium_atr=atr;d.reasoning_state="CE_OPTION_SETUP" if action=="CE" else "PE_OPTION_SETUP" if action=="PE" else "NO_CLEAN_OPTION_SETUP"
-    d.reason=(f"{action if action!='SKIP' else 'WAIT'} | CE {ce_pct:.0f} / PE {pe_pct:.0f} | CE premium RSI {cm['rsi']:.1f} / PE premium RSI {pm['rsi']:.1f} | FUT VWAP only")
+    d.reason=(f"{action if action!='SKIP' else 'WAIT'} | CE {ce_pct:.0f} / PE {pe_pct:.0f} | "f"CE premium RSI {cm['rsi']:.1f} / PE premium RSI {pm['rsi']:.1f} | FUT VWAP only")
     feats["v11_ce_option_score"]=ce_pct;feats["v11_pe_option_score"]=pe_pct;feats["v11_option_edge"]=edge;feats["v11_action"]=action;feats["v11_option_state"]=d.reasoning_state
     return d,{"state":d.reasoning_state,"ce":ce_pct,"pe":pe_pct,"edge":edge}
 
@@ -3273,21 +3217,22 @@ def main():
         else:
             st.markdown('<span class="status-pill status-offline">* DISCONNECTED</span>', unsafe_allow_html=True)
 
-        user_live_totp = st.text_input("Supabase Override (Optional)", type="password", help="Using Supabase Raw Bus")
+        supabase_url_input = st.text_input("Supabase URL", value=env_or_secret("SUPABASE_URL", CONFIG["supabase_url"]), type="default")
+        supabase_key_input = st.text_input("Supabase Key", value=env_or_secret("SUPABASE_KEY", CONFIG["supabase_key"]), type="password")
         
         col_sb1, col_sb2 = st.columns(2)
         with col_sb1:
             if st.button("Connect", key="btn_conn"):
                 try:
                     with st.spinner("Connecting to Supabase..."):
-                        adapter.login()
+                        adapter.login(url_override=supabase_url_input, key_override=supabase_key_input)
                         st.session_state.discovered = False
                         st.rerun()
                 except Exception as exc:
                     st.error(f"{exc}")
         with col_sb2:
             if st.button("Reconnect", key="btn_reconn", disabled=not is_logged_in):
-                adapter.login()
+                adapter.login(url_override=supabase_url_input, key_override=supabase_key_input)
                 st.rerun()
 
         st.markdown("---")
