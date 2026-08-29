@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/init/env python3
 """
 Leak-Proof Raw Data Producer | Institutional Research Bus
 - Zero local calculations, zero indicators, zero ML.
@@ -169,7 +169,7 @@ def _normalize_scrip_record(record: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _csv_text_to_records(csv_text: str) -> List[Dict[str, Any]]:
-    """Parse Kotak scrip-master CSV, including its JSON-envelope variant."""
+    """Parse Kotak scrip-master CSV, including its JSON-envelope variant with relaxed key matching."""
     if not isinstance(csv_text, str):
         return []
     text_value = csv_text.lstrip("\ufeff\r\n\t ")
@@ -180,11 +180,13 @@ def _csv_text_to_records(csv_text: str) -> List[Dict[str, Any]]:
         try:
             envelope = json.loads(text_value)
             if isinstance(envelope, dict):
-                for key in ("nse", "NSE", "nse_fo", "NSE_FO", "data"):
+                for key in ("nse", "NSE", "nse_fo", "NSE_FO", "data", "result", "records"):
                     payload = envelope.get(key)
                     if isinstance(payload, str) and payload.strip():
                         csv_text = payload
                         break
+                    elif isinstance(payload, list):
+                        return [x for x in payload if isinstance(x, dict)]
         except Exception:
             pass
 
@@ -195,10 +197,9 @@ def _csv_text_to_records(csv_text: str) -> List[Dict[str, Any]]:
             if not row:
                 continue
             normalized = _normalize_scrip_record(dict(row))
-            if (
-                str(normalized.get("pSymbol", "")).strip()
-                and str(normalized.get("pTrdSymbol", "")).strip()
-            ):
+            has_token = any(str(normalized.get(k, "")).strip() for k in ("pSymbol", "instrument_token", "token", "symbol_token", "pSymbolToken"))
+            has_symbol = any(str(normalized.get(k, "")).strip() for k in ("pTrdSymbol", "tradingSymbol", "trading_symbol", "symbol", "ts"))
+            if has_token and has_symbol:
                 records.append(normalized)
         return records
     except Exception:
@@ -263,7 +264,6 @@ def _extract_nfo_csv_payload(response: Any) -> List[Dict[str, Any]]:
     else:
         return []
 
-    # Handle ZIP archives if returned by broker scrip master endpoints
     if raw_bytes and raw_bytes.startswith(b"PK\x03\x04"):
         try:
             with zipfile.ZipFile(io.BytesIO(raw_bytes)) as z:
@@ -357,7 +357,7 @@ class KotakConnector:
 
         records: List[Dict[str, Any]] = []
 
-        # Strategy 1: SDK scrip_master() with no arguments (Standard neo_api_client v2 spec)
+        # Strategy 1: SDK scrip_master() with no arguments
         try:
             resp = self.client.scrip_master()
             parsed = _extract_nfo_csv_payload(resp)
@@ -425,14 +425,14 @@ class KotakConnector:
                     except Exception:
                         pass
 
-        # Strategy 4: Direct public CDN fallback trying recent rolling dates
+        # Strategy 4: Direct public CDN fallback trying recent rolling days (supports weekends)
         today_date = today_ist()
-        for delta_days in range(5):
+        for delta_days in range(6):
             d = today_date - pd.Timedelta(days=delta_days)
             date_str = d.strftime("%Y-%m-%d")
             url = f"https://lapi.kotaksecurities.com/wso2-scripmaster/v1/prod/{date_str}/transformed/nse_fo.csv"
             try:
-                res = requests.get(url, timeout=20)
+                res = requests.get(url, timeout=15)
                 if res.status_code == 200:
                     parsed = _extract_nfo_csv_payload(res)
                     if parsed:
@@ -467,10 +467,10 @@ class KotakConnector:
             if not isinstance(r, dict):
                 continue
             
-            sym = str(r.get("pTrdSymbol", r.get("tradingSymbol", r.get("ts", r.get("symbol", ""))) )).upper().strip()
-            token = str(r.get("pSymbol", r.get("pSymbolToken", r.get("instrument_token", r.get("token", "")))))
-            inst_type = str(r.get("pInstType", "")).upper()
-            option_type = str(r.get("pOptionType", "")).upper()
+            sym = str(r.get("pTrdSymbol", r.get("tradingSymbol", r.get("trading_symbol", r.get("ts", r.get("symbol", "")))))).upper().strip()
+            token = str(r.get("pSymbol", r.get("pSymbolToken", r.get("instrument_token", r.get("token", r.get("symbol_token", ""))))))
+            inst_type = str(r.get("pInstType", r.get("instrument_type", ""))).upper()
+            option_type = str(r.get("pOptionType", r.get("option_type", ""))).upper()
 
             if not token or not sym:
                 continue
@@ -499,7 +499,7 @@ class KotakConnector:
         parsed_candidates = []
 
         for sym, token, record in candidates:
-            expiry_text = str(record.get("pExpiryDate", "")).replace(";", "").strip()
+            expiry_text = str(record.get("pExpiryDate", record.get("expiry", record.get("expiry_date", "")))).replace(";", "").strip()
             expiry = None
 
             if expiry_text:
@@ -575,8 +575,8 @@ class KotakConnector:
         for r in records:
             if not isinstance(r, dict):
                 continue
-            sym = str(r.get("pTrdSymbol", r.get("tradingSymbol", ""))).upper().strip()
-            token = str(r.get("pSymbol", r.get("pSymbolToken", "")))
+            sym = str(r.get("pTrdSymbol", r.get("tradingSymbol", r.get("trading_symbol", "")))).upper().strip()
+            token = str(r.get("pSymbol", r.get("pSymbolToken", r.get("instrument_token", ""))))
             if not sym or not token:
                 continue
             
@@ -585,7 +585,7 @@ class KotakConnector:
             if any(x in sym for x in ["BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX"]):
                 continue
 
-            opt_type = str(r.get("pOptionType", "")).upper()
+            opt_type = str(r.get("pOptionType", r.get("option_type", ""))).upper()
             if opt_type not in ("CE", "PE"):
                 if sym.endswith("CE"):
                     opt_type = "CE"
@@ -596,7 +596,7 @@ class KotakConnector:
                 continue
 
             strike_val = None
-            for sk in ("dStrikePrice;", "dStrikePrice", "strike_price", "strikePrice"):
+            for sk in ("dStrikePrice;", "dStrikePrice", "strike_price", "strikePrice", "strike"):
                 if sk in r:
                     try:
                         v = float(str(r.get(sk)).replace(";", "").replace(",", ""))
