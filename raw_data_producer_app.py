@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Dict, List, Any, Optional, Tuple
 from zoneinfo import ZoneInfo
 
+import numpy as np
 import pandas as pd
 import yfinance as yf
 import requests
