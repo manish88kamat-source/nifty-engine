@@ -1,8 +1,8 @@
-#!/usr/bin/env python3
+#!/usr/init/env python3
 """
 Leak-Proof Raw Data Producer | Institutional Research Bus
 - Zero local calculations, zero indicators, zero ML.
-- Robust Nifty Future & Option token discovery using diagnostic field matching.
+- Robust nearest-expiry Nifty Future token discovery & option mapping.
 - Publishes raw normalized payloads directly to Supabase `raw_observations` via REST.
 - Throttling-safe background loop (no st.rerun abuse).
 """
@@ -51,6 +51,8 @@ CONFIG = {
     "pcr_strike_step": 50.0,
     "supabase_url": os.getenv("SUPABASE_URL", "").strip(),
     "supabase_key": os.getenv("SUPABASE_KEY", "").strip(),
+    "poll_interval_sec": 3.0,
+    "macro_every_n_cycles": 10,
 }
 
 
@@ -127,7 +129,7 @@ class KotakConnector:
         self.connected = False
         self.future_token = None
         self.future_symbol = None
-        self.future_expiry = None
+        self.future_expiry: Optional[date] = None
         self.spot_token = "26000"
         self.pcr_tokens = []
         self.option_contracts = {}
@@ -198,34 +200,14 @@ class KotakConnector:
         self.logs.clear()
         self.future_token = None
         self.future_symbol = None
+        self.future_expiry = None
         self.pcr_tokens = []
         self.option_contracts = {}
 
         records = self.load_nfo_scrip_master()
 
         # --------------------------------------------------------
-        # DIAGNOSTIC LOGGING (as requested to inspect raw layout)
-        # --------------------------------------------------------
-        sample_count = 0
-        for i, r in enumerate(records):
-            if not isinstance(r, dict):
-                continue
-            sym = str(r.get("pTrdSymbol", r.get("tradingSymbol", r.get("ts", "")))).upper()
-            if "NIFTY" in sym and "BANK" not in sym and "FIN" not in sym:
-                self.log(
-                    f"NIFTY SAMPLE {i}: "
-                    f"pSymbol={r.get('pSymbol')} | "
-                    f"pInstType={r.get('pInstType')} | "
-                    f"pTrdSymbol={r.get('pTrdSymbol')} | "
-                    f"pOptionType={r.get('pOptionType')} | "
-                    f"pExpiryDate={r.get('pExpiryDate')}"
-                )
-                sample_count += 1
-                if sample_count > 10:
-                    break
-
-        # --------------------------------------------------------
-        # ROBUST FUTURE DETECTION (Zero strictness penalty)
+        # COLLECT ALL NIFTY FUTURE CANDIDATES
         # --------------------------------------------------------
         candidates = []
         for r in records:
@@ -243,32 +225,71 @@ class KotakConnector:
                 continue
             if option_type in ("CE", "PE") or sym.endswith("CE") or sym.endswith("PE"):
                 continue
-            if "NIFTY" not in sym:
+            
+            # Must strictly be NIFTY and NOT variants like NIFTYNXT, BANKNIFTY, FINNIFTY, MIDCPNIFTY
+            if not sym.startswith("NIFTY") or sym.startswith("NIFTYNXT"):
                 continue
-            if any(x in sym for x in ["BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "NIFTYNXT", "SENSEX"]):
+            if any(x in sym for x in ["BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX"]):
                 continue
 
-            # Accept if labeled as FUT or symbol contains FUT
             is_fut = ("FUT" in inst_type or "FUT" in sym or sym.endswith("FUT"))
             if is_fut:
                 candidates.append((sym, token, r))
 
         if not candidates:
-            # Absolute fallback: take any NIFTY token that is not CE/PE
-            for r in records:
-                if not isinstance(r, dict):
-                    continue
-                sym = str(r.get("pTrdSymbol", r.get("symbol", ""))).upper().strip()
-                token = str(r.get("pSymbol", r.get("pSymbolToken", "")))
-                if token and "NIFTY" in sym and not sym.endswith("CE") and not sym.endswith("PE"):
-                    candidates.append((sym, token, r))
-
-        if not candidates:
             raise RuntimeError("Active NIFTY future contract could not be discovered from scrip master.")
 
-        # Pick first valid candidate
-        self.future_symbol, self.future_token, _ = candidates[0]
-        self.log(f"Bound Active Nifty Future: {self.future_symbol} (Token: {self.future_token})")
+        # --------------------------------------------------------
+        # SELECT NEAREST NON-EXPIRED NIFTY FUTURE
+        # --------------------------------------------------------
+        today = today_ist()
+        parsed_candidates = []
+
+        for sym, token, record in candidates:
+            expiry_text = str(record.get("pExpiryDate", "")).replace(";", "").strip()
+            expiry = None
+
+            if expiry_text:
+                for fmt in ("%d%b%Y", "%d-%b-%Y", "%d/%b/%Y", "%Y-%m-%d"):
+                    try:
+                        expiry = datetime.strptime(expiry_text, fmt).date()
+                        break
+                    except Exception:
+                        pass
+
+            # Ignore expired contracts
+            if expiry is not None and expiry < today:
+                continue
+
+            parsed_candidates.append(
+                (
+                    expiry if expiry else date.max,
+                    sym,
+                    token,
+                    record,
+                )
+            )
+
+        if not parsed_candidates:
+            raise RuntimeError(
+                "NIFTY futures were found, but all discovered "
+                "contracts appear to be expired or have invalid expiry."
+            )
+
+        # Nearest valid expiry first
+        parsed_candidates.sort(key=lambda x: x[0])
+
+        selected_expiry, selected_symbol, selected_token, _ = parsed_candidates[0]
+
+        self.future_symbol = selected_symbol
+        self.future_token = selected_token
+        self.future_expiry = None if selected_expiry == date.max else selected_expiry
+
+        self.log(
+            f"Bound Active Nifty Future: {self.future_symbol} "
+            f"(Token: {self.future_token}, Expiry: "
+            f"{self.future_expiry.isoformat() if self.future_expiry else 'UNKNOWN'})"
+        )
 
         # --------------------------------------------------------
         # OPTIONS DISCOVERY (Around ATM)
@@ -299,9 +320,10 @@ class KotakConnector:
             token = str(r.get("pSymbol", r.get("pSymbolToken", "")))
             if not sym or not token:
                 continue
-            if "NIFTY" not in sym:
+            
+            if not sym.startswith("NIFTY") or sym.startswith("NIFTYNXT"):
                 continue
-            if any(x in sym for x in ["BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "NIFTYNXT", "SENSEX"]):
+            if any(x in sym for x in ["BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX"]):
                 continue
 
             opt_type = str(r.get("pOptionType", "")).upper()
@@ -314,7 +336,6 @@ class KotakConnector:
             if opt_type not in ("CE", "PE"):
                 continue
 
-            # Extract strike
             strike_val = None
             for sk in ("dStrikePrice;", "dStrikePrice", "strike_price", "strikePrice"):
                 if sk in r:
@@ -328,7 +349,6 @@ class KotakConnector:
                         pass
             
             if strike_val is None:
-                # Symbol regex fallback for strike
                 match = re.search(r"(\d+(?:\.\d+)?)$", sym[:-2])
                 if match:
                     try:
@@ -519,30 +539,34 @@ def main():
                     if success:
                         published_count += 1
 
+                # Safe Yahoo Macro fetch isolation
                 if poll_cycle % CONFIG["macro_every_n_cycles"] == 0:
-                    macro_data = YahooConnector.fetch_macro_data()
-                    for ticker, df in macro_data.items():
-                        if df.empty:
-                            continue
-                        latest_row = df.iloc[-1].to_dict()
-                        clean_row = {}
-                        for key, value in latest_row.items():
-                            if pd.isna(value):
-                                clean_row[str(key)] = None
-                            elif hasattr(value, "item"):
-                                try:
-                                    clean_row[str(key)] = value.item()
-                                except Exception:
-                                    clean_row[str(key)] = str(value)
-                            else:
-                                clean_row[str(key)] = value
+                    try:
+                        macro_data = YahooConnector.fetch_macro_data()
+                        for ticker, df in macro_data.items():
+                            if df.empty:
+                                continue
+                            latest_row = df.iloc[-1].to_dict()
+                            clean_row = {}
+                            for key, value in latest_row.items():
+                                if pd.isna(value):
+                                    clean_row[str(key)] = None
+                                elif hasattr(value, "item"):
+                                    try:
+                                        clean_row[str(key)] = value.item()
+                                    except Exception:
+                                        clean_row[str(key)] = str(value)
+                                else:
+                                    clean_row[str(key)] = value
 
-                        supabase.publish_observation(
-                            source="yahoo_macro",
-                            symbol=ticker,
-                            token=ticker,
-                            raw_payload=clean_row
-                        )
+                            supabase.publish_observation(
+                                source="yahoo_macro",
+                                symbol=ticker,
+                                token=ticker,
+                                raw_payload=clean_row
+                            )
+                    except Exception:
+                        pass # Ignore transient Yahoo formatting or network hiccups gracefully
 
                 status_container.info(f"Last Poll: {now_ist().strftime('%H:%M:%S')} | Published {published_count} raw quotes | Options mapped: {len(kotak.pcr_tokens)}")
                 poll_cycle += 1
