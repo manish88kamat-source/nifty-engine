@@ -85,11 +85,46 @@ REQUIRED_DATA_MATRIX = {
     },
 }
 
+NSE_NIFTY500_CSV_URL = "https://nsearchives.nseindia.com/content/indices/ind_nifty500list.csv"
+
+
+def fetch_nifty500_symbols_from_nse() -> List[str]:
+    """Fetch the current NIFTY-500 constituent symbols from NSE's official CSV.
+
+    This is universe metadata only; no market calculation or signal logic is performed.
+    """
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/126 Safari/537.36",
+        "Accept": "text/csv,text/plain,*/*",
+        "Referer": "https://www.nseindia.com/",
+    }
+    response = requests.get(NSE_NIFTY500_CSV_URL, headers=headers, timeout=20)
+    response.raise_for_status()
+    text = response.text.lstrip("\ufeff")
+    rows = list(csv.DictReader(io.StringIO(text)))
+    if not rows:
+        raise RuntimeError("NSE NIFTY-500 CSV returned no rows.")
+
+    symbol_key = next((k for k in rows[0].keys() if str(k).strip().lower() in {"symbol", "symbols"}), None)
+    if not symbol_key:
+        raise RuntimeError(f"NSE NIFTY-500 CSV has no Symbol column. Columns: {list(rows[0].keys())}")
+
+    symbols = []
+    for row in rows:
+        sym = str(row.get(symbol_key, "")).strip().upper()
+        if sym and sym not in symbols:
+            symbols.append(sym)
+    if len(symbols) < 400:
+        raise RuntimeError(f"NSE NIFTY-500 universe looks incomplete: {len(symbols)} symbols returned.")
+    return symbols
+
+
 YFINANCE_LIMITS = {
-    "intraday_max_days_documented": 60,
+    "intraday_adaptive": True,
     "1h_requested_days_by_v7": 180,
     "1d_requested_days_by_v7": 320,
     "15m_requested_days_by_v7": 55,
+    "policy": "request desired window, then use actual source-available window only",
 }
 
 CONFIG = {
@@ -722,109 +757,210 @@ class KotakConnector:
 class YahooConnector:
     """Historical/raw Yahoo producer. No indicators, scores, resampling, or engine calculations."""
 
+    # yfinance/Yahoo intraday coverage is source-limited and can vary by ticker.
+    # We therefore never force an oversized intraday window.  The connector
+    # tries the requested window first, then progressively smaller source-safe
+    # windows and keeps ONLY the rows Yahoo actually returns.
+    INTRADAY_FALLBACK_DAYS = {
+        "1h": (180, 120, 90, 60, 30, 14, 7, 3, 1),
+        "60m": (180, 120, 90, 60, 30, 14, 7, 3, 1),
+        "15m": (55, 50, 45, 30, 14, 7, 3, 1),
+        "30m": (60, 45, 30, 14, 7, 3, 1),
+        "5m": (30, 14, 7, 3, 1),
+        "2m": (30, 14, 7, 3, 1),
+        "1m": (7, 3, 1),
+    }
+    last_diagnostics: Dict[str, Any] = {}
+
     @staticmethod
+    def _clean_downloaded_frame(df: pd.DataFrame) -> pd.DataFrame:
+        """Normalize a real Yahoo response without creating observations."""
+        if df is None or df.empty:
+            return pd.DataFrame()
+
+        if isinstance(df.columns, pd.MultiIndex):
+            if len(set(df.columns.get_level_values(-1))) == 1:
+                df.columns = [c[0] for c in df.columns]
+            else:
+                df.columns = [
+                    c[-1] if isinstance(c, tuple) else c
+                    for c in df.columns
+                ]
+
+        df = df.reset_index()
+        time_col = (
+            "Datetime" if "Datetime" in df.columns
+            else "Date" if "Date" in df.columns
+            else df.columns[0]
+        )
+
+        rename = {time_col: "event_timestamp"}
+        for c in ("Open", "High", "Low", "Close", "Volume"):
+            if c in df.columns:
+                rename[c] = c.lower()
+        df = df.rename(columns=rename)
+
+        keep = [
+            c for c in
+            ["event_timestamp", "open", "high", "low", "close", "volume"]
+            if c in df.columns
+        ]
+        df = df[keep].copy()
+        if "event_timestamp" not in df.columns or "close" not in df.columns:
+            return pd.DataFrame()
+
+        ts = pd.to_datetime(df["event_timestamp"], errors="coerce", utc=True)
+        df["event_timestamp"] = ts.dt.tz_convert(IST)
+        for c in ("open", "high", "low", "close", "volume"):
+            if c in df.columns:
+                df[c] = pd.to_numeric(df[c], errors="coerce")
+
+        return (
+            df.dropna(subset=["event_timestamp", "close"])
+            .drop_duplicates("event_timestamp")
+            .sort_values("event_timestamp")
+            .reset_index(drop=True)
+        )
+
+    @classmethod
+    def _request_days(cls, ticker: str, days: int, interval: str) -> pd.DataFrame:
+        """Request one real source window."""
+        end = now_ist()
+        start = end - pd.Timedelta(days=int(days))
+        kwargs = {
+            "interval": interval,
+            "progress": False,
+            "auto_adjust": False,
+            "threads": False,
+            "start": start.to_pydatetime(),
+            "end": end.to_pydatetime(),
+        }
+        return cls._clean_downloaded_frame(yf.download(ticker, **kwargs))
+
+    @classmethod
     def _download(
+        cls,
         ticker: str,
         period: Optional[str] = None,
         days: Optional[int] = None,
         interval: str = "1d",
     ) -> pd.DataFrame:
         """
-        Fetch raw Yahoo/yfinance observations only.
+        Fetch ONLY real Yahoo/yfinance observations.
 
-        IMPORTANT:
-        - The caller's requested window is preserved.
-        - No synthetic extension is made when Yahoo returns less history.
-        - Intraday requests are not relabelled as longer coverage.
+        For intraday data, Yahoo may reject a requested window that is longer
+        than the source currently permits for that interval/ticker.  Instead of
+        treating that as NO_DATA, we retry with smaller windows until Yahoo
+        returns real rows.  The returned frame is never padded, resampled,
+        duplicated, or relabelled as the original requested coverage.
         """
+        requested_days = int(days) if days is not None else None
+        attempts = []
+
         try:
-            kwargs = {
-                "interval": interval,
-                "progress": False,
-                "auto_adjust": False,
-                "threads": False,
-            }
-
             if period:
-                kwargs["period"] = period
-            elif days is not None:
-                end = now_ist()
-                start = end - pd.Timedelta(days=int(days))
-                kwargs["start"] = start.to_pydatetime()
-                kwargs["end"] = end.to_pydatetime()
+                attempts = [("period", period)]
+                df = cls._clean_downloaded_frame(yf.download(
+                    ticker,
+                    period=period,
+                    interval=interval,
+                    progress=False,
+                    auto_adjust=False,
+                    threads=False,
+                ))
+                cls.last_diagnostics = {
+                    "ticker": ticker, "interval": interval,
+                    "requested_days": requested_days, "requested_period": period,
+                    "attempted_windows_days": [],
+                    "actual_returned_days": cls._actual_days(df),
+                    "returned_rows": int(len(df)),
+                    "status": "AVAILABLE" if not df.empty else "NO_DATA",
+                    "coverage_policy": "actual returned rows only",
+                }
+                return df
 
-            df = yf.download(ticker, **kwargs)
+            if days is None:
+                days = 1
 
-            if df is None or df.empty:
-                return pd.DataFrame()
+            if interval in cls.INTRADAY_FALLBACK_DAYS:
+                candidates = [int(days)] + [
+                    int(x) for x in cls.INTRADAY_FALLBACK_DAYS[interval]
+                    if int(x) < int(days)
+                ]
+                # De-duplicate while preserving order.
+                windows = list(dict.fromkeys(candidates))
+            else:
+                # Daily/other non-intraday requests can safely use the exact
+                # requested window; if the source has less, Yahoo returns less.
+                windows = [int(days)]
 
-            if isinstance(df.columns, pd.MultiIndex):
-                # For a single ticker, retain the field level only.
-                if len(set(df.columns.get_level_values(-1))) == 1:
-                    df.columns = [c[0] for c in df.columns]
-                else:
-                    df.columns = [
-                        c[-1] if isinstance(c, tuple) else c
-                        for c in df.columns
-                    ]
+            df = pd.DataFrame()
+            used_days = None
+            last_error = None
 
-            df = df.reset_index()
+            for window_days in windows:
+                attempts.append(window_days)
+                try:
+                    candidate = cls._request_days(ticker, window_days, interval)
+                    if not candidate.empty:
+                        df = candidate
+                        used_days = window_days
+                        break
+                except Exception as exc:
+                    last_error = str(exc)
+                    continue
 
-            time_col = (
-                "Datetime"
-                if "Datetime" in df.columns
-                else "Date"
-                if "Date" in df.columns
-                else df.columns[0]
-            )
+            actual_days = cls._actual_days(df)
+            status = "AVAILABLE" if not df.empty else "NO_DATA"
+            if used_days is not None and requested_days is not None and used_days < requested_days:
+                status = "AVAILABLE_SHORTER_SOURCE_WINDOW"
 
-            rename = {time_col: "event_timestamp"}
-            for c in ("Open", "High", "Low", "Close", "Volume"):
-                if c in df.columns:
-                    rename[c] = c.lower()
-
-            df = df.rename(columns=rename)
-
-            keep = [
-                c for c in
-                ["event_timestamp", "open", "high", "low", "close", "volume"]
-                if c in df.columns
-            ]
-            df = df[keep].copy()
-
-            if "event_timestamp" not in df.columns or "close" not in df.columns:
-                return pd.DataFrame()
-
-            ts = pd.to_datetime(
-                df["event_timestamp"],
-                errors="coerce",
-                utc=True,
-            )
-            df["event_timestamp"] = ts.dt.tz_convert(IST)
-
-            for c in ("open", "high", "low", "close", "volume"):
-                if c in df.columns:
-                    df[c] = pd.to_numeric(df[c], errors="coerce")
-
-            df = (
-                df.dropna(subset=["event_timestamp", "close"])
-                .drop_duplicates("event_timestamp")
-                .sort_values("event_timestamp")
-                .reset_index(drop=True)
-            )
-
+            cls.last_diagnostics = {
+                "ticker": ticker,
+                "interval": interval,
+                "requested_days": requested_days,
+                "attempted_windows_days": attempts,
+                "source_window_used_days": used_days,
+                "actual_returned_days": actual_days,
+                "returned_rows": int(len(df)),
+                "status": status,
+                "coverage_policy": "actual returned rows only",
+            }
+            if last_error:
+                cls.last_diagnostics["last_error"] = last_error
             return df
 
         except Exception as exc:
+            cls.last_diagnostics = {
+                "ticker": ticker, "interval": interval,
+                "requested_days": requested_days,
+                "attempted_windows_days": attempts,
+                "source_window_used_days": None,
+                "actual_returned_days": 0,
+                "returned_rows": 0,
+                "status": "NO_DATA",
+                "coverage_policy": "actual returned rows only",
+                "error": str(exc),
+            }
             print(
                 f"Yahoo history error for {ticker} "
                 f"[{interval}, requested_days={days}]: {exc}"
             )
             return pd.DataFrame()
 
+    @staticmethod
+    def _actual_days(df: pd.DataFrame) -> float:
+        if df is None or df.empty or "event_timestamp" not in df.columns:
+            return 0.0
+        try:
+            delta = df["event_timestamp"].iloc[-1] - df["event_timestamp"].iloc[0]
+            return round(max(0.0, delta.total_seconds() / 86400.0), 2)
+        except Exception:
+            return 0.0
+
     @classmethod
     def health_probe(cls) -> Dict[str, Any]:
-        """Small real-source probes; never fabricate or persist probe data."""
+        """Probe real source coverage and report actual returned history."""
         probes = [
             ("NIFTY daily", "^NSEI", 320, "1d"),
             ("Representative 1h", "RELIANCE.NS", 180, "1h"),
@@ -834,14 +970,18 @@ class YahooConnector:
         out: Dict[str, Any] = {}
         for label, ticker, days, interval in probes:
             df = cls._download(ticker, days=days, interval=interval)
+            diag = dict(cls.last_diagnostics)
             out[label] = {
                 "ticker": ticker,
                 "requested_days": days,
                 "interval": interval,
                 "returned_rows": int(len(df)),
+                "actual_returned_days": cls._actual_days(df),
+                "source_window_used_days": diag.get("source_window_used_days"),
+                "attempted_windows_days": diag.get("attempted_windows_days", []),
                 "first_timestamp": str(df.iloc[0]["event_timestamp"]) if not df.empty else None,
                 "last_timestamp": str(df.iloc[-1]["event_timestamp"]) if not df.empty else None,
-                "status": "AVAILABLE" if not df.empty else "NO_DATA",
+                "status": diag.get("status", "AVAILABLE" if not df.empty else "NO_DATA"),
                 "coverage_policy": "actual returned rows only",
             }
         return out
@@ -955,8 +1095,10 @@ class HistoricalRawProducer:
         """
         Source/request audit only.
 
-        180d x 1h remains the V7 requested contract. We explicitly do NOT
-        downgrade it to 60d and do NOT fabricate the unavailable portion.
+        V7 requested windows remain visible, but the producer now uses an
+        adaptive source-window policy for intraday intervals. If Yahoo cannot
+        serve the requested window, smaller windows are tried and only actual
+        returned rows are published. No missing portion is fabricated.
         """
         return {
             "contracts": {
@@ -996,9 +1138,11 @@ class HistoricalRawProducer:
                 },
             },
             "intraday_source_rule": (
-                "The producer requests the engine-required window exactly. "
-                "If yfinance returns less, only the returned raw observations "
-                "are published and the coverage gap is exposed."
+                "The producer requests the engine-required window first. "
+                "If Yahoo rejects or cannot supply that window, the producer "
+                "tries smaller source-safe windows and publishes only actual "
+                "returned raw observations; no resampling, duplication, or "
+                "relabeling is allowed."
             ),
         }
 
@@ -1331,34 +1475,77 @@ def main():
             st.session_state["yf_health"] = yf_health
         if st.session_state.get("yf_health"):
             st.json(st.session_state["yf_health"])
-        hist_symbols_text = st.text_area("NIFTY-500 symbols (one per line)", height=120, key="hist_symbols")
-        mtf_symbols_text = st.text_area("MTF basket symbols (one per line)", height=100, key="mtf_symbols")
-        if st.button("Publish NIFTY History", disabled=not (supabase.url and supabase.key)):
-            with st.spinner("Publishing NIFTY historical raw data..."):
-                count = historical.publish_nifty_history()
-            st.success(f"NIFTY historical rows published: {count}")
+        st.caption("Universe metadata is loaded from NSE; historical prices remain yfinance → Supabase only.")
 
-        if st.button("Publish Next-Day 500 History", disabled=not (supabase.url and supabase.key)):
+        if "hist_symbols" not in st.session_state:
+            st.session_state.hist_symbols = ""
+        if "mtf_symbols" not in st.session_state:
+            st.session_state.mtf_symbols = ""
+
+        if st.button("Load NIFTY-500 from NSE"):
             try:
-                symbols = [x.strip().upper() for x in hist_symbols_text.replace(",", "\n").splitlines() if x.strip()]
-                if not symbols:
-                    st.warning("Provide the NIFTY-500 symbol list first.")
-                else:
+                with st.spinner("Loading current NIFTY-500 constituent list from NSE..."):
+                    nse_symbols = fetch_nifty500_symbols_from_nse()
+                st.session_state.hist_symbols = "\n".join(nse_symbols)
+                st.success(f"Loaded {len(nse_symbols)} NIFTY-500 symbols from NSE.")
+                st.rerun()
+            except Exception as exc:
+                st.error(f"NIFTY-500 universe load failed: {exc}")
+
+        hist_symbols_text = st.text_area(
+            "NIFTY-500 symbols (one per line)",
+            height=120,
+            key="hist_symbols",
+        )
+        mtf_symbols_text = st.text_area(
+            "MTF basket symbols (one per line)",
+            height=100,
+            key="mtf_symbols",
+        )
+
+        if st.button("Publish NIFTY History", type="primary"):
+            if not supabase.url or not supabase.key:
+                st.error("Supabase URL/Key missing. Enter them in the sidebar first.")
+            else:
+                try:
+                    with st.spinner("Publishing NIFTY historical raw data..."):
+                        count = historical.publish_nifty_history()
+                    st.success(f"NIFTY historical rows published: {count}")
+                except Exception as exc:
+                    st.error(f"NIFTY history publish failed: {exc}")
+
+        if st.button("Publish Next-Day 500 History"):
+            if not supabase.url or not supabase.key:
+                st.error("Supabase URL/Key missing. Enter them in the sidebar first.")
+            else:
+                try:
+                    symbols = [x.strip().upper() for x in hist_symbols_text.replace(",", "\n").splitlines() if x.strip()]
+                    if not symbols:
+                        with st.spinner("No list supplied — loading current NIFTY-500 list from NSE..."):
+                            symbols = fetch_nifty500_symbols_from_nse()
+                        st.session_state.hist_symbols = "\n".join(symbols)
+                        st.info(f"Using {len(symbols)} symbols loaded from NSE.")
                     with st.spinner(f"Publishing {len(symbols)} symbols × 320 daily bars..."):
                         stats = historical.publish_next_day_universe_history(symbols)
                     st.success(f"Completed: {len(stats)} symbols processed.")
-            except Exception as exc:
-                st.error(str(exc))
+                except Exception as exc:
+                    st.error(f"Next-Day 500 history publish failed: {exc}")
 
-        if st.button("Publish V7 MTF + VIX", disabled=not (supabase.url and supabase.key)):
-            symbols = [x.strip().upper() for x in mtf_symbols_text.replace(",", "\n").splitlines() if x.strip()]
-            if not symbols:
-                st.warning("Provide the shortlisted MTF symbols first.")
+        if st.button("Publish V7 MTF + VIX"):
+            if not supabase.url or not supabase.key:
+                st.error("Supabase URL/Key missing. Enter them in the sidebar first.")
             else:
-                with st.spinner(f"Publishing MTF history for {len(symbols)} symbols..."):
-                    stats = historical.publish_mtf_history(symbols)
-                    vix_count = historical.publish_vix()
-                st.success(f"MTF completed for {len(stats)} symbols; VIX rows: {vix_count}")
+                symbols = [x.strip().upper() for x in mtf_symbols_text.replace(",", "\n").splitlines() if x.strip()]
+                if not symbols:
+                    st.warning("Provide the shortlisted MTF symbols first. The producer will not invent a basket.")
+                else:
+                    try:
+                        with st.spinner(f"Publishing MTF history for {len(symbols)} symbols..."):
+                            stats = historical.publish_mtf_history(symbols)
+                            vix_count = historical.publish_vix()
+                        st.success(f"MTF completed for {len(stats)} symbols; VIX rows: {vix_count}")
+                    except Exception as exc:
+                        st.error(f"MTF + VIX publish failed: {exc}")
 
     col1, col2, col3, col4 = st.columns(4)
     col1.metric("Kotak", "CONNECTED" if kotak.connected else "DISCONNECTED")
