@@ -8,4 +8,5 @@ scikit-learn>=1.3.0
 lightgbm>=4.0.0
 requests>=2.31.0
 kotakneoapi==3.0.1
-yfinance==1.6.0
+
+yfinance==1.7.0
