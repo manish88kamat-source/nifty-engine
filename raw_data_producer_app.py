@@ -120,11 +120,10 @@ def fetch_nifty500_symbols_from_nse() -> List[str]:
 
 
 YFINANCE_LIMITS = {
-    "intraday_adaptive": True,
+    "intraday_max_days_documented": 60,
     "1h_requested_days_by_v7": 180,
     "1d_requested_days_by_v7": 320,
     "15m_requested_days_by_v7": 55,
-    "policy": "request desired window, then use actual source-available window only",
 }
 
 CONFIG = {
@@ -757,231 +756,254 @@ class KotakConnector:
 class YahooConnector:
     """Historical/raw Yahoo producer. No indicators, scores, resampling, or engine calculations."""
 
-    # yfinance/Yahoo intraday coverage is source-limited and can vary by ticker.
-    # We therefore never force an oversized intraday window.  The connector
-    # tries the requested window first, then progressively smaller source-safe
-    # windows and keeps ONLY the rows Yahoo actually returns.
-    INTRADAY_FALLBACK_DAYS = {
-        "1h": (180, 120, 90, 60, 30, 14, 7, 3, 1),
-        "60m": (180, 120, 90, 60, 30, 14, 7, 3, 1),
-        "15m": (55, 50, 45, 30, 14, 7, 3, 1),
-        "30m": (60, 45, 30, 14, 7, 3, 1),
-        "5m": (30, 14, 7, 3, 1),
-        "2m": (30, 14, 7, 3, 1),
-        "1m": (7, 3, 1),
-    }
-    last_diagnostics: Dict[str, Any] = {}
-
     @staticmethod
-    def _clean_downloaded_frame(df: pd.DataFrame) -> pd.DataFrame:
-        """Normalize a real Yahoo response without creating observations."""
-        if df is None or df.empty:
-            return pd.DataFrame()
-
-        if isinstance(df.columns, pd.MultiIndex):
-            if len(set(df.columns.get_level_values(-1))) == 1:
-                df.columns = [c[0] for c in df.columns]
-            else:
-                df.columns = [
-                    c[-1] if isinstance(c, tuple) else c
-                    for c in df.columns
-                ]
-
-        df = df.reset_index()
-        time_col = (
-            "Datetime" if "Datetime" in df.columns
-            else "Date" if "Date" in df.columns
-            else df.columns[0]
-        )
-
-        rename = {time_col: "event_timestamp"}
-        for c in ("Open", "High", "Low", "Close", "Volume"):
-            if c in df.columns:
-                rename[c] = c.lower()
-        df = df.rename(columns=rename)
-
-        keep = [
-            c for c in
-            ["event_timestamp", "open", "high", "low", "close", "volume"]
-            if c in df.columns
-        ]
-        df = df[keep].copy()
-        if "event_timestamp" not in df.columns or "close" not in df.columns:
-            return pd.DataFrame()
-
-        ts = pd.to_datetime(df["event_timestamp"], errors="coerce", utc=True)
-        df["event_timestamp"] = ts.dt.tz_convert(IST)
-        for c in ("open", "high", "low", "close", "volume"):
-            if c in df.columns:
-                df[c] = pd.to_numeric(df[c], errors="coerce")
-
-        return (
-            df.dropna(subset=["event_timestamp", "close"])
-            .drop_duplicates("event_timestamp")
-            .sort_values("event_timestamp")
-            .reset_index(drop=True)
-        )
-
-    @classmethod
-    def _request_days(cls, ticker: str, days: int, interval: str) -> pd.DataFrame:
-        """Request one real source window."""
-        end = now_ist()
-        start = end - pd.Timedelta(days=int(days))
-        kwargs = {
-            "interval": interval,
-            "progress": False,
-            "auto_adjust": False,
-            "threads": False,
-            "start": start.to_pydatetime(),
-            "end": end.to_pydatetime(),
-        }
-        return cls._clean_downloaded_frame(yf.download(ticker, **kwargs))
-
-    @classmethod
     def _download(
-        cls,
         ticker: str,
         period: Optional[str] = None,
         days: Optional[int] = None,
         interval: str = "1d",
     ) -> pd.DataFrame:
         """
-        Fetch ONLY real Yahoo/yfinance observations.
+        Fetch raw Yahoo/yfinance observations only.
 
-        For intraday data, Yahoo may reject a requested window that is longer
-        than the source currently permits for that interval/ticker.  Instead of
-        treating that as NO_DATA, we retry with smaller windows until Yahoo
-        returns real rows.  The returned frame is never padded, resampled,
-        duplicated, or relabelled as the original requested coverage.
+        IMPORTANT:
+        - The caller's requested window is preserved.
+        - No synthetic extension is made when Yahoo returns less history.
+        - Intraday requests are not relabelled as longer coverage.
         """
-        requested_days = int(days) if days is not None else None
-        attempts = []
-
         try:
-            if period:
-                attempts = [("period", period)]
-                df = cls._clean_downloaded_frame(yf.download(
-                    ticker,
-                    period=period,
-                    interval=interval,
-                    progress=False,
-                    auto_adjust=False,
-                    threads=False,
-                ))
-                cls.last_diagnostics = {
-                    "ticker": ticker, "interval": interval,
-                    "requested_days": requested_days, "requested_period": period,
-                    "attempted_windows_days": [],
-                    "actual_returned_days": cls._actual_days(df),
-                    "returned_rows": int(len(df)),
-                    "status": "AVAILABLE" if not df.empty else "NO_DATA",
-                    "coverage_policy": "actual returned rows only",
-                }
-                return df
-
-            if days is None:
-                days = 1
-
-            if interval in cls.INTRADAY_FALLBACK_DAYS:
-                candidates = [int(days)] + [
-                    int(x) for x in cls.INTRADAY_FALLBACK_DAYS[interval]
-                    if int(x) < int(days)
-                ]
-                # De-duplicate while preserving order.
-                windows = list(dict.fromkeys(candidates))
-            else:
-                # Daily/other non-intraday requests can safely use the exact
-                # requested window; if the source has less, Yahoo returns less.
-                windows = [int(days)]
-
-            df = pd.DataFrame()
-            used_days = None
-            last_error = None
-
-            for window_days in windows:
-                attempts.append(window_days)
-                try:
-                    candidate = cls._request_days(ticker, window_days, interval)
-                    if not candidate.empty:
-                        df = candidate
-                        used_days = window_days
-                        break
-                except Exception as exc:
-                    last_error = str(exc)
-                    continue
-
-            actual_days = cls._actual_days(df)
-            status = "AVAILABLE" if not df.empty else "NO_DATA"
-            if used_days is not None and requested_days is not None and used_days < requested_days:
-                status = "AVAILABLE_SHORTER_SOURCE_WINDOW"
-
-            cls.last_diagnostics = {
-                "ticker": ticker,
+            kwargs = {
                 "interval": interval,
-                "requested_days": requested_days,
-                "attempted_windows_days": attempts,
-                "source_window_used_days": used_days,
-                "actual_returned_days": actual_days,
-                "returned_rows": int(len(df)),
-                "status": status,
-                "coverage_policy": "actual returned rows only",
+                "progress": False,
+                "auto_adjust": False,
+                "threads": False,
             }
-            if last_error:
-                cls.last_diagnostics["last_error"] = last_error
+
+            if period:
+                kwargs["period"] = period
+            elif days is not None:
+                # Normalize to pandas Timestamp before calling to_pydatetime().
+                # now_ist() returns a stdlib datetime, which has no
+                # to_pydatetime() method; that exception was being swallowed
+                # by this function and surfaced only as NO_DATA to the UI.
+                end = pd.Timestamp(now_ist())
+                start = end - pd.Timedelta(days=int(days))
+                kwargs["start"] = start.to_pydatetime()
+                kwargs["end"] = end.to_pydatetime()
+
+            df = yf.download(ticker, **kwargs)
+
+            if df is None or df.empty:
+                return pd.DataFrame()
+
+            if isinstance(df.columns, pd.MultiIndex):
+                # For a single ticker, retain the field level only.
+                if len(set(df.columns.get_level_values(-1))) == 1:
+                    df.columns = [c[0] for c in df.columns]
+                else:
+                    df.columns = [
+                        c[-1] if isinstance(c, tuple) else c
+                        for c in df.columns
+                    ]
+
+            df = df.reset_index()
+
+            time_col = (
+                "Datetime"
+                if "Datetime" in df.columns
+                else "Date"
+                if "Date" in df.columns
+                else df.columns[0]
+            )
+
+            rename = {time_col: "event_timestamp"}
+            for c in ("Open", "High", "Low", "Close", "Volume"):
+                if c in df.columns:
+                    rename[c] = c.lower()
+
+            df = df.rename(columns=rename)
+
+            keep = [
+                c for c in
+                ["event_timestamp", "open", "high", "low", "close", "volume"]
+                if c in df.columns
+            ]
+            df = df[keep].copy()
+
+            if "event_timestamp" not in df.columns or "close" not in df.columns:
+                return pd.DataFrame()
+
+            ts = pd.to_datetime(
+                df["event_timestamp"],
+                errors="coerce",
+                utc=True,
+            )
+            df["event_timestamp"] = ts.dt.tz_convert(IST)
+
+            for c in ("open", "high", "low", "close", "volume"):
+                if c in df.columns:
+                    df[c] = pd.to_numeric(df[c], errors="coerce")
+
+            df = (
+                df.dropna(subset=["event_timestamp", "close"])
+                .drop_duplicates("event_timestamp")
+                .sort_values("event_timestamp")
+                .reset_index(drop=True)
+            )
+
             return df
 
         except Exception as exc:
-            cls.last_diagnostics = {
-                "ticker": ticker, "interval": interval,
-                "requested_days": requested_days,
-                "attempted_windows_days": attempts,
-                "source_window_used_days": None,
-                "actual_returned_days": 0,
-                "returned_rows": 0,
-                "status": "NO_DATA",
-                "coverage_policy": "actual returned rows only",
-                "error": str(exc),
-            }
             print(
                 f"Yahoo history error for {ticker} "
                 f"[{interval}, requested_days={days}]: {exc}"
             )
             return pd.DataFrame()
 
-    @staticmethod
-    def _actual_days(df: pd.DataFrame) -> float:
-        if df is None or df.empty or "event_timestamp" not in df.columns:
-            return 0.0
-        try:
-            delta = df["event_timestamp"].iloc[-1] - df["event_timestamp"].iloc[0]
-            return round(max(0.0, delta.total_seconds() / 86400.0), 2)
-        except Exception:
-            return 0.0
+    @classmethod
+    def _download_nifty_daily(cls, requested_days: int) -> Tuple[pd.DataFrame, Dict[str, Any]]:
+        """
+        Dedicated NIFTY daily source probe/fetch.
+
+        This is intentionally isolated from the generic downloader because the
+        remaining issue is specifically the ^NSEI daily request.  We do not
+        change the generic path used by VIX, MTF, macro, or the NIFTY-500
+        universe.
+
+        Policy:
+        - First attempt the exact requested calendar window.
+        - If that produces no usable rows, retry the SAME ^NSEI daily source
+          through yfinance's period interface.
+        - Never merge attempts, synthesize rows, resample, duplicate, or rename
+          another instrument as NIFTY.
+        - Use the first successful attempt; do not make unnecessary extra source calls.
+        - Trim only rows that fall outside the requested calendar window when a
+          wider period fallback was used.
+        - If every attempt fails, return an empty frame plus diagnostics.
+        """
+        requested_days = int(requested_days)
+        end = now_ist()
+        start = end - pd.Timedelta(days=requested_days)
+
+        attempts = [
+            {"method": "start_end", "days": requested_days, "period": None},
+            {"method": "period", "days": None, "period": "1y"},
+            {"method": "period", "days": None, "period": "6mo"},
+            {"method": "period", "days": None, "period": "3mo"},
+        ]
+
+        selected_df = pd.DataFrame()
+        selected_method = None
+        selected_period = None
+        diagnostics: Dict[str, Any] = {
+            "ticker": "^NSEI",
+            "requested_days": requested_days,
+            "interval": "1d",
+            "requested_start": start.isoformat(),
+            "requested_end": end.isoformat(),
+            "attempted_windows": [],
+            "selected_method": None,
+            "selected_period": None,
+            "selected_rows": 0,
+            "status": "NO_DATA",
+            "coverage_policy": "actual returned rows only; no synthetic extension",
+        }
+
+        for idx, attempt in enumerate(attempts, start=1):
+            method = attempt["method"]
+            period = attempt["period"]
+            try:
+                if method == "start_end":
+                    df = cls._download(
+                        "^NSEI",
+                        days=requested_days,
+                        interval="1d",
+                    )
+                else:
+                    df = cls._download(
+                        "^NSEI",
+                        period=period,
+                        interval="1d",
+                    )
+
+                # A period fallback can be wider than the requested calendar
+                # window. Keep only observations inside the original request.
+                if df is not None and not df.empty:
+                    df = df[
+                        (df["event_timestamp"] >= pd.Timestamp(start))
+                        & (df["event_timestamp"] <= pd.Timestamp(end))
+                    ].copy()
+                    df = (
+                        df.drop_duplicates("event_timestamp")
+                        .sort_values("event_timestamp")
+                        .reset_index(drop=True)
+                    )
+
+                row_count = int(len(df)) if df is not None else 0
+                diagnostics["attempted_windows"].append({
+                    "attempt": idx,
+                    "method": method,
+                    "period": period,
+                    "requested_days": requested_days if method == "start_end" else None,
+                    "returned_rows": row_count,
+                    "status": "AVAILABLE" if row_count else "NO_DATA",
+                })
+
+                if row_count:
+                    selected_df = df
+                    selected_method = method
+                    selected_period = period
+                    # The first successful attempt is authoritative. Do not
+                    # make unnecessary additional Yahoo requests after a valid
+                    # source response has been obtained.
+                    break
+            except Exception as exc:
+                diagnostics["attempted_windows"].append({
+                    "attempt": idx,
+                    "method": method,
+                    "period": period,
+                    "requested_days": requested_days if method == "start_end" else None,
+                    "returned_rows": 0,
+                    "status": "ERROR",
+                    "error": str(exc)[:300],
+                })
+
+        if selected_df.empty:
+            return pd.DataFrame(), diagnostics
+
+        diagnostics["selected_method"] = selected_method
+        diagnostics["selected_period"] = selected_period
+        diagnostics["selected_rows"] = int(len(selected_df))
+        diagnostics["status"] = "AVAILABLE"
+        return selected_df, diagnostics
 
     @classmethod
     def health_probe(cls) -> Dict[str, Any]:
-        """Probe real source coverage and report actual returned history."""
+        """Small real-source probes; never fabricate or persist probe data."""
+        nifty_df, nifty_diag = cls._download_nifty_daily(CONFIG["nifty_history_days"])
+        out: Dict[str, Any] = {
+            "NIFTY daily": {
+                **nifty_diag,
+                "first_timestamp": str(nifty_df.iloc[0]["event_timestamp"]) if not nifty_df.empty else None,
+                "last_timestamp": str(nifty_df.iloc[-1]["event_timestamp"]) if not nifty_df.empty else None,
+            }
+        }
+
         probes = [
-            ("NIFTY daily", "^NSEI", 320, "1d"),
             ("Representative 1h", "RELIANCE.NS", 180, "1h"),
             ("Representative 15m", "RELIANCE.NS", 55, "15m"),
             ("India VIX daily", "^INDIAVIX", 320, "1d"),
         ]
-        out: Dict[str, Any] = {}
         for label, ticker, days, interval in probes:
             df = cls._download(ticker, days=days, interval=interval)
-            diag = dict(cls.last_diagnostics)
             out[label] = {
                 "ticker": ticker,
                 "requested_days": days,
                 "interval": interval,
                 "returned_rows": int(len(df)),
-                "actual_returned_days": cls._actual_days(df),
-                "source_window_used_days": diag.get("source_window_used_days"),
-                "attempted_windows_days": diag.get("attempted_windows_days", []),
                 "first_timestamp": str(df.iloc[0]["event_timestamp"]) if not df.empty else None,
                 "last_timestamp": str(df.iloc[-1]["event_timestamp"]) if not df.empty else None,
-                "status": diag.get("status", "AVAILABLE" if not df.empty else "NO_DATA"),
+                "status": "AVAILABLE" if not df.empty else "NO_DATA",
                 "coverage_policy": "actual returned rows only",
             }
         return out
@@ -1095,10 +1117,8 @@ class HistoricalRawProducer:
         """
         Source/request audit only.
 
-        V7 requested windows remain visible, but the producer now uses an
-        adaptive source-window policy for intraday intervals. If Yahoo cannot
-        serve the requested window, smaller windows are tried and only actual
-        returned rows are published. No missing portion is fabricated.
+        180d x 1h remains the V7 requested contract. We explicitly do NOT
+        downgrade it to 60d and do NOT fabricate the unavailable portion.
         """
         return {
             "contracts": {
@@ -1138,11 +1158,9 @@ class HistoricalRawProducer:
                 },
             },
             "intraday_source_rule": (
-                "The producer requests the engine-required window first. "
-                "If Yahoo rejects or cannot supply that window, the producer "
-                "tries smaller source-safe windows and publishes only actual "
-                "returned raw observations; no resampling, duplication, or "
-                "relabeling is allowed."
+                "The producer requests the engine-required window exactly. "
+                "If yfinance returns less, only the returned raw observations "
+                "are published and the coverage gap is exposed."
             ),
         }
 
@@ -1180,17 +1198,17 @@ class HistoricalRawProducer:
         return count
 
     def publish_nifty_history(self) -> int:
-        df = YahooConnector._download(
-            "^NSEI",
-            days=CONFIG["nifty_history_days"],
-            interval="1d",
+        df, diagnostics = YahooConnector._download_nifty_daily(
+            CONFIG["nifty_history_days"]
         )
-        return self.publish_history(
+        count = self.publish_history(
             "NIFTY_SPOT",
             df,
             "1d",
             "nifty_spot_daily",
         )
+        self.last_stats["nifty_spot_daily:diagnostics"] = diagnostics
+        return count
 
     def publish_next_day_universe_history(
         self,
@@ -1503,6 +1521,13 @@ def main():
             key="mtf_symbols",
         )
 
+        if st.button("Test NIFTY Daily Source"):
+            with st.spinner("Testing ^NSEI daily source with controlled fallback diagnostics..."):
+                _, nifty_diag = YahooConnector._download_nifty_daily(
+                    CONFIG["nifty_history_days"]
+                )
+            st.session_state["nifty_daily_diagnostics"] = nifty_diag
+
         if st.button("Publish NIFTY History", type="primary"):
             if not supabase.url or not supabase.key:
                 st.error("Supabase URL/Key missing. Enter them in the sidebar first.")
@@ -1510,7 +1535,12 @@ def main():
                 try:
                     with st.spinner("Publishing NIFTY historical raw data..."):
                         count = historical.publish_nifty_history()
-                    st.success(f"NIFTY historical rows published: {count}")
+                    diagnostics = historical.last_stats.get("nifty_spot_daily:diagnostics", {})
+                    st.session_state["nifty_daily_diagnostics"] = diagnostics
+                    if count:
+                        st.success(f"NIFTY historical rows published: {count}")
+                    else:
+                        st.error("NIFTY history returned no usable rows. Open NIFTY Daily Fetch Diagnostics.")
                 except Exception as exc:
                     st.error(f"NIFTY history publish failed: {exc}")
 
@@ -1568,6 +1598,10 @@ def main():
     st.markdown("### Required Data Coverage Audit")
     coverage = HistoricalRawProducer.coverage_report()
     st.json(coverage)
+
+    if st.session_state.get("nifty_daily_diagnostics"):
+        st.markdown("### NIFTY Daily Fetch Diagnostics")
+        st.json(st.session_state["nifty_daily_diagnostics"])
 
     st.markdown("### Raw Data Contract")
     st.code(
