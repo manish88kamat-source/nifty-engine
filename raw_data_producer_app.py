@@ -303,15 +303,62 @@ class KotakConnector:
                 csv_response.raise_for_status()
 
                 from io import StringIO
+
+                # Kotak has recently returned the CSV endpoint itself as a
+                # JSON envelope in some environments, e.g.
+                # {"nse": "pSymbol,pGroup,...\\n..."}.
+                # Accept both the normal CSV response and that raw CSV
+                # envelope. This is source-format handling only; no
+                # instrument selection or calculation happens here.
+                csv_text = csv_response.text
+
+                try:
+                    envelope = csv_response.json()
+                except Exception:
+                    envelope = None
+
+                if isinstance(envelope, dict):
+                    candidates_text = []
+
+                    def collect_csv_text(value):
+                        if isinstance(value, str):
+                            if "pSymbol" in value and (
+                                "pTrdSymbol" in value
+                                or "pInstType" in value
+                            ):
+                                candidates_text.append(value)
+                        elif isinstance(value, dict):
+                            for item in value.values():
+                                collect_csv_text(item)
+                        elif isinstance(value, list):
+                            for item in value:
+                                collect_csv_text(item)
+
+                    collect_csv_text(envelope)
+
+                    if candidates_text:
+                        csv_text = max(candidates_text, key=len)
+
                 frame = pd.read_csv(
-                    StringIO(csv_response.text),
+                    StringIO(csv_text),
                     dtype=str,
                     keep_default_na=False,
                 )
+
+                # Kotak's scrip-master has historically exposed whitespace
+                # and the stable dStrikePrice; column spelling.
                 frame.columns = [
                     str(col).strip().rstrip(";")
                     for col in frame.columns
                 ]
+
+                # Normalize whitespace around values without changing values.
+                for col in frame.columns:
+                    frame[col] = frame[col].map(
+                        lambda value: value.strip()
+                        if isinstance(value, str)
+                        else value
+                    )
 
                 parsed = frame.to_dict(orient="records")
                 records.extend(
@@ -366,8 +413,10 @@ class KotakConnector:
 
         if not records:
             raise RuntimeError(
-                "Kotak NFO discovery returned no usable records from "
-                "search_scrip or scrip_master CSV."
+                "Kotak NFO discovery returned no usable records. "
+                "search_scrip and the downloaded scrip_master response "
+                "were both empty/unparseable. Check the producer log for "
+                "the exact scrip-master URL/HTTP response."
             )
 
         self.nfo_records = records
