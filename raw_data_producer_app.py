@@ -758,6 +758,30 @@ class YahooConnector:
             return pd.DataFrame()
 
     @classmethod
+    def health_probe(cls) -> Dict[str, Any]:
+        """Small real-source probes; never fabricate or persist probe data."""
+        probes = [
+            ("NIFTY daily", "^NSEI", 320, "1d"),
+            ("Representative 1h", "RELIANCE.NS", 180, "1h"),
+            ("Representative 15m", "RELIANCE.NS", 55, "15m"),
+            ("India VIX daily", "^INDIAVIX", 320, "1d"),
+        ]
+        out: Dict[str, Any] = {}
+        for label, ticker, days, interval in probes:
+            df = cls._download(ticker, days=days, interval=interval)
+            out[label] = {
+                "ticker": ticker,
+                "requested_days": days,
+                "interval": interval,
+                "returned_rows": int(len(df)),
+                "first_timestamp": str(df.iloc[0]["event_timestamp"]) if not df.empty else None,
+                "last_timestamp": str(df.iloc[-1]["event_timestamp"]) if not df.empty else None,
+                "status": "AVAILABLE" if not df.empty else "NO_DATA",
+                "coverage_policy": "actual returned rows only",
+            }
+        return out
+
+    @classmethod
     def fetch_symbol_history(
         cls,
         symbol: str,
@@ -1047,9 +1071,11 @@ class HistoricalRawProducer:
 
 class SupabasePublisher:
     """Append-only raw bus publisher. Calculations never happen here."""
-    def __init__(self):
-        self.url = env_or_secret("SUPABASE_URL", CONFIG["supabase_url"])
-        self.key = env_or_secret("SUPABASE_KEY", CONFIG["supabase_key"])
+    def __init__(self, url_override: str = "", key_override: str = ""):
+        # UI overrides are session-scoped only. Environment/Streamlit secrets
+        # remain the non-UI fallback. No credentials are written into source.
+        self.url = str(url_override or env_or_secret("SUPABASE_URL", CONFIG["supabase_url"])).strip()
+        self.key = str(key_override or env_or_secret("SUPABASE_KEY", CONFIG["supabase_key"])).strip()
 
     def _headers(self):
         return {
@@ -1058,6 +1084,30 @@ class SupabasePublisher:
             "Content-Type": "application/json",
             "Prefer": "return=minimal",
         }
+
+    def health(self) -> Dict[str, Any]:
+        if not self.url or not self.key:
+            return {"configured": False, "reachable": False, "error": "Supabase URL/Key missing"}
+        endpoint = f"{self.url.rstrip('/')}/rest/v1/raw_observations"
+        try:
+            response = requests.get(
+                endpoint,
+                headers={
+                    "apikey": self.key,
+                    "Authorization": f"Bearer {self.key}",
+                    "Accept": "application/json",
+                },
+                params={"select": "id", "limit": "1"},
+                timeout=float(CONFIG["supabase_timeout_sec"]),
+            )
+            return {
+                "configured": True,
+                "reachable": response.status_code in (200, 206),
+                "http_status": response.status_code,
+                "error": "" if response.status_code in (200, 206) else response.text[:250],
+            }
+        except Exception as exc:
+            return {"configured": True, "reachable": False, "error": str(exc)}
 
     def publish_observations_batch(self, source: str, symbol: str, token: str, raw_payloads: List[dict]) -> int:
         if not self.url or not self.key or not raw_payloads:
@@ -1110,12 +1160,41 @@ def main():
         st.session_state.historical_running = False
 
     kotak: KotakConnector = st.session_state.kotak
-    supabase = SupabasePublisher()
-    historical = HistoricalRawProducer(supabase)
 
     with st.sidebar:
         st.header("🔑 Authentication")
         totp_input = st.text_input("Live TOTP Code", type="password")
+
+        st.markdown("---")
+        st.header("🗄️ Supabase RAW BUS")
+        supabase_url_input = st.text_input(
+            "Supabase URL",
+            value=st.session_state.get("supabase_url_input", env_or_secret("SUPABASE_URL", "")),
+            key="supabase_url_input",
+            placeholder="https://your-project.supabase.co",
+        )
+        supabase_key_input = st.text_input(
+            "Supabase Key",
+            value=st.session_state.get("supabase_key_input", env_or_secret("SUPABASE_KEY", "")),
+            type="password",
+            key="supabase_key_input",
+            placeholder="Supabase anon/service key",
+        )
+        supabase = SupabasePublisher(
+            url_override=supabase_url_input,
+            key_override=supabase_key_input,
+        )
+        historical = HistoricalRawProducer(supabase)
+
+        if st.button("Test Supabase RAW BUS"):
+            health = supabase.health()
+            if health.get("reachable"):
+                st.success("Supabase RAW BUS reachable.")
+            else:
+                st.error(health.get("error", "Supabase connection failed."))
+
+        st.markdown("---")
+        st.header("📡 Live Raw Producer")
         c1, c2 = st.columns(2)
         with c1:
             if st.button("Connect Kotak"):
@@ -1132,8 +1211,6 @@ def main():
                 except Exception as exc:
                     st.error(str(exc))
 
-        st.markdown("---")
-        st.header("📡 Live Raw Producer")
         can_start = bool(kotak.connected and kotak.future_token and supabase.url and supabase.key)
         if not st.session_state.producer_running:
             if st.button("Start Raw Producer Loop", type="primary", disabled=not can_start):
@@ -1144,9 +1221,51 @@ def main():
                 st.session_state.producer_running = False
                 st.rerun()
 
+        if st.button(
+            "Test Live Raw → Supabase",
+            disabled=not can_start,
+        ):
+            try:
+                raw_quotes = kotak.fetch_raw_quotes()
+                published = 0
+                for quote in raw_quotes:
+                    if not isinstance(quote, dict):
+                        continue
+                    token = str(
+                        quote.get(
+                            "exchange_token",
+                            quote.get("instrument_token", quote.get("pSymbol", quote.get("pSymbolToken", "UNKNOWN")))
+                        )
+                    )
+                    symbol = str(
+                        quote.get(
+                            "display_symbol",
+                            quote.get("pTrdSymbol", quote.get("tradingSymbol", "UNKNOWN"))
+                        )
+                    )
+                    if supabase.publish_observation("kotak_live", symbol, token, quote):
+                        published += 1
+                st.session_state["last_live_test"] = {
+                    "kotak_quotes_received": len(raw_quotes),
+                    "supabase_rows_published": published,
+                    "active_future": kotak.future_token,
+                    "pcr_contracts": len(kotak.pcr_tokens),
+                    "status": "PASS" if raw_quotes and published else "PARTIAL/NO_DATA",
+                }
+            except Exception as exc:
+                st.session_state["last_live_test"] = {"status": "ERROR", "error": str(exc)}
+        if st.session_state.get("last_live_test"):
+            st.json(st.session_state["last_live_test"])
+
         st.markdown("---")
         st.header("📚 Historical Raw Producer")
-        st.caption("yfinance → Supabase only. Requested 180d×1h is preserved; unavailable source history is never fabricated/resampled.")
+        st.caption("yfinance → Supabase only. Requested windows are preserved; only actual returned source history is published.")
+        if st.button("Test yfinance Data Source"):
+            with st.spinner("Probing yfinance source coverage..."):
+                yf_health = YahooConnector.health_probe()
+            st.session_state["yf_health"] = yf_health
+        if st.session_state.get("yf_health"):
+            st.json(st.session_state["yf_health"])
         hist_symbols_text = st.text_area("NIFTY-500 symbols (one per line)", height=120, key="hist_symbols")
         mtf_symbols_text = st.text_area("MTF basket symbols (one per line)", height=100, key="mtf_symbols")
         if st.button("Publish NIFTY History", disabled=not (supabase.url and supabase.key)):
@@ -1181,6 +1300,18 @@ def main():
     col2.metric("Active Future", kotak.future_token or "NOT DISCOVERED")
     col3.metric("PCR Contracts", len(kotak.pcr_tokens))
     col4.metric("Supabase", "READY" if supabase.url and supabase.key else "NOT CONFIGURED")
+
+    st.markdown("### Live Raw Bus Health")
+    live_status = "READY" if (kotak.connected and kotak.future_token) else "NOT READY"
+    sup_health = supabase.health()
+    st.write({
+        "Kotak": "CONNECTED" if kotak.connected else "DISCONNECTED",
+        "Active Future": kotak.future_token or "NOT DISCOVERED",
+        "NFO Master Records": len(kotak.nfo_records),
+        "PCR Contracts": len(kotak.pcr_tokens),
+        "Supabase": "REACHABLE" if sup_health.get("reachable") else "NOT READY",
+        "Live Raw Producer": live_status,
+    })
 
     st.markdown("### Required Data Coverage Audit")
     coverage = HistoricalRawProducer.coverage_report()
