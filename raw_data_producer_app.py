@@ -180,7 +180,7 @@ def _csv_text_to_records(csv_text: str) -> List[Dict[str, Any]]:
         try:
             envelope = json.loads(text_value)
             if isinstance(envelope, dict):
-                for key in ("nse", "NSE", "nse_fo", "NSE_FO"):
+                for key in ("nse", "NSE", "nse_fo", "NSE_FO", "data"):
                     payload = envelope.get(key)
                     if isinstance(payload, str) and payload.strip():
                         csv_text = payload
@@ -227,6 +227,9 @@ def _scrip_master_urls(response: Any) -> List[str]:
         add(response.get("nse_fo"))
         add(response.get("NSE_FO"))
         add(response.get("data"))
+        for v in response.values():
+            if isinstance(v, (list, str)):
+                add(v)
     return urls
 
 
@@ -236,6 +239,7 @@ def _extract_nfo_csv_payload(response: Any) -> List[Dict[str, Any]]:
         return []
 
     raw_bytes = None
+    text_value = ""
     if hasattr(response, "content") and hasattr(response, "text"):
         raw_bytes = response.content
         text_value = response.text
@@ -259,7 +263,7 @@ def _extract_nfo_csv_payload(response: Any) -> List[Dict[str, Any]]:
     else:
         return []
 
-    # Handle ZIP archives frequently returned by broker scrip master endpoints
+    # Handle ZIP archives if returned by broker scrip master endpoints
     if raw_bytes and raw_bytes.startswith(b"PK\x03\x04"):
         try:
             with zipfile.ZipFile(io.BytesIO(raw_bytes)) as z:
@@ -353,64 +357,93 @@ class KotakConnector:
 
         records: List[Dict[str, Any]] = []
 
-        search_attempts = [
-            {"exchange_segment": "nse_fo", "symbol": "NIFTY"},
-            {"exchange_segment": "nse_fo", "scrip": "NIFTY"},
-            {"exchange_segment": "NFO", "symbol": "NIFTY"},
-            {"exchange_segment": "nse_fo", "search_text": "NIFTY"},
-            {"exchange_segment": "nse_fo"},
-        ]
-
-        for params in search_attempts:
-            try:
-                response = self.client.search_scrip(**params)
-                recs = extract_records(response)
-                if recs:
-                    records = recs
-                    self.log(f"Successfully retrieved NFO records via search_scrip with {params}")
-                    break
-            except Exception as exc:
-                self.log(f"search_scrip attempt {params} failed: {exc}")
-
-        if records:
-            self.nfo_records = records
-            self.log(f"Total raw NFO scrip records retrieved: {len(records)}")
-            return records
-
-        for seg in ("nse_fo", "NFO", "NSE_FO"):
-            try:
-                master_response = self.client.scrip_master(exchange_segment=seg)
-                parsed = _extract_nfo_csv_payload(master_response)
-                if parsed:
-                    self.nfo_records = parsed
-                    self.log(f"NFO scrip_master for segment {seg} parsed directly: {len(parsed)} records")
-                    return parsed
-
-                urls = _scrip_master_urls(master_response)
-                for url in urls:
+        # Strategy 1: SDK scrip_master() with no arguments (Standard neo_api_client v2 spec)
+        try:
+            resp = self.client.scrip_master()
+            parsed = _extract_nfo_csv_payload(resp)
+            if parsed:
+                self.nfo_records = parsed
+                self.log(f"NFO scrip_master() parsed successfully: {len(parsed)} records")
+                return parsed
+            urls = _scrip_master_urls(resp)
+            for url in urls:
+                if "nse_fo" in url.lower() or not urls:
                     try:
-                        response = requests.get(
-                            url,
-                            headers={
-                                "Accept": "text/csv,application/json,application/zip,*/*",
-                                "Authorization": self.consumer_key,
-                            },
-                            timeout=25,
-                        )
-                        if response.status_code >= 400:
-                            continue
-                        parsed = _extract_nfo_csv_payload(response)
+                        res = requests.get(url, timeout=20)
+                        parsed = _extract_nfo_csv_payload(res)
                         if parsed:
                             self.nfo_records = parsed
-                            self.log(f"NFO scrip-master URL downloaded and parsed: {len(parsed)} records")
+                            self.log(f"NFO scrip_master URL downloaded: {len(parsed)} records")
                             return parsed
-                    except Exception as url_exc:
-                        self.log(f"NFO scrip-master URL download failed ({url}): {url_exc}")
-            except Exception as seg_exc:
-                self.log(f"NFO scrip_master segment {seg} failed: {seg_exc}")
+                    except Exception:
+                        pass
+        except Exception as exc:
+            self.log(f"scrip_master() attempt failed: {exc}")
+
+        # Strategy 2: SDK scrip_master with exchange segment arguments
+        for seg in ("nse_fo", "NFO", "NSE_FO"):
+            try:
+                resp = self.client.scrip_master(exchange_segment=seg)
+                parsed = _extract_nfo_csv_payload(resp)
+                if parsed:
+                    self.nfo_records = parsed
+                    self.log(f"NFO scrip_master({seg}) parsed: {len(parsed)} records")
+                    return parsed
+                urls = _scrip_master_urls(resp)
+                for url in urls:
+                    try:
+                        res = requests.get(url, timeout=20)
+                        parsed = _extract_nfo_csv_payload(res)
+                        if parsed:
+                            self.nfo_records = parsed
+                            self.log(f"NFO URL downloaded for {seg}: {len(parsed)} records")
+                            return parsed
+                    except Exception:
+                        pass
+            except Exception as exc:
+                self.log(f"scrip_master({seg}) attempt failed: {exc}")
+
+        # Strategy 3: search_scrip or scrip_search across different keyword signatures
+        search_methods = ["search_scrip", "scrip_search"]
+        search_args = [
+            {"exchange_segment": "nse_fo", "symbol": "NIFTY"},
+            {"exchange_segment": "nse_fo", "scrip": "NIFTY"},
+            {"exchange_segment": "nse_fo"},
+            {"exchange": "nse_fo", "symbol": "NIFTY"},
+        ]
+        for meth_name in search_methods:
+            meth = getattr(self.client, meth_name, None)
+            if callable(meth):
+                for args in search_args:
+                    try:
+                        resp = meth(**args)
+                        parsed = extract_records(resp)
+                        if parsed:
+                            self.nfo_records = parsed
+                            self.log(f"NFO found via {meth_name}({args}): {len(parsed)} records")
+                            return parsed
+                    except Exception:
+                        pass
+
+        # Strategy 4: Direct public CDN fallback trying recent rolling dates
+        today_date = today_ist()
+        for delta_days in range(5):
+            d = today_date - pd.Timedelta(days=delta_days)
+            date_str = d.strftime("%Y-%m-%d")
+            url = f"https://lapi.kotaksecurities.com/wso2-scripmaster/v1/prod/{date_str}/transformed/nse_fo.csv"
+            try:
+                res = requests.get(url, timeout=20)
+                if res.status_code == 200:
+                    parsed = _extract_nfo_csv_payload(res)
+                    if parsed:
+                        self.nfo_records = parsed
+                        self.log(f"NFO fallback CDN downloaded for {date_str}: {len(parsed)} records")
+                        return parsed
+            except Exception:
+                pass
 
         raise RuntimeError(
-            "Kotak NFO discovery returned no usable records after trying all search_scrip and scrip_master fallback methods."
+            "Kotak NFO discovery returned no usable records after trying all API methods and direct CDN fallbacks."
         )
 
     def discover_instruments(self) -> bool:
