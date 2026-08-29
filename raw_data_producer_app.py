@@ -307,7 +307,10 @@ class KotakConnector:
         self.future_token = None
         self.future_symbol = None
         self.future_expiry: Optional[date] = None
-        self.spot_token = "26000"
+        # Kotak Neo does not use Zerodha's numeric NIFTY spot token (26000).
+        # Keep the real Kotak spot identifier separate from the ATM reference fallback.
+        self.spot_token = "Nifty 50"
+        self.atm_reference_price = None
         self.pcr_tokens = []
         self.option_contracts = {}
         self.nfo_records = []
@@ -544,25 +547,70 @@ class KotakConnector:
         # --------------------------------------------------------
         # OPTIONS DISCOVERY (Around ATM)
         # --------------------------------------------------------
+        # Primary reference: Kotak's native NIFTY spot identifier.
+        # If that quote is unavailable, use the already discovered active
+        # NIFTY future LTP ONLY as the ATM reference. This does not create a
+        # synthetic spot observation and does not alter the engine calculations.
         spot_price = None
         try:
-            spot_res = self.client.quotes(instrument_tokens=[{"instrument_token": self.spot_token, "exchange_segment": "nse_cm"}], quote_type="ltp")
+            spot_res = self.client.quotes(
+                instrument_tokens=[
+                    {"instrument_token": self.spot_token, "exchange_segment": "nse_cm"}
+                ],
+                quote_type="ltp",
+            )
             spot_recs = extract_records(spot_res)
             for sr in spot_recs:
-                for k in ("lp", "last_price", "ltp"):
-                    val = float(sr.get(k, 0))
+                for k in ("lp", "last_price", "ltp", "c", "close"):
+                    try:
+                        val = float(sr.get(k, 0))
+                    except Exception:
+                        val = 0.0
                     if val > 0:
                         spot_price = val
                         break
-        except Exception:
-            pass
+                if spot_price:
+                    break
+        except Exception as exc:
+            self.log(f"Native NIFTY spot quote unavailable: {exc}")
 
         if spot_price is None or spot_price <= 0:
-            self.log("Spot unavailable; PCR option mapping skipped rather than using a fabricated ATM.")
+            # No hardcoded token and no fabricated price. Reuse the LTP of the
+            # future contract that was just resolved from Kotak's live master.
+            try:
+                fut_res = self.client.quotes(
+                    instrument_tokens=[
+                        {"instrument_token": str(self.future_token), "exchange_segment": "nse_fo"}
+                    ],
+                    quote_type="ltp",
+                )
+                fut_recs = extract_records(fut_res)
+                for fr in fut_recs:
+                    for k in ("lp", "last_price", "ltp", "c", "close"):
+                        try:
+                            val = float(fr.get(k, 0))
+                        except Exception:
+                            val = 0.0
+                        if val > 0:
+                            spot_price = val
+                            break
+                    if spot_price:
+                        break
+                if spot_price and spot_price > 0:
+                    self.log(
+                        f"NIFTY spot quote unavailable; using active future LTP "
+                        f"{spot_price:.2f} as ATM reference (Token: {self.future_token})."
+                    )
+            except Exception as exc:
+                self.log(f"Active NIFTY future LTP fallback unavailable: {exc}")
+
+        if spot_price is None or spot_price <= 0:
+            self.log("No valid NIFTY price reference; PCR option mapping skipped.")
             self.option_contracts = {}
             self.pcr_tokens = []
             return True
 
+        self.atm_reference_price = float(spot_price)
         step = CONFIG["pcr_strike_step"]
         atm = round(spot_price / step) * step
         count = CONFIG["pcr_strike_count"]
@@ -591,6 +639,21 @@ class KotakConnector:
             
             if opt_type not in ("CE", "PE"):
                 continue
+
+            # PCR must stay on the same current/nearest expiry as the bound
+            # NIFTY future. Never mix strikes from another expiry.
+            option_expiry_text = str(r.get("pExpiryDate", "")).replace(";", "").strip()
+            option_expiry = None
+            if option_expiry_text:
+                for fmt in ("%d%b%Y", "%d-%b-%Y", "%d/%b/%Y", "%Y-%m-%d"):
+                    try:
+                        option_expiry = datetime.strptime(option_expiry_text, fmt).date()
+                        break
+                    except Exception:
+                        pass
+            if self.future_expiry is not None and option_expiry is not None:
+                if option_expiry != self.future_expiry:
+                    continue
 
             strike_val = None
             for sk in ("dStrikePrice;", "dStrikePrice", "strike_price", "strikePrice"):
