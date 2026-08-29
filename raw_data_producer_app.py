@@ -1,9 +1,9 @@
-#!/usr/init/env python3
+#!/usr/bin/env python3
 """
 Leak-Proof Raw Data Producer | Institutional Research Bus
 - Zero local calculations, zero indicators, zero ML.
-- Strict token resolution with robust fallback.
-- Publishes raw normalized payloads directly to Supabase `raw_observations`.
+- Robust Nifty Future & Option token discovery (no blind fallbacks).
+- Publishes raw normalized payloads directly to Supabase `raw_observations` via REST.
 - Throttling-safe background loop (no st.rerun abuse).
 """
 
@@ -162,40 +162,66 @@ class KotakConnector:
             except Exception:
                 pass
 
+        self.logs.append(f"Total raw scrip records retrieved: {len(records) if isinstance(records, list) else 0}")
+
         found_token = None
         found_symbol = None
+        
+        # Robust scanning for Active Nifty Future contract
         for r in records:
             if not isinstance(r, dict):
                 continue
             sym = str(r.get("pTrdSymbol", r.get("ts", r.get("symbol", r.get("tradingSymbol", ""))))).upper().strip()
             tok = str(r.get("pSymbolToken", r.get("instrument_token", r.get("token", r.get("symbolToken", "")))))
-            if "NIFTY" in sym and tok and "FUT" in sym:
-                if not any(x in sym for x in ["BANK", "FIN", "MID", "IT", "SENSEX"]):
-                    found_token = tok
-                    found_symbol = sym
-                    break
+            
+            # Check for Nifty Future signatures
+            if "NIFTY" in sym and tok:
+                if "FUT" in sym or "FUTIDX" in str(r.get("pInstType", "")).upper():
+                    if not any(x in sym for x in ["BANK", "FIN", "MID", "IT", "SENSEX", "FPI"]):
+                        found_token = tok
+                        found_symbol = sym
+                        break
 
-        if not found_token and records:
+        # Secondary search pass if specific future tag wasn't caught cleanly
+        if not found_token:
             for r in records:
                 if not isinstance(r, dict):
                     continue
-                sym = str(r.get("pTrdSymbol", r.get("ts", ""))).upper().strip()
-                tok = str(r.get("pSymbolToken", r.get("instrument_token", "")))
-                if tok and "NIFTY" in sym:
+                sym = str(r.get("pTrdSymbol", r.get("ts", r.get("symbol", "")))).upper().strip()
+                tok = str(r.get("pSymbolToken", r.get("instrument_token", r.get("token", ""))))
+                if tok and "NIFTY" in sym and not sym.endswith("CE") and not sym.endswith("PE"):
                     found_token = tok
                     found_symbol = sym
                     break
 
         if not found_token:
-            found_token = "26000"
-            found_symbol = "NIFTY_FUT_FALLBACK"
-            self.logs.append("Using fallback Nifty Future token mapping.")
+            raise RuntimeError("Active NIFTY future contract could not be discovered from scrip master list.")
 
         self.future_token = found_token
         self.logs.append(f"Bound Active Nifty Future: {found_symbol} (Token: {self.future_token})")
 
+        # Discover Option Strikes for PCR around ATM
         try:
             spot_price = 24300.0
+            try:
+                spot_res = self.client.quotes(instrument_tokens=[{"instrument_token": "Nifty 50", "exchange_segment": "nse_cm"}], quote_type="all")
+                spot_recs = []
+                if isinstance(spot_res, dict):
+                    spot_recs = spot_res.get("result", spot_res.get("data", []))
+                    if isinstance(spot_recs, dict):
+                        spot_recs = spot_recs.get("data", [spot_recs])
+                elif isinstance(spot_res, list):
+                    spot_recs = spot_res
+                
+                for sr in spot_recs:
+                    if isinstance(sr, dict):
+                        lp = float(sr.get("lp", sr.get("ltp", 0)))
+                        if lp > 0:
+                            spot_price = lp
+                            break
+            except Exception:
+                pass
+
             step = CONFIG["pcr_strike_step"]
             atm = round(spot_price / step) * step
             count = CONFIG["pcr_strike_count"]
@@ -207,16 +233,17 @@ class KotakConnector:
                     continue
                 sym = str(r.get("pTrdSymbol", "")).upper().strip()
                 if "NIFTY" in sym and (sym.endswith("CE") or sym.endswith("PE")):
-                    try:
-                        strike_val = float(r.get("dStrikePrice", 0))
-                        if strike_val > 1000000:
-                            strike_val /= 100.0
-                        if strike_val in target_strikes:
-                            tok = str(r.get("pSymbolToken", r.get("instrument_token", "")))
-                            if tok:
-                                opt_discovered.append(tok)
-                    except Exception:
-                        pass
+                    if not any(x in sym for x in ["BANK", "FIN", "MID", "IT", "SENSEX"]):
+                        try:
+                            strike_val = float(r.get("dStrikePrice", 0))
+                            if strike_val > 1000000:
+                                strike_val /= 100.0
+                            if strike_val in target_strikes:
+                                tok = str(r.get("pSymbolToken", r.get("instrument_token", "")))
+                                if tok:
+                                    opt_discovered.append(tok)
+                        except Exception:
+                            pass
             self.pcr_tokens = list(set(opt_discovered))
             self.logs.append(f"Discovered {len(self.pcr_tokens)} raw option strikes.")
         except Exception as e:
@@ -239,9 +266,13 @@ class KotakConnector:
 
         try:
             res = self.client.quotes(instrument_tokens=tokens_to_poll, quote_type="all")
-            records = res.get("result", res.get("data", res)) if isinstance(res, (dict, list)) else []
-            if isinstance(records, dict):
-                records = records.get("data", [records])
+            records = []
+            if isinstance(res, dict):
+                records = res.get("result", res.get("data", res.get("values", [])))
+                if isinstance(records, dict):
+                    records = records.get("data", [records])
+            elif isinstance(res, list):
+                records = res
             return records if isinstance(records, list) else []
         except Exception as e:
             self.logs.append(f"Quote fetch error: {e}")
@@ -368,6 +399,8 @@ def main():
                 published_count = 0
                 
                 for q in raw_quotes:
+                    if not isinstance(q, dict):
+                        continue
                     tok = str(q.get("instrument_token", q.get("pSymbolToken", "UNKNOWN")))
                     sym = str(q.get("display_symbol", q.get("pTrdSymbol", "NIFTY")))
                     
