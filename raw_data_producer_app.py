@@ -17,6 +17,8 @@ import base64
 import hmac
 import hashlib
 import struct
+import csv
+import io
 from datetime import datetime, timezone, date
 from pathlib import Path
 from typing import Dict, List, Any, Optional, Tuple
@@ -315,96 +317,73 @@ class KotakConnector:
         if not self.connected:
             raise RuntimeError("Kotak connector is not authenticated.")
 
-        # Primary: existing tested search_scrip path.
         records: List[Dict[str, Any]] = []
-        try:
-            response = self.client.search_scrip(
-                exchange_segment="nse_fo",
-                symbol="NIFTY",
-            )
-            records = extract_records(response)
-        except Exception as exc:
-            self.log(f"Primary search_scrip failed: {exc}")
 
-        # Secondary: same tested path with alternate casing.
-        if not records:
+        # Try multiple variations of search_scrip parameters for broad compatibility across neo_api_client versions
+        search_attempts = [
+            {"exchange_segment": "nse_fo", "symbol": "NIFTY"},
+            {"exchange_segment": "nse_fo", "scrip": "NIFTY"},
+            {"exchange_segment": "NFO", "symbol": "NIFTY"},
+            {"exchange_segment": "nse_fo", "search_text": "NIFTY"},
+            {"exchange_segment": "nse_fo"},
+        ]
+
+        for params in search_attempts:
             try:
-                response = self.client.search_scrip(
-                    exchange_segment="nse_fo",
-                    symbol="Nifty",
-                )
-                records = extract_records(response)
+                response = self.client.search_scrip(**params)
+                recs = extract_records(response)
+                if recs:
+                    records = recs
+                    self.log(f"Successfully retrieved NFO records via search_scrip with {params}")
+                    break
             except Exception as exc:
-                self.log(f"Secondary search_scrip failed: {exc}")
+                self.log(f"search_scrip attempt {params} failed: {exc}")
 
         if records:
             self.nfo_records = records
             self.log(f"Total raw NFO scrip records retrieved: {len(records)}")
             return records
 
-        # Surgical fallback only: Kotak's official scrip_master contract can
-        # return either a direct CSV URL or a filesPaths list. Some deployments
-        # have also returned the CSV inside an {"nse": "..."} JSON envelope.
-        try:
-            master_response = self.client.scrip_master(
-                exchange_segment="nse_fo"
-            )
+        # Fallback to scrip_master method across supported exchange segments
+        for seg in ("nse_fo", "NFO", "NSE_FO"):
+            try:
+                master_response = self.client.scrip_master(exchange_segment=seg)
+                parsed = _extract_nfo_csv_payload(master_response)
+                if parsed:
+                    self.nfo_records = parsed
+                    self.log(f"NFO scrip_master for segment {seg} parsed directly: {len(parsed)} records")
+                    return parsed
 
-            records = _extract_nfo_csv_payload(master_response)
-            if records:
-                self.nfo_records = records
-                self.log(
-                    f"NFO fallback payload parsed directly: {len(records)} records"
-                )
-                return records
-
-            urls = _scrip_master_urls(master_response)
-            self.log(f"NFO scrip_master fallback URLs discovered: {len(urls)}")
-
-            nfo_urls = [u for u in urls if "nse_fo" in u.lower()]
-            urls = nfo_urls or urls
-
-            for url in urls:
-                try:
-                    response = requests.get(
-                        url,
-                        headers={
-                            "Accept": "text/csv,application/json,*/*",
-                            "Authorization": self.consumer_key,
-                        },
-                        timeout=25,
-                    )
-                    self.log(
-                        f"NFO scrip-master download: HTTP "
-                        f"{response.status_code}, bytes={len(response.content)}"
-                    )
-                    if response.status_code >= 400:
-                        continue
-
-                    parsed = _extract_nfo_csv_payload(response.text)
-
-                    if not parsed:
-                        try:
-                            parsed = _extract_nfo_csv_payload(response.json())
-                        except Exception:
-                            pass
-
-                    if parsed:
-                        self.nfo_records = parsed
-                        self.log(
-                            f"NFO scrip-master fallback parsed: "
-                            f"{len(parsed)} raw records"
+                urls = _scrip_master_urls(master_response)
+                for url in urls:
+                    try:
+                        response = requests.get(
+                            url,
+                            headers={
+                                "Accept": "text/csv,application/json,*/*",
+                                "Authorization": self.consumer_key,
+                            },
+                            timeout=25,
                         )
-                        return parsed
-                except Exception as exc:
-                    self.log(f"NFO scrip-master URL fallback failed: {exc}")
-
-        except Exception as exc:
-            self.log(f"NFO scrip_master fallback failed: {exc}")
+                        if response.status_code >= 400:
+                            continue
+                        parsed = _extract_nfo_csv_payload(response.text)
+                        if not parsed:
+                            try:
+                                parsed = _extract_nfo_csv_payload(response.json())
+                            except Exception:
+                                pass
+                        if parsed:
+                            self.nfo_records = parsed
+                            self.log(f"NFO scrip-master URL downloaded and parsed: {len(parsed)} records")
+                            return parsed
+                    except Exception as url_exc:
+                        self.log(f"NFO scrip-master URL download failed ({url}): {url_exc}")
+            except Exception as seg_exc:
+                self.log(f"NFO scrip_master segment {seg} failed: {seg_exc}")
 
         raise RuntimeError(
-            "Kotak NFO discovery returned no usable records after the "
-            "tested search_scrip path and official scrip_master fallback."
+            "Kotak NFO discovery returned no usable records after trying all search_scrip and scrip_master fallback methods."
         )
 
     def discover_instruments(self) -> bool:
@@ -628,14 +607,6 @@ class YahooConnector:
         days: Optional[int] = None,
         interval: str = "1d",
     ) -> pd.DataFrame:
-        """
-        Fetch raw Yahoo/yfinance observations only.
-
-        IMPORTANT:
-        - The caller's requested window is preserved.
-        - No synthetic extension is made when Yahoo returns less history.
-        - Intraday requests are not relabelled as longer coverage.
-        """
         try:
             kwargs = {
                 "interval": interval,
@@ -658,7 +629,6 @@ class YahooConnector:
                 return pd.DataFrame()
 
             if isinstance(df.columns, pd.MultiIndex):
-                # For a single ticker, retain the field level only.
                 if len(set(df.columns.get_level_values(-1))) == 1:
                     df.columns = [c[0] for c in df.columns]
                 else:
@@ -753,23 +723,7 @@ class YahooConnector:
 
 
 class HistoricalRawProducer:
-    """
-    Fetch and publish raw historical observations required by the engines.
-
-    This class deliberately performs NO:
-      - indicators
-      - feature engineering
-      - scoring
-      - regime detection
-      - labels
-      - signals
-      - strategy logic
-      - timeframe resampling
-
-    A requested history window is never silently represented as complete when
-    the source returned less data. The actual returned timestamps/row count
-    are preserved in the raw payload and coverage audit.
-    """
+    """Fetch and publish raw historical observations required by the engines."""
 
     def __init__(self, publisher):
         self.publisher = publisher
@@ -813,7 +767,6 @@ class HistoricalRawProducer:
                 "raw_source": source,
             }
 
-            # Deterministic identity for the raw observation.
             payload["observation_id"] = hashlib.sha256(
                 (
                     f"{source}|{dataset}|{symbol}|"
@@ -827,12 +780,6 @@ class HistoricalRawProducer:
 
     @staticmethod
     def coverage_report() -> Dict[str, Any]:
-        """
-        Source/request audit only.
-
-        180d x 1h remains the V7 requested contract. We explicitly do NOT
-        downgrade it to 60d and do NOT fabricate the unavailable portion.
-        """
         return {
             "contracts": {
                 "next_day_daily": {
@@ -1010,7 +957,7 @@ class HistoricalRawProducer:
 
 
 class SupabasePublisher:
-    """Append-only raw bus publisher. Calculations never happen here."""
+    """Append-only raw bus publisher."""
     def __init__(self):
         self.url = env_or_secret("SUPABASE_URL", CONFIG["supabase_url"])
         self.key = env_or_secret("SUPABASE_KEY", CONFIG["supabase_key"])
@@ -1055,7 +1002,6 @@ class SupabasePublisher:
 
     def publish_observation(self, source: str, symbol: str, token: str, raw_payload: dict) -> bool:
         return self.publish_observations_batch(source, symbol, token, [raw_payload]) == 1
-
 
 
 def main():
@@ -1110,7 +1056,7 @@ def main():
 
         st.markdown("---")
         st.header("📚 Historical Raw Producer")
-        st.caption("yfinance → Supabase only. Requested 180d×1h is preserved; unavailable source history is never fabricated/resampled.")
+        st.caption("yfinance → Supabase only.")
         hist_symbols_text = st.text_area("NIFTY-500 symbols (one per line)", height=120, key="hist_symbols")
         mtf_symbols_text = st.text_area("MTF basket symbols (one per line)", height=100, key="mtf_symbols")
         if st.button("Publish NIFTY History", disabled=not (supabase.url and supabase.key)):
@@ -1180,7 +1126,6 @@ def main():
                     if supabase.publish_observation("kotak_live", symbol, token, quote):
                         published_count += 1
 
-                # Macro raw data is supplementary market context; it remains raw and uncalculated.
                 if poll_cycle % CONFIG["macro_every_n_cycles"] == 0:
                     for ticker, df in YahooConnector.fetch_macro_data().items():
                         if df.empty:
@@ -1197,7 +1142,6 @@ def main():
             except Exception as exc:
                 log_container.error(f"Producer loop exception: {exc}")
             time.sleep(float(CONFIG["poll_interval_sec"]))
-
 
 
 if __name__ == "__main__":
