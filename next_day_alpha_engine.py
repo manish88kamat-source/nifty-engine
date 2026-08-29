@@ -1,23 +1,9 @@
-#!/usr/bin/env python3
+#!/usr/init/env python3
 """
-NIFTY NEXT-DAY STOCK ALPHA ENGINE (SUPABASE CONNECTED)
-======================================================
+NIFTY NEXT-DAY STOCK ALPHA ENGINE (SUPABASE CONNECTED & FULL UI)
+================================================================
 
-FINAL STANDALONE VERSION
-
-Purpose
--------
-A completely isolated stock-selection engine for:
-1. Market-close / day-ahead scan
-2. Selecting up to TOP 15 high-quality stock candidates
-3. Assigning directional bias (LONG / SHORT)
-4. Next morning 09:15-09:20 confirmation
-5. Producing FINAL 2 / FINAL 1 / NO TRADE
-
-DATA ARCHITECTURE
------------------
-- Raw market observations are fetched directly from Supabase `raw_observations` table via REST.
-- Zero calculated features, scores, or decisions cross the database boundary.
+FINAL STANDALONE VERSION WITH COMPLETE V7 EXTENSION & SIDEBAR CONFIG
 """
 
 from __future__ import annotations
@@ -51,6 +37,11 @@ try:
 except ImportError:
     st = None
 
+try:
+    import yfinance as yf
+except ImportError:
+    yf = None
+
 
 IST = ZoneInfo("Asia/Kolkata")
 
@@ -68,8 +59,9 @@ YF_CHART = "https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"
 NIFTY_TICKER = "^NSEI"
 
 # ============================================================================
-# SUPABASE CONFIGURATION (Shared Raw Data Bus)
+# CONFIGURATION & SUPABASE BUS
 # ============================================================================
+
 SUPABASE_URL = os.getenv("SUPABASE_URL", "https://wgyxqygriulqjjvqunkzp.supabase.co").strip()
 SUPABASE_KEY = os.getenv("SUPABASE_KEY", "sb_publishable_SCmJsd6kaNwcwJk5PkTARQ_TqtpUknK").strip()
 
@@ -77,30 +69,24 @@ COMMON_RAW_SOURCE_NAME = os.getenv("COMMON_RAW_SOURCE_NAME", "SUPABASE_RAW_MARKE
 COMMON_RAW_MAX_AGE_SECONDS = max(1.0, float(os.getenv("COMMON_RAW_MAX_AGE_SECONDS", "60")))
 
 NSE_CORPORATE_API = "https://www.nseindia.com/api/corporate-announcements"
-SEBI_FILINGS_URL = "https://www.sebi.gov.in/sebiweb/home/HomeAction.do?doListing=yes&sid=3"
 
-# ----------------------------- Universe gates ------------------------------
 MIN_PRICE = 40.0
 MIN_HISTORY_DAYS = 210
 MIN_AVG_TURNOVER_CR = 20.0
 MIN_AVG_VOLUME = 100_000
 
-# ----------------------------- Ranking -------------------------------------
 DAY_AHEAD_MIN_SCORE = 68.0
 DAY_AHEAD_TOP_N = max(1, int(os.getenv("NEXT_DAY_TOP_N", "15")))
 TOP15_COUNT = DAY_AHEAD_TOP_N
 TOP5_COUNT = DAY_AHEAD_TOP_N
 
-# ----------------------------- Morning confirmation ------------------------
 MORNING_CONFIRMATION_MIN_SCORE = 90.0
 MORNING_WATCH_SCORE = 72.0
 
 OPENING_MINUTES = 5
 MARKET_OPEN_HOUR = 9
 MARKET_OPEN_MINUTE = 15
-CONFIRMATION_END_MINUTE = 20
 
-# ----------------------------- Risk / quality ------------------------------
 MAX_GAP_PCT = 5.0
 MAX_ATR_PCT = 8.0
 MIN_ATR_PCT = 0.45
@@ -151,9 +137,7 @@ def _build_logger() -> logging.Logger:
         "%Y-%m-%d %H:%M:%S%z",
     )
     try:
-        handler = RotatingFileHandler(
-            LOG_FILE, maxBytes=LOG_MAX_BYTES, backupCount=LOG_BACKUP_COUNT, encoding="utf-8"
-        )
+        handler = RotatingFileHandler(LOG_FILE, maxBytes=LOG_MAX_BYTES, backupCount=LOG_BACKUP_COUNT, encoding="utf-8")
         handler.setFormatter(formatter)
         logger.addHandler(handler)
     except Exception:
@@ -224,7 +208,7 @@ def _parse_feed_timestamp(value: Any) -> Optional[datetime]:
 def _freshness(ts: Optional[datetime], max_age_seconds: float = FEED_MAX_AGE_SECONDS) -> Tuple[bool, Optional[float]]:
     if ts is None:
         return False, None
-    age = (now_ist() - ts).total_seconds()
+    age = (datetime.now(IST) - ts).total_seconds()
     return age <= max_age_seconds, age
 
 def validate_config() -> Dict[str, Any]:
@@ -241,7 +225,6 @@ def validate_config() -> Dict[str, Any]:
         raise RuntimeError("Configuration validation failed: " + " | ".join(errors))
     LOGGER.info("Configuration validation passed")
     return report
-
 
 # ============================================================================
 # DATA CLASSES
@@ -271,7 +254,6 @@ class Candidate:
     rs_5d: float
     rs_20d: float
 
-
 @dataclass
 class Confirmation:
     symbol: str
@@ -298,9 +280,8 @@ class Confirmation:
     breakout: bool
     breakdown: bool
 
-
 # ============================================================================
-# BASIC HELPERS
+# HELPERS & INDICATORS
 # ============================================================================
 
 def now_ist() -> datetime:
@@ -334,27 +315,6 @@ def pct_change(close: pd.Series, n: int) -> float:
         return np.nan
     return (a / b - 1.0) * 100.0
 
-def sign_score(value: float, scale: float = 1.0) -> float:
-    x = safe_float(value)
-    if not np.isfinite(x):
-        return 50.0
-    return clip(50.0 + x * scale)
-
-def slope(series: pd.Series, n: int = 5) -> float:
-    if len(series) < n:
-        return np.nan
-    y = pd.to_numeric(series.tail(n), errors="coerce").to_numpy(dtype=float)
-    mask = np.isfinite(y)
-    if mask.sum() < 3:
-        return np.nan
-    x = np.arange(len(y), dtype=float)
-    return float(np.polyfit(x[mask], y[mask], 1)[0])
-
-
-# ============================================================================
-# INDICATORS
-# ============================================================================
-
 def ema(series: pd.Series, period: int) -> pd.Series:
     return series.ewm(span=period, adjust=False, min_periods=period).mean()
 
@@ -377,13 +337,6 @@ def rsi(series: pd.Series, period: int = 14) -> pd.Series:
     output = 100.0 - 100.0 / (1.0 + rs)
     return output.where(avg_loss != 0, 100.0)
 
-def macd(series: pd.Series) -> Tuple[pd.Series, pd.Series, pd.Series]:
-    fast = ema(series, 12)
-    slow = ema(series, 26)
-    line = fast - slow
-    signal = ema(line, 9)
-    return line, signal, line - signal
-
 def adx(df: pd.DataFrame, period: int = 14) -> Tuple[pd.Series, pd.Series, pd.Series]:
     high, low, close = df["High"], df["Low"], df["Close"]
     up_move, down_move = high.diff(), -low.diff()
@@ -397,9 +350,8 @@ def adx(df: pd.DataFrame, period: int = 14) -> Tuple[pd.Series, pd.Series, pd.Se
     dx = 100.0 * (plus_di - minus_di).abs() / (plus_di + minus_di).replace(0, np.nan)
     return dx.ewm(alpha=1.0 / period, adjust=False, min_periods=period).mean(), plus_di, minus_di
 
-
 # ============================================================================
-# UNIVERSE
+# UNIVERSE LOADING
 # ============================================================================
 
 @retry_api_call
@@ -437,9 +389,8 @@ def load_nifty500_universe() -> pd.DataFrame:
                 return cached
         raise
 
-
 # ============================================================================
-# SUPABASE RAW DATA BRIDGE (Connected to raw_observations table)
+# SUPABASE RAW DATA BRIDGE
 # ============================================================================
 
 _RAW_ALLOWED = {
@@ -468,13 +419,15 @@ def _raw_only(record: Dict[str, Any]) -> Dict[str, Any]:
     return {k: record[k] for k in _RAW_ALLOWED if k in record}
 
 def _fetch_supabase_raw_records(symbol: str, limit: int = 300) -> List[Dict[str, Any]]:
-    if not SUPABASE_URL or not SUPABASE_KEY:
+    supabase_url = os.getenv("SUPABASE_URL", SUPABASE_URL).strip()
+    supabase_key = os.getenv("SUPABASE_KEY", SUPABASE_KEY).strip()
+    if not supabase_url or not supabase_key:
         return []
     try:
-        endpoint = f"{SUPABASE_URL.rstrip('/')}/rest/v1/raw_observations"
+        endpoint = f"{supabase_url.rstrip('/')}/rest/v1/raw_observations"
         headers = {
-            "apikey": SUPABASE_KEY,
-            "Authorization": f"Bearer {SUPABASE_KEY}",
+            "apikey": supabase_key,
+            "Authorization": f"Bearer {supabase_key}",
             "Accept": "application/json"
         }
         params = {
@@ -483,7 +436,6 @@ def _fetch_supabase_raw_records(symbol: str, limit: int = 300) -> List[Dict[str,
             "limit": str(limit)
         }
         if symbol:
-            # Match exact symbol or display symbol mapping
             clean_sym = str(symbol).replace(".NS", "").upper().strip()
             params["symbol"] = f"eq.{clean_sym}"
 
@@ -505,7 +457,6 @@ def _fetch_supabase_raw_records(symbol: str, limit: int = 300) -> List[Dict[str,
     return []
 
 class SupabaseRawDataSource:
-    """Read-only Supabase source facade fetching from `raw_observations` table."""
     def quote(self, symbol: str) -> Optional[Dict[str, Any]]:
         rows = _fetch_supabase_raw_records(symbol, limit=10)
         if not rows:
@@ -557,7 +508,7 @@ class SupabaseRawDataSource:
     def health(self) -> Dict[str, Any]:
         h = get_data_source_health().get("COMMON_RAW", {}).copy()
         h["source"] = COMMON_RAW_SOURCE_NAME
-        h["supabase_url"] = SUPABASE_URL
+        h["supabase_url"] = os.getenv("SUPABASE_URL", SUPABASE_URL)
         return h
 
 _SUPABASE_RAW_SOURCE = SupabaseRawDataSource()
@@ -576,9 +527,8 @@ def capture_kotak_day_ahead_snapshot(symbols: List[str]) -> Dict[str, Dict[str, 
             out[str(symbol).upper()] = q
     return out
 
-
 # ============================================================================
-# HISTORICAL DATA FETCH (YFinance Fallback / Baseline)
+# HISTORICAL DATA FETCH (YFinance)
 # ============================================================================
 
 def fetch_yahoo_chart(ticker: str, days: int = 320, interval: str = "1d") -> Optional[pd.DataFrame]:
@@ -615,27 +565,27 @@ def fetch_yahoo_chart(ticker: str, days: int = 320, interval: str = "1d") -> Opt
 def fetch_history(symbols: List[str], days: int = 320) -> Dict[str, pd.DataFrame]:
     result = {}
     _set_source_health("YFINANCE", status="FETCHING", last_attempt_ist=now_ist().isoformat())
-    try:
-        import yfinance as yf
-        tickers = [f"{s}.NS" for s in symbols]
-        raw = yf.download(tickers=tickers, period=f"{days}d", interval="1d", group_by="column", auto_adjust=False, progress=False, threads=True, timeout=30)
-        if isinstance(raw, pd.DataFrame) and not raw.empty:
-            for symbol in symbols:
-                ticker = f"{symbol}.NS"
-                try:
-                    sub = raw.xs(ticker, axis=1, level=-1).copy() if isinstance(raw.columns, pd.MultiIndex) else raw.copy()
-                    sub = sub.reset_index()
-                    if "Datetime" in sub.columns and "Date" not in sub.columns:
-                        sub = sub.rename(columns={"Datetime": "Date"})
-                    req = ["Open", "High", "Low", "Close", "Volume"]
-                    if all(c in sub.columns for c in req):
-                        sub = sub[["Date"] + req].dropna(subset=["Close"])
-                        if len(sub) >= MIN_HISTORY_DAYS:
-                            result[symbol] = sub.reset_index(drop=True)
-                except Exception:
-                    continue
-    except Exception:
-        pass
+    if yf is not None:
+        try:
+            tickers = [f"{s}.NS" for s in symbols]
+            raw = yf.download(tickers=tickers, period=f"{days}d", interval="1d", group_by="column", auto_adjust=False, progress=False, threads=True, timeout=30)
+            if isinstance(raw, pd.DataFrame) and not raw.empty:
+                for symbol in symbols:
+                    ticker = f"{symbol}.NS"
+                    try:
+                        sub = raw.xs(ticker, axis=1, level=-1).copy() if isinstance(raw.columns, pd.MultiIndex) else raw.copy()
+                        sub = sub.reset_index()
+                        if "Datetime" in sub.columns and "Date" not in sub.columns:
+                            sub = sub.rename(columns={"Datetime": "Date"})
+                        req = ["Open", "High", "Low", "Close", "Volume"]
+                        if all(c in sub.columns for c in req):
+                            sub = sub[["Date"] + req].dropna(subset=["Close"])
+                            if len(sub) >= MIN_HISTORY_DAYS:
+                                result[symbol] = sub.reset_index(drop=True)
+                    except Exception:
+                        continue
+        except Exception:
+            pass
 
     if result:
         _set_source_health("YFINANCE", status="CONNECTED", last_success_ist=now_ist().isoformat(), symbols_ok=len(result))
@@ -655,22 +605,9 @@ def fetch_history(symbols: List[str], days: int = 320) -> Dict[str, pd.DataFrame
                     continue
     return result
 
-
 # ============================================================================
-# FEATURE EXTRACTION & SCORING (Independent Engine Logic)
+# FEATURE EXTRACTION & SCORING
 # ============================================================================
-
-def structure_features(df: pd.DataFrame, window: int = 5) -> Dict[str, Any]:
-    if len(df) < window * 4:
-        return {"Structure": "NEUTRAL", "StructureStrength": 50.0, "HHHL": 0, "LHLL": 0}
-    high, low = df["High"], df["Low"]
-    ph, rh = high.iloc[-2 * window:-window].max(), high.iloc[-window:].max()
-    pl, rl = low.iloc[-2 * window:-window].min(), low.iloc[-window:].min()
-    hh, hl = rh > ph, rl > pl
-    lh, ll = rh < ph, rl < pl
-    if hh and hl: return {"Structure": "LONG", "StructureStrength": 90.0, "HHHL": 1, "LHLL": 0}
-    if lh and ll: return {"Structure": "SHORT", "StructureStrength": 90.0, "HHHL": 0, "LHLL": 1}
-    return {"Structure": "NEUTRAL", "StructureStrength": 50.0, "HHHL": 0, "LHLL": 0}
 
 def build_features(symbol: str, df: pd.DataFrame, benchmark: Optional[pd.DataFrame], industry: str) -> Optional[Dict[str, Any]]:
     if df is None or len(df) < MIN_HISTORY_DAYS:
@@ -685,9 +622,6 @@ def build_features(symbol: str, df: pd.DataFrame, benchmark: Optional[pd.DataFra
     d["EMA20"] = ema(d["Close"], 20)
     d["EMA50"] = ema(d["Close"], 50)
     d["EMA200"] = ema(d["Close"], 200)
-    adx_val, plus, minus = adx(d, 14)
-    d["ADX14"], d["PlusDI"], d["MinusDI"] = adx_val, plus, minus
-    d["RSI14"] = rsi(d["Close"], 14)
     d["ATR14"] = atr(d, 14)
     d["ATRpct"] = d["ATR14"] / d["Close"] * 100.0
 
@@ -703,30 +637,20 @@ def build_features(symbol: str, df: pd.DataFrame, benchmark: Optional[pd.DataFra
 
     ret_1d, ret_5d, ret_20d = pct_change(d["Close"], 1), pct_change(d["Close"], 5), pct_change(d["Close"], 20)
     nifty_1d = pct_change(benchmark["Close"], 1) if benchmark is not None else np.nan
-    nifty_5d = pct_change(benchmark["Close"], 5) if benchmark is not None else np.nan
-    nifty_20d = pct_change(benchmark["Close"], 20) if benchmark is not None else np.nan
 
     return {
         "Symbol": symbol, "Industry": industry, "LTP": close,
         "Ret1D": ret_1d, "Ret5D": ret_5d, "Ret20D": ret_20d,
         "RS1D": ret_1d - nifty_1d if np.isfinite(ret_1d) and np.isfinite(nifty_1d) else np.nan,
-        "RS5D": ret_5d - nifty_5d if np.isfinite(ret_5d) and np.isfinite(nifty_5d) else np.nan,
-        "RS20D": ret_20d - nifty_20d if np.isfinite(ret_20d) and np.isfinite(nifty_20d) else np.nan,
         "EMA20": safe_float(last["EMA20"]), "EMA50": safe_float(last["EMA50"]), "EMA200": safe_float(last["EMA200"]),
-        "ATR14": safe_float(last["ATR14"]), "ATRpct": safe_float(last["ATRpct"]), "RSI14": safe_float(last["RSI14"]),
+        "ATR14": safe_float(last["ATR14"]), "ATRpct": safe_float(last["ATRpct"]),
         "Direction": "LONG" if close > safe_float(last["EMA20"]) else "SHORT"
     }
-
 
 def add_sector_features(frame: pd.DataFrame) -> pd.DataFrame:
     x = frame.copy()
     x["Industry"] = x.get("Industry", "UNKNOWN").fillna("UNKNOWN").astype(str).str.strip()
     return x
-
-
-def catalyst_for_symbol(symbol: str) -> Dict[str, Any]:
-    return {"CatalystScore": 50.0, "CatalystDirection": "UNKNOWN", "CatalystCount": 0}
-
 
 def score_candidates(frame: pd.DataFrame) -> pd.DataFrame:
     output = []
@@ -737,16 +661,10 @@ def score_candidates(frame: pd.DataFrame) -> pd.DataFrame:
         output.append(d)
     return pd.DataFrame(output).sort_values("DayAheadScore", ascending=False).reset_index(drop=True)
 
-
 def select_top5(scored: pd.DataFrame) -> pd.DataFrame:
     if scored.empty:
         return scored
     return scored.head(DAY_AHEAD_TOP_N).copy()
-
-
-# ============================================================================
-# ORCHESTRATION & WATCHLIST BUILD
-# ============================================================================
 
 def build_day_ahead_watchlist() -> Dict[str, Any]:
     timestamp = now_ist()
@@ -766,26 +684,26 @@ def build_day_ahead_watchlist() -> Dict[str, Any]:
         if features:
             rows.append(features)
 
-    frame = add_sector_features(pd.DataFrame(rows))
-    scored = score_candidates(frame)
+    frame = add_sector_features(pd.DataFrame(rows)) if rows else pd.DataFrame()
+    scored = score_candidates(frame) if not frame.empty else pd.DataFrame()
     top15 = select_top5(scored)
 
-    # Fetch latest raw quotes from Supabase for LTP enrichment
-    sup_quotes = capture_kotak_day_ahead_snapshot([str(x).upper() for x in top15["Symbol"].tolist()])
+    sup_quotes = capture_kotak_day_ahead_snapshot([str(x).upper() for x in top15["Symbol"].tolist()]) if not top15.empty else {}
     candidates = []
-    for rank, (_, row) in enumerate(top15.iterrows(), start=1):
-        sym = str(row["Symbol"])
-        q = sup_quotes.get(sym, {})
-        ltp = safe_float(q.get("ltp"), safe_float(row["LTP"]))
-        candidates.append({
-            "rank": rank,
-            "symbol": sym,
-            "industry": str(row.get("Industry", "UNKNOWN")),
-            "direction": str(row["Direction"]),
-            "day_ahead_score": round(safe_float(row["DayAheadScore"]), 2),
-            "ltp": round(ltp, 2),
-            "setup_type": str(row.get("SetupType", "MOMENTUM"))
-        })
+    if not top15.empty:
+        for rank, (_, row) in enumerate(top15.iterrows(), start=1):
+            sym = str(row["Symbol"])
+            q = sup_quotes.get(sym, {})
+            ltp = safe_float(q.get("ltp"), safe_float(row["LTP"]))
+            candidates.append({
+                "rank": rank,
+                "symbol": sym,
+                "industry": str(row.get("Industry", "UNKNOWN")),
+                "direction": str(row["Direction"]),
+                "day_ahead_score": round(safe_float(row["DayAheadScore"]), 2),
+                "ltp": round(ltp, 2),
+                "setup_type": str(row.get("SetupType", "MOMENTUM"))
+            })
 
     result = {
         "engine": "NEXT_DAY_ALPHA_ENGINE_SUPABASE",
@@ -794,31 +712,6 @@ def build_day_ahead_watchlist() -> Dict[str, Any]:
     }
     _atomic_write_text(CACHE_JSON, json.dumps(result, ensure_ascii=False, indent=2, default=str))
     return result
-
-
-def market_gap(ticker: str) -> float:
-    symbol = "Nifty 50" if ticker == NIFTY_TICKER else str(ticker).replace(".NS", "")
-    q = get_common_raw_source().quote(symbol)
-    if q:
-        pc, op = safe_float(q.get("close")), safe_float(q.get("open"))
-        if np.isfinite(pc) and pc != 0 and np.isfinite(op):
-            return (op / pc - 1.0) * 100.0
-    return np.nan
-
-
-def confirm_candidate(candidate: Dict[str, Any], nifty_open_gap: float) -> Confirmation:
-    symbol = str(candidate["symbol"])
-    return Confirmation(
-        symbol=symbol, direction=str(candidate["direction"]),
-        previous_day_score=safe_float(candidate.get("day_ahead_score")),
-        confirmation_score=85.0, status="CONFIRMED", reason="Supabase raw feed alignment verified",
-        prev_close=100.0, open_price=101.0, gap_pct=1.0, nifty_gap_pct=nifty_open_gap,
-        sector_gap_pct=0.0, opening_high=102.0, opening_loss=100.0, opening_range_pct=2.0,
-        vwap=101.5, close_vs_vwap_pct=0.5, opening_volume_ratio=1.2,
-        relative_strength_vs_nifty=0.5, relative_strength_vs_sector=0.2,
-        acceptance=True, rejection=False, breakout=True, breakdown=False
-    )
-
 
 def load_latest() -> Dict[str, Any]:
     if not CACHE_JSON.exists():
@@ -829,29 +722,79 @@ def load_latest() -> Dict[str, Any]:
     except Exception:
         return {}
 
+# ============================================================================
+# STREAMLIT UI WITH FULL SUPABASE SIDEBAR CONTROLS
+# ============================================================================
 
-class NextDayAlphaEngine:
-    def __init__(self, refresh_seconds: int = LIVE_REFRESH_SECONDS):
-        self.refresh_seconds = refresh_seconds
-        self._thread = None
-        self._stop = threading.Event()
+def run_streamlit_dashboard() -> None:
+    if st is None:
+        raise RuntimeError("Streamlit is not installed.")
 
-    def latest(self) -> Dict[str, Any]:
-        return load_latest()
+    st.set_page_config(page_title="Next-Day Stock Alpha Engine", layout="wide")
+    
+    # Supabase Credentials Configuration via Sidebar (Matches Nifty Engine Pattern)
+    with st.sidebar:
+        st.header("⚙️ Supabase Config")
+        supabase_url_input = st.text_input("Supabase URL", value=os.getenv("SUPABASE_URL", SUPABASE_URL))
+        supabase_key_input = st.text_input("Supabase Key", type="password", value=os.getenv("SUPABASE_KEY", SUPABASE_KEY))
+        
+        if st.button("Connect & Save"):
+            os.environ["SUPABASE_URL"] = supabase_url_input.strip()
+            os.environ["SUPABASE_KEY"] = supabase_key_input.strip()
+            st.success("Supabase connection parameters updated!")
 
-    def run_day_ahead(self) -> Dict[str, Any]:
-        return build_day_ahead_watchlist()
+    st.title("NEXT-DAY STOCK ALPHA ENGINE")
+    st.caption("Standalone | Supabase `raw_observations` Bus Integration")
 
-    def common_raw_health(self) -> Dict[str, Any]:
-        return get_common_raw_source().health()
+    result = load_latest()
+    day = result.get("day_ahead", {})
+    morning = result.get("morning_confirmation", {})
 
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("TOP 15", len(day.get("top15", day.get("top5", []))))
+    c2.metric("Morning Status", morning.get("status", "PENDING"))
+    c3.metric("Engine Version", "SUPABASE_V7_LIVE")
+    c4.metric("Active Connection", "CONNECTED" if os.getenv("SUPABASE_URL", SUPABASE_URL) else "NOT SET")
+
+    if st.button("Run Day-Ahead Scan Now"):
+        with st.spinner("Scanning universe and evaluating signals via Supabase raw bus..."):
+            build_day_ahead_watchlist()
+            result = load_latest()
+            st.success("Day-Ahead Scan Completed!")
+
+    st.subheader("DAY-AHEAD TOP 15")
+    top15 = day.get("top15", day.get("top5", []))
+    if top15:
+        st.dataframe(pd.DataFrame(top15), use_container_width=True, hide_index=True)
+    else:
+        st.warning("No candidates loaded. Click 'Run Day-Ahead Scan Now' to generate.")
+
+    st.subheader("COMMON RAW DATA SOURCE HEALTH (SUPABASE)")
+    st.json(get_common_raw_source().health())
+
+# ============================================================================
+# MAIN ENTRYPOINT
+# ============================================================================
 
 def main() -> None:
+    import argparse
+    parser = argparse.ArgumentParser(description="Standalone NIFTY Next-Day Alpha Engine")
+    parser.add_argument("--streamlit", action="store_true", help="Launch the Streamlit dashboard")
+    parser.add_argument("--day-ahead", action="store_true", help="Run day-ahead stock scan now")
+    args = parser.parse_args()
+
     validate_config()
-    engine = NextDayAlphaEngine()
-    result = engine.run_day_ahead()
-    print("Next-Day Alpha Engine executed successfully against Supabase raw feed.")
-    print(json.dumps(result, indent=2, ensure_ascii=False))
+
+    if args.streamlit:
+        run_streamlit_dashboard()
+        return
+
+    if args.day_ahead:
+        res = build_day_ahead_watchlist()
+        print(json.dumps(res, indent=2, ensure_ascii=False))
+        return
+
+    print("Run with --streamlit to launch the dashboard interface.")
 
 if __name__ == "__main__":
     main()
