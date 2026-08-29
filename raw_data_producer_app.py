@@ -19,6 +19,7 @@ import hashlib
 import struct
 import csv
 import io
+import zipfile
 from datetime import datetime, timezone, date
 from pathlib import Path
 from typing import Dict, List, Any, Optional, Tuple
@@ -225,21 +226,54 @@ def _scrip_master_urls(response: Any) -> List[str]:
         add(response.get("url"))
         add(response.get("nse_fo"))
         add(response.get("NSE_FO"))
+        add(response.get("data"))
     return urls
 
 
 def _extract_nfo_csv_payload(response: Any) -> List[Dict[str, Any]]:
-    """Parse an already-returned CSV or JSON-envelope payload."""
-    if isinstance(response, str):
-        return _csv_text_to_records(response)
-    if isinstance(response, dict):
-        for key in ("nse", "NSE", "nse_fo", "NSE_FO"):
+    """Parse an already-returned CSV, ZIP archive bytes, or JSON-envelope payload."""
+    if response is None:
+        return []
+
+    raw_bytes = None
+    if hasattr(response, "content") and hasattr(response, "text"):
+        raw_bytes = response.content
+        text_value = response.text
+    elif isinstance(response, bytes):
+        raw_bytes = response
+        try:
+            text_value = response.decode("utf-8", errors="ignore")
+        except Exception:
+            text_value = ""
+    elif isinstance(response, str):
+        text_value = response
+        raw_bytes = response.encode("utf-8", errors="ignore")
+    elif isinstance(response, dict):
+        for key in ("nse", "NSE", "nse_fo", "NSE_FO", "data", "file"):
             value = response.get(key)
-            if isinstance(value, str):
-                parsed = _csv_text_to_records(value)
+            if value is not None:
+                parsed = _extract_nfo_csv_payload(value)
                 if parsed:
                     return parsed
-    return []
+        return []
+    else:
+        return []
+
+    # Handle ZIP archives frequently returned by broker scrip master endpoints
+    if raw_bytes and raw_bytes.startswith(b"PK\x03\x04"):
+        try:
+            with zipfile.ZipFile(io.BytesIO(raw_bytes)) as z:
+                for filename in z.namelist():
+                    if filename.endswith(".csv"):
+                        with z.open(filename) as f:
+                            csv_text = f.read().decode("utf-8", errors="ignore")
+                            parsed = _csv_text_to_records(csv_text)
+                            if parsed:
+                                return parsed
+        except Exception:
+            pass
+
+    return _csv_text_to_records(text_value)
 
 
 def extract_records(response: Any) -> List[Dict[str, Any]]:
@@ -319,7 +353,6 @@ class KotakConnector:
 
         records: List[Dict[str, Any]] = []
 
-        # Try multiple variations of search_scrip parameters for broad compatibility across neo_api_client versions
         search_attempts = [
             {"exchange_segment": "nse_fo", "symbol": "NIFTY"},
             {"exchange_segment": "nse_fo", "scrip": "NIFTY"},
@@ -344,7 +377,6 @@ class KotakConnector:
             self.log(f"Total raw NFO scrip records retrieved: {len(records)}")
             return records
 
-        # Fallback to scrip_master method across supported exchange segments
         for seg in ("nse_fo", "NFO", "NSE_FO"):
             try:
                 master_response = self.client.scrip_master(exchange_segment=seg)
@@ -360,19 +392,14 @@ class KotakConnector:
                         response = requests.get(
                             url,
                             headers={
-                                "Accept": "text/csv,application/json,*/*",
+                                "Accept": "text/csv,application/json,application/zip,*/*",
                                 "Authorization": self.consumer_key,
                             },
                             timeout=25,
                         )
                         if response.status_code >= 400:
                             continue
-                        parsed = _extract_nfo_csv_payload(response.text)
-                        if not parsed:
-                            try:
-                                parsed = _extract_nfo_csv_payload(response.json())
-                            except Exception:
-                                pass
+                        parsed = _extract_nfo_csv_payload(response)
                         if parsed:
                             self.nfo_records = parsed
                             self.log(f"NFO scrip-master URL downloaded and parsed: {len(parsed)} records")
