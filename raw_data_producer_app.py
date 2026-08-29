@@ -834,8 +834,11 @@ class YahooConnector:
             "progress": False,
             "auto_adjust": False,
             "threads": False,
-            "start": start.to_pydatetime(),
-            "end": end.to_pydatetime(),
+            # now_ist() already returns a timezone-aware Python datetime.
+            # Do not call .to_pydatetime(): that method belongs to pandas
+            # Timestamp/DatetimeIndex objects, not Python datetime objects.
+            "start": start,
+            "end": end,
         }
         return cls._clean_downloaded_frame(yf.download(ticker, **kwargs))
 
