@@ -709,7 +709,7 @@ class SupabasePublisher:
             return 0
         total = 0
         endpoint = f"{self.url.rstrip('/')}/rest/v1/raw_observations"
-        batch_size = max(1, int(CONFIG["history_batch_size"]))
+        batch_size = max(1, int(CONFIG["live_batch_size"]))
         for i in range(0, len(raw_payloads), batch_size):
             batch = raw_payloads[i:i + batch_size]
             records = []
