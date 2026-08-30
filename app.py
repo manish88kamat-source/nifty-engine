@@ -1000,13 +1000,7 @@ class FeatureEngine:
             self.volume_history.append(volume)
         self.vwap_pv += typical * max(volume, 0.0)
         self.vwap_vol += max(volume, 0.0)
-        # Never use the current Future price/typical price as a fake VWAP.
-        # If this bar has no usable volume, use an observed broker VWAP (if
-        # the adapter attached one); otherwise keep VWAP unavailable.
-        if self.vwap_vol > 0:
-            fut_vwap = self.vwap_pv / self.vwap_vol
-        else:
-            fut_vwap = safe_float(getattr(candle, "observed_fut_vwap", np.nan), np.nan)
+        fut_vwap = self.vwap_pv / self.vwap_vol if self.vwap_vol > 0 else typical
 
         if prev:
             pc = prev[-1].fut_c
@@ -1114,14 +1108,6 @@ class FeatureEngine:
         or_res = self.or_eng.features(candle, atr if is_valid_number(atr) else 0.0)
         sess_res = self.sess.features(candle, atr if is_valid_number(atr) else 0.0)
         basket_input = {**advanced_res, **st_res, **hm_res, **ha_res, **pcr_features, **hw_res, **or_res, **sess_res,
-                        # Explicit CE/PE reference channel: NIFTY 50 Spot only.
-                        "spot_c": candle.spot_c,
-                        "spot_location_evidence": 0.0,
-                        "spot_momentum_evidence": 0.0,
-                        "spot_rsi_14": spot_tactical.get("spot_rsi_14", np.nan),
-                        "spot_macd_hist": spot_tactical.get("spot_macd_hist", np.nan),
-                        "spot_slope_3": spot_tactical.get("spot_slope_3", np.nan),
-                        "spot_bos_signal": spot_tactical.get("spot_bos_signal", 0),
                         "kalman_stretch": kalman_stretch, "stretch_slope_3": stretch_slope,
                         "order_book_imbalance": obi, "oi_long_buildup": oi_long_buildup,
                         "oi_short_buildup": oi_short_buildup, "twc": hw_res.get("twc",0.0),
@@ -1133,14 +1119,6 @@ class FeatureEngine:
         reasoning_input = {**basket_input, "data_quality_score": float(max(0.0, 1.0 - penalty)),
                            "prev_high": self.sess.prev_high, "prev_low": self.sess.prev_low}
         reasoning_res = self.reasoning.compute(candle, prev, reasoning_input)
-        basket_input["spot_location_evidence"] = float(np.clip(
-            0.35 * (safe_int(reasoning_res.get("demand_liquidity_sweep", 0)) -
-                    safe_int(reasoning_res.get("supply_liquidity_sweep", 0))) +
-            0.25 * (safe_int(reasoning_res.get("demand_reclaim", 0)) -
-                    safe_int(reasoning_res.get("supply_rejection", 0))) +
-            0.20 * safe_int(reasoning_res.get("bos_signal", 0)) +
-            0.20 * safe_int(spot_tactical.get("spot_bos_signal", 0)), -1.0, 1.0
-        ))
 
         # Explicit causal aliases for the V9/V10 state machine. The underlying
         # reasoning engine already computes these SMC events; older layers were
@@ -1214,10 +1192,7 @@ class FeatureEngine:
             **hw_res,
             "dispersion_10": safe_float(hw_res.get("dispersion_index"), 0.0),
             "volume_zscore": volume_zscore,
-            "spot_c": candle.spot_c,
             **spot_tactical,
-            "spot_location_evidence": basket_input.get("spot_location_evidence", 0.0),
-            "spot_momentum_evidence": basket_input.get("spot_momentum_evidence", 0.0),
             "atm_iv": atm_iv_obs,
             "iv_change": iv_change,
             **or_res,
@@ -2885,7 +2860,7 @@ class KotakNeoAdapter:
                 vals = [v for v in vals if is_valid_number(v)]
                 return ticks, vals
 
-            _, spot_prices = _prices("Nifty 50")
+            _, spot_prices = _prices(self.spot_token) if self.spot_token else ([], [])
             if not spot_prices:
                 last = extract_tick_price(self.latest.get("Nifty 50", {}))
                 if is_valid_number(last) and last > 1000:
@@ -3019,19 +2994,7 @@ class KotakNeoAdapter:
                 fut_o=fut_o, fut_h=fut_h, fut_l=fut_l, fut_c=fut_c, fut_volume=fut_vol, fut_oi=fut_oi,
                 heavy=hw_snap, option_chain=pcr_chain, l2_depth=l2_snap
             )
-            # Carry a real broker/session VWAP into FeatureEngine when volume
-            # deltas are unavailable (for example outside market hours).
-            _fut_vwap_observed = extract_quote_field(
-                self.latest.get(str(self.future_token), {}),
-                ("vwap", "avp", "averagePrice", "average_price", "a")
-            )
-            if not is_valid_number(_fut_vwap_observed):
-                _fut_vwap_observed = extract_quote_field(
-                    (fut_ticks[-1] if fut_ticks else {}),
-                    ("vwap", "avp", "averagePrice", "average_price", "a")
-                )
-            candle.observed_fut_vwap = _fut_vwap_observed
-
+            
             feats = self.feature_engine.compute(candle, self.candles_3m)
             atr_v = safe_float(feats.get("atr_14_prev"), 15.0)
 
@@ -3228,13 +3191,6 @@ def run_unit_tests() -> bool:
     est, vel = kf.update(24050.0)
     assert is_valid_number(est)
     assert not is_valid_number(extract_tick_price({"iv":0.25}))
-    # VWAP must never silently become the current Future price when volume is absent.
-    _fe = FeatureEngine(maxlen=20)
-    _cv = Candle3Min(now_ist().replace(hour=11, minute=30), 24100, 24120, 24080, 24110, 24320, 24340, 24300, 24330, np.nan, 1000)
-    _cv.observed_fut_vwap = 24313.85
-    _ff = _fe.compute(_cv, deque())
-    assert is_valid_number(_ff["fut_vwap"]) and abs(_ff["fut_vwap"] - 24313.85) < 1e-9
-
     # Critical option-mapping invariant: Spot, never Future, determines ATM.
     assert KotakNeoAdapter._spot_atm_strike(24175.65, 50.0) == 24200.0
     assert KotakNeoAdapter._spot_atm_strike(24341.90, 50.0) == 24350.0
@@ -3264,10 +3220,341 @@ def run_unit_tests() -> bool:
     return True
 
 
+class SupabaseRawBusAdapter(KotakNeoAdapter):
+    """
+    NIFTY consumer ingress lock.
+
+    Kotak credentials/authentication stay ONLY in the Raw Producer.
+    This engine consumes raw observations from Supabase and never calls
+    Kotak for market data, instrument discovery, futures, or options.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.client = None
+        self.connected = False
+        self.conn_state = "DISCONNECTED"
+        self._supabase_url = env_or_secret("SUPABASE_URL")
+        self._supabase_key = env_or_secret("SUPABASE_KEY")
+        self._raw_cursor = None
+        self._raw_cursor_iso = None
+        self._bus_consumed = 0
+        self._historical_loaded = False
+        self.spot_token = ""
+        self.future_token = ""
+        self.future_symbol = ""
+        self.future_expiry = None
+        self.pcr_tokens = []
+        self.pcr_records = {}
+        self.active_pcr_expiry = None
+        self.heavy_tokens = {}
+        self.token_to_symbol = {}
+        self.discovery_log = []
+
+    def _headers(self):
+        return {
+            "apikey": self._supabase_key,
+            "Authorization": f"Bearer {self._supabase_key}",
+            "Accept": "application/json",
+        } if self._supabase_key else {}
+
+    def _ensure_bus(self):
+        self._supabase_url = env_or_secret("SUPABASE_URL")
+        self._supabase_key = env_or_secret("SUPABASE_KEY")
+        if not self._supabase_url or not self._supabase_key:
+            raise RuntimeError("SUPABASE_URL / SUPABASE_KEY are required for NIFTY raw-bus consumption.")
+
+    @staticmethod
+    def _raw_payload(row):
+        payload = row.get("raw") if isinstance(row, dict) else None
+        return payload if isinstance(payload, dict) else {}
+
+    @staticmethod
+    def _live_symbol(row):
+        return str(row.get("symbol", "") if isinstance(row, dict) else "").upper().strip()
+
+    @staticmethod
+    def _live_token(row):
+        return str(row.get("instrument_token", "") if isinstance(row, dict) else "").strip()
+
+    @staticmethod
+    def _live_event_time(row):
+        payload = SupabaseRawBusAdapter._raw_payload(row)
+        return parse_tick_timestamp(payload) if payload else None
+
+    def _query(self, params):
+        self._ensure_bus()
+        endpoint = f"{self._supabase_url.rstrip('/')}/rest/v1/raw_observations"
+        response = requests.get(
+            endpoint, headers=self._headers(), params=params,
+            timeout=float(CONFIG.get("supabase_timeout_sec", 10)),
+        )
+        if response.status_code != 200:
+            raise RuntimeError(f"Supabase RAW BUS query failed [{response.status_code}]: {response.text[:300]}")
+        data = response.json()
+        return data if isinstance(data, list) else []
+
+    def _latest_live_rows(self, limit=None):
+        return self._query({
+            "select": "id,source,symbol,instrument_token,observation_timestamp,raw",
+            "source": "eq.kotak_live",
+            "order": "observation_timestamp.desc,id.desc",
+            "limit": str(limit or max(500, int(os.getenv("NIFTY_SUPABASE_POLL_BATCH", "500")))),
+        })
+
+    def _query_live_rows(self):
+        params = {
+            "select": "id,source,symbol,instrument_token,observation_timestamp,raw",
+            "source": "eq.kotak_live",
+            "order": "observation_timestamp.asc,id.asc",
+            "limit": str(max(100, int(os.getenv("NIFTY_SUPABASE_POLL_BATCH", "500")))),
+        }
+        if self._raw_cursor_iso and self._raw_cursor is not None:
+            params["or"] = (
+                f"(observation_timestamp.gt.{self._raw_cursor_iso},"
+                f"and(observation_timestamp.eq.{self._raw_cursor_iso},id.gt.{self._raw_cursor}))"
+            )
+        return self._query(params)
+
+    def _load_historical_warmup(self):
+        if self._historical_loaded:
+            return
+        try:
+            rows = self._query({
+                "select": "id,source,symbol,instrument_token,observation_timestamp,raw",
+                "source": "eq.yahoo_historical",
+                "symbol": "eq.NIFTY_SPOT",
+                "order": "observation_timestamp.desc,id.desc",
+                "limit": str(max(30, CONFIG["sma_period"] + CONFIG["atr_period"] + 5)),
+            })
+            ordered = []
+            for row in reversed(rows):
+                payload = self._raw_payload(row)
+                if str(payload.get("dataset", "")) != "nifty_spot_daily":
+                    continue
+                if str(payload.get("timeframe", "")) != "1d":
+                    continue
+                close = safe_float(payload.get("close"))
+                high = safe_float(payload.get("high"))
+                low = safe_float(payload.get("low"))
+                if is_valid_number(close):
+                    ordered.append((close, high, low))
+            closes = [x[0] for x in ordered]
+            trs = []
+            prev_close = None
+            for close, high, low in ordered:
+                if not (is_valid_number(high) and is_valid_number(low)):
+                    continue
+                tr = (high - low) if prev_close is None else max(high-low, abs(high-prev_close), abs(low-prev_close))
+                if is_valid_number(tr):
+                    trs.append(float(tr))
+                prev_close = close
+            self.feature_engine.preload_warmup(closes, trs)
+            if ordered:
+                self.feature_engine.set_previous_day(*ordered[-1])
+            self._historical_loaded = True
+        except Exception as exc:
+            self.last_error = f"Historical RAW BUS warmup unavailable: {exc}"
+
+    def login(self, live_totp_override=""):
+        self._ensure_bus()
+        self.connected = True
+        self.client = object()
+        self.conn_state = "CONNECTED (SUPABASE RAW BUS)"
+        self._load_historical_warmup()
+        self.last_error = ""
+        return True
+
+    def resolve_current_nifty_future_token(self) -> str:
+        try:
+            rows = self._latest_live_rows()
+            today = now_ist().date()
+            candidates = []
+            for row in rows:
+                sym = self._live_symbol(row)
+                tok = self._live_token(row)
+                if not sym.startswith("NIFTY") or "FUT" not in sym:
+                    continue
+                if any(x in sym for x in ("NXT", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX", "BANKEX")):
+                    continue
+                exp = expiry_from_record(self._raw_payload(row))
+                if exp is not None and exp.date() < today:
+                    continue
+                if tok:
+                    candidates.append((exp.date() if exp else date.max, tok, sym, exp))
+            if not candidates:
+                self.future_token = ""
+                self.future_symbol = ""
+                self.future_expiry = None
+                self.discovery_log.append("WARNING Active NIFTY FUTURE not present in Supabase RAW BUS")
+                return ""
+            candidates.sort(key=lambda x: (x[0], x[2]))
+            exp_date, tok, sym, exp = candidates[0]
+            self.future_token = str(tok)
+            self.future_symbol = sym
+            self.future_expiry = exp
+            self.discovery_log.append(f"OK Active Future from RAW BUS: {sym} | Token: {tok} | Expiry: {exp_date if exp else 'UNKNOWN'}")
+            return self.future_token
+        except Exception as exc:
+            self.last_error = f"RAW BUS future resolution error: {exc}"
+            return ""
+
+    def discover_nifty_instruments(self, auto_pcr=True):
+        if not self.connected:
+            raise RuntimeError("Supabase raw bus not connected.")
+        rows = self._latest_live_rows()
+        self.discovery_log.clear()
+        self.token_to_symbol = {}
+
+        # Exact NIFTY index row is the ONLY Spot identity.
+        self.spot_token = ""
+        for row in rows:
+            sym = self._live_symbol(row)
+            tok = self._live_token(row)
+            if sym in ("NIFTY 50", "NIFTY50") and tok:
+                self.spot_token = tok
+                self.token_to_symbol[tok] = "NIFTY_SPOT"
+                break
+        if self.spot_token:
+            self.discovery_log.append(f"OK Spot from RAW BUS: NIFTY 50 | Token: {self.spot_token}")
+        else:
+            self.discovery_log.append("WARNING Exact NIFTY 50 Spot row not found in RAW BUS")
+
+        self.future_token = self.resolve_current_nifty_future_token()
+        if self.future_token:
+            self.token_to_symbol[self.future_token] = "NIFTY_FUT"
+
+        # Heavyweight tokens are also taken from authoritative RAW rows when present.
+        wanted = set(HEAVYWEIGHTS_ALL)
+        self.heavy_tokens = {}
+        for row in rows:
+            sym = self._live_symbol(row).replace("-EQ", "").replace(" EQ", "")
+            tok = self._live_token(row)
+            if sym in wanted and tok:
+                self.heavy_tokens[sym] = tok
+        for sym, tok in NSE_CASH_TOKENS.items():
+            self.heavy_tokens.setdefault(sym, tok)
+        self.discovery_log.append(f"OK Heavyweight mappings: {len(self.heavy_tokens)}")
+
+        if auto_pcr:
+            self.discover_pcr_chain()
+        return True
+
+    def discover_pcr_chain(self, center_strike=None):
+        try:
+            rows = self._latest_live_rows(limit=max(1000, int(os.getenv("NIFTY_SUPABASE_POLL_BATCH", "500"))*2))
+            spot = safe_float(center_strike, np.nan) if center_strike is not None else np.nan
+            if not is_valid_number(spot) or spot <= 0:
+                for row in rows:
+                    if self._live_symbol(row) in ("NIFTY 50", "NIFTY50"):
+                        spot = extract_tick_price(self._raw_payload(row))
+                        if is_valid_number(spot) and spot > 1000:
+                            break
+            if not is_valid_number(spot) or spot <= 0:
+                self.pcr_tokens, self.pcr_records = [], {}
+                self.discovery_log.append("WARNING Spot unavailable; PCR mapping skipped")
+                return 0
+
+            parsed = []
+            today = now_ist().date()
+            for row in rows:
+                sym = self._live_symbol(row)
+                tok = self._live_token(row)
+                if "NIFTY" not in sym or not (sym.endswith("CE") or sym.endswith("PE")):
+                    continue
+                if any(x in sym for x in ("NXT", "FPI", "FINNIFTY", "BANKNIFTY", "MIDCPNIFTY", "SENSEX", "BANKEX")):
+                    continue
+                payload = self._raw_payload(row)
+                exp = expiry_from_record(payload)
+                strike = strike_from_record(payload)
+                typ = option_type_from_record(payload)
+                if tok and typ in ("CE", "PE") and is_valid_number(strike) and (exp is None or exp.date() >= today):
+                    parsed.append((exp or datetime.max.replace(tzinfo=IST), float(strike), typ, tok, sym))
+            if not parsed:
+                self.pcr_tokens, self.pcr_records = [], {}
+                self.discovery_log.append("WARNING No NIFTY CE/PE contracts in RAW BUS")
+                return 0
+
+            active_exp = min(x[0] for x in parsed)
+            chosen = [x for x in parsed if x[0].date() == active_exp.date()]
+            step = float(CONFIG["pcr_strike_step"]); count = int(CONFIG["pcr_strike_count"])
+            strikes = sorted({x[1] for x in chosen})
+            atm = min(strikes, key=lambda x: abs(x-spot))
+            target = [atm + i*step for i in range(-count, count+1)]
+            local = [x for x in chosen if any(abs(x[1]-t) < 1e-6 for t in target)]
+            self.pcr_records = {str(tok): {"strike":strike,"option_type":typ,"expiry":exp,"symbol":sym} for exp,strike,typ,tok,sym in local}
+            self.pcr_tokens = list(self.pcr_records)
+            self.active_pcr_expiry = active_exp
+            self.pcr_atm_strike = float(atm)
+            self.pcr_error = ""
+            self.discovery_log.append(f"OK Options from RAW BUS: ATM={atm:.0f} | Expiry={active_exp.date()} | Contracts={len(self.pcr_tokens)}")
+            return len(self.pcr_tokens)
+        except Exception as exc:
+            self.pcr_error = f"RAW BUS PCR discovery error: {exc}"
+            self.last_error = self.pcr_error
+            return 0
+
+    def fetch_real_option_oi(self):
+        return
+
+    def fetch_market_snapshot(self):
+        if not self.connected:
+            return
+        try:
+            rows = self._query_live_rows()
+            if not rows:
+                return
+            with self.lock:
+                for row in rows:
+                    tok = self._live_token(row)
+                    if not tok:
+                        continue
+                    payload = self._raw_payload(row)
+                    item = dict(payload)
+                    item["instrument_token"] = tok
+                    item["display_symbol"] = self._live_symbol(row)
+                    item["_supabase_id"] = row.get("id")
+                    item["_parsed_ts"] = self._live_event_time(row) or now_ist()
+                    oi = self._extract_oi(item)
+                    if is_valid_number(oi):
+                        item["oi"] = oi; item["open_interest"] = oi; item["open_int"] = oi
+                    self.latest[tok] = item
+                    self.tick_buffer.append(item)
+                    self.current_bar_ticks.append(item)
+                    self._bus_consumed += 1
+                    sym = self._live_symbol(row)
+                    if sym in ("NIFTY 50", "NIFTY50") and tok == self.spot_token:
+                        self.latest["Nifty 50"] = item
+                    if tok == self.future_token:
+                        pdc = safe_float(item.get("c") or item.get("close") or item.get("pdc"))
+                        pdh = safe_float(item.get("h") or item.get("high") or item.get("pdh"))
+                        pdl = safe_float(item.get("l") or item.get("low") or item.get("pdl"))
+                        op = safe_float(item.get("o") or item.get("open"))
+                        if is_valid_number(pdc) and self.feature_engine.sess.prev_close is None:
+                            self.feature_engine.set_previous_day(pdc, pdh, pdl)
+                        if is_valid_number(op):
+                            self.feature_engine.set_today_open(op)
+                self._raw_cursor_iso = str(rows[-1].get("observation_timestamp"))
+                self._raw_cursor = rows[-1].get("id")
+                self.last_error = ""
+        except Exception as exc:
+            self.last_error = f"Supabase RAW BUS poll error: {exc}"
+
+    def subscribe_live_feed(self):
+        if not self.connected:
+            raise RuntimeError("Supabase raw bus not connected.")
+        if not self.spot_token or not self.future_token:
+            self.discover_nifty_instruments(auto_pcr=True)
+        self.fetch_market_snapshot()
+        self.conn_state = "STREAMING"
+        self._last_tick_wall = time.time()
+        return len(self.heavy_tokens) + len(self.pcr_tokens) + 2
+
+
 if st is not None:
     @st.cache_resource
     def get_global_adapter():
-        return KotakNeoAdapter()
+        return SupabaseRawBusAdapter()
 
 
 
@@ -4114,24 +4401,22 @@ def _v10_num(f, key, default=0.0):
 
 def _v10_directional_components(f):
     # Location/context
-    # Spot-only location context for CE/PE. Do not use FUT VWAP reclaim or
-    # other futures-price location as an option-side reference.
     location = (
-        0.30 * _v10_num(f, "spot_location_evidence", 0.0) +
-        0.18 * _v10_num(f, "demand_zone_signal") -
-        0.18 * _v10_num(f, "supply_zone_signal") +
-        0.14 * _v10_num(f, "liquidity_sweep_signal") +
-        0.12 * _v10_num(f, "liquidity_reclaim_signal") +
-        0.08 * _v10_num(f, "spot_bos_signal", 0.0)
+        0.28 * _v10_num(f, "v9_location_evidence") +
+        0.18 * _v10_num(f, "vwap_reclaim_signal") +
+        0.14 * _v10_num(f, "demand_zone_signal") -
+        0.14 * _v10_num(f, "supply_zone_signal") +
+        0.10 * _v10_num(f, "liquidity_sweep_signal") +
+        0.10 * _v10_num(f, "liquidity_reclaim_signal") +
+        0.06 * _v10_num(f, "fvg_signal")
     )
-    # Price/momentum for CE/PE MUST use NIFTY 50 Spot.
-    # Future-derived RSI/MACD/stretch are not allowed to decide the option side.
+    # Price/momentum
     momentum = (
-        0.28 * _v10_num(f, "spot_momentum_evidence", 0.0) +
-        0.22 * _v10_sig(_v10_num(f, "spot_rsi_14", 50.0) - 50.0, 12.0) +
-        0.18 * _v10_sig(_v10_num(f, "spot_macd_hist", 0.0), 1.0) +
-        0.17 * _v10_sig(_v10_num(f, "spot_slope_3", 0.0), 0.08) +
-        0.15 * _v10_num(f, "spot_bos_signal", 0.0)
+        0.28 * _v10_num(f, "v9_momentum_evidence") +
+        0.20 * _v10_sig(_v10_num(f, "rsi_14") - 50.0, 12.0) +
+        0.18 * _v10_sig(_v10_num(f, "macd_hist"), 1.0) +
+        0.18 * _v10_sig(_v10_num(f, "stretch_slope_3"), 0.08) +
+        0.16 * _v10_sig(_v10_num(f, "kalman_velocity"), 1.0)
     )
     # Futures / market internals
     futures_flow = (
@@ -4412,7 +4697,7 @@ def main():
     is_logged_in = adapter.connected
 
     with st.sidebar:
-        st.subheader("[LIVE] Gateway Controls")
+        st.subheader("[LIVE] Gateway Controls â€” Supabase RAW BUS")
         
         if is_logged_in:
             conn_txt = getattr(adapter, "conn_state", "AUTHENTICATED")
@@ -4423,21 +4708,19 @@ def main():
         else:
             st.markdown('<span class="status-pill status-offline">* DISCONNECTED</span>', unsafe_allow_html=True)
 
-        user_live_totp = st.text_input("Live TOTP (Optional)", type="password", help="Use if secret not in config")
-        
         col_sb1, col_sb2 = st.columns(2)
         with col_sb1:
             if st.button("Connect", key="btn_conn"):
                 try:
                     with st.spinner("Connecting..."):
-                        adapter.login(live_totp_override=user_live_totp)
+                        adapter.login()
                         st.session_state.discovered = False
                         st.rerun()
                 except Exception as exc:
                     st.error(f"{exc}")
         with col_sb2:
             if st.button("Reconnect", key="btn_reconn", disabled=not is_logged_in):
-                adapter.login(live_totp_override=user_live_totp)
+                adapter.login()
                 st.rerun()
 
         st.markdown("---")
