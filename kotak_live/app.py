@@ -1329,10 +1329,7 @@ class KotakConnector:
             f"{self.future_symbol} "
             f"(Token: {self.future_token}, "
             f"Expiry: "
-            f"{self.future_expiry.isoformat() "
-            if self.future_expiry
-            else 'UNKNOWN'}"
-            ")"
+            f"{self.future_expiry.isoformat() if self.future_expiry else 'UNKNOWN'})"
         )
 
 
@@ -2415,10 +2412,7 @@ def main():
             st.caption(
 
                 "✓ Configuration active • "
-                f"{st.session_state.get("
-                    "config_confirmed_at",
-                    ""
-                )}"
+                f"{st.session_state.get('config_confirmed_at', '')}"
 
             )
 
