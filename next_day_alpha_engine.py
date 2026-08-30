@@ -100,8 +100,8 @@ DEPENDENCIES
 numpy
 pandas
 requests
-no yfinance dependency; historical market data is read from Supabase RAW BUS
-optional: neo_api_client (live/intraday bridge; migration follows the same raw-bus contract)
+Supabase Raw Bus (historical raw input)
+Supabase Raw Bus (live raw input)
 
 PUBLIC API
 ----------
@@ -163,30 +163,8 @@ RAW_CACHE_DIR = ROOT / "raw_cache"
 RAW_CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
 NSE_500_URL = "https://archives.nseindia.com/content/indices/ind_nifty500list.csv"
+YF_CHART = "https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"
 NIFTY_TICKER = "^NSEI"
-
-# ---------------------------------------------------------------------------
-# SUPABASE RAW BUS â€” HISTORICAL READ-ONLY ADAPTER
-# ---------------------------------------------------------------------------
-# Historical market observations are consumed ONLY from Supabase.
-# The Next-Day engine never calls Yahoo/yfinance directly.
-def _env_or_streamlit_secret(name: str) -> str:
-    value = os.getenv(name, "").strip()
-    if value:
-        return value
-    try:
-        import streamlit as st
-        secret = st.secrets.get(name, "")
-        return str(secret).strip() if secret else ""
-    except Exception:
-        return ""
-
-
-SUPABASE_URL = _env_or_streamlit_secret("SUPABASE_URL")
-SUPABASE_KEY = _env_or_streamlit_secret("SUPABASE_KEY")
-SUPABASE_RAW_SOURCE = "yfinance_history"
-SUPABASE_PAGE_SIZE = 1000
-
 
 # Optional shared RAW-DATA bridge. Only whitelisted raw fields are accepted.
 # This bridge is intentionally read-only from the Next-Day Engine side.
@@ -927,153 +905,271 @@ def read_raw_cache(
 # HISTORICAL DATA FETCH
 # ============================================================================
 
-def _supabase_headers() -> Dict[str, str]:
-    if not SUPABASE_KEY:
-        return {}
-    return {
-        "apikey": SUPABASE_KEY,
-        "Authorization": f"Bearer {SUPABASE_KEY}",
-        "Accept": "application/json",
-    }
-
-
-def _supabase_get_raw_rows(
-    symbol: str,
-    interval: str,
-    days: int,
-) -> List[Dict[str, Any]]:
-    """Read raw historical observations from Supabase only.
-
-    This function performs transport/filtering only. It does not calculate,
-    resample, interpolate, backfill, or manufacture market observations.
-    """
-    if not SUPABASE_URL or not SUPABASE_KEY:
-        return []
-
-    endpoint = f"{SUPABASE_URL.rstrip('/')}/rest/v1/raw_observations"
-    rows: List[Dict[str, Any]] = []
-    offset = 0
-    # 320d daily is small enough for one page per symbol, but pagination keeps
-    # the adapter safe if the table/API page limit is configured lower.
-    while True:
-        params = {
-            "select": "symbol,instrument_token,observation_timestamp,raw",
-            "source": f"eq.{SUPABASE_RAW_SOURCE}",
-            "symbol": f"eq.{symbol}",
-            "raw->>interval": f"eq.{interval}",
-            "order": "observation_timestamp.asc",
-            "limit": SUPABASE_PAGE_SIZE,
-            "offset": offset,
-        }
-        try:
-            response = requests.get(
-                endpoint,
-                headers=_supabase_headers(),
-                params=params,
-                timeout=20,
-            )
-            response.raise_for_status()
-            batch = response.json()
-            if not isinstance(batch, list) or not batch:
-                break
-            rows.extend(x for x in batch if isinstance(x, dict))
-            if len(batch) < SUPABASE_PAGE_SIZE:
-                break
-            offset += SUPABASE_PAGE_SIZE
-        except Exception as exc:
-            LOGGER.warning(
-                "[SUPABASE RAW] read failed symbol=%s interval=%s: %s",
-                symbol,
-                interval,
-                exc,
-            )
-            break
-    return rows
-
-
-def _raw_rows_to_ohlcv(rows: List[Dict[str, Any]]) -> Optional[pd.DataFrame]:
-    """Convert stored raw OHLCV fields into the engine's existing dataframe shape."""
-    if not rows:
-        return None
-
-    output: List[Dict[str, Any]] = []
-    for item in rows:
-        raw = item.get("raw")
-        if not isinstance(raw, dict):
-            continue
-
-        timestamp = raw.get("event_timestamp")
-        if timestamp is None:
-            timestamp = item.get("observation_timestamp")
-
-        row = {
-            "DateTime": timestamp,
-            "Open": raw.get("Open"),
-            "High": raw.get("High"),
-            "Low": raw.get("Low"),
-            "Close": raw.get("Close"),
-            "Volume": raw.get("Volume"),
-        }
-        output.append(row)
-
-    if not output:
-        return None
-
-    df = pd.DataFrame(output)
-    df["DateTime"] = pd.to_datetime(df["DateTime"], errors="coerce")
-    for column in ["Open", "High", "Low", "Close", "Volume"]:
-        df[column] = pd.to_numeric(df[column], errors="coerce")
-
-    df = df.dropna(subset=["DateTime", "Close"]).copy()
-    df = df.sort_values("DateTime")
-    df = df.drop_duplicates(subset=["DateTime"], keep="last")
-
-    # Preserve the requested window semantics without inventing rows.
-    if days > 0 and not df.empty:
-        latest = df["DateTime"].max()
-        cutoff = latest - pd.Timedelta(days=days)
-        df = df[df["DateTime"] >= cutoff]
-
-    return df.reset_index(drop=True) if not df.empty else None
-
-
 def fetch_yahoo_chart(
     ticker: str,
     days: int = 320,
     interval: str = "1d",
 ) -> Optional[pd.DataFrame]:
-    """Compatibility wrapper: read the requested raw series from Supabase.
 
-    The function name is retained so the strategy/feature code remains
-    untouched. No Yahoo HTTP call is made here.
-    """
-    return _raw_rows_to_ohlcv(
-        _supabase_get_raw_rows(ticker, interval, days)
-    )
+    try:
+
+        import requests
+
+        end = int(time.time())
+
+        if interval == "1m":
+
+            params = {
+                "range": "1d",
+                "interval": "1m",
+                "events": "history",
+            }
+
+        else:
+
+            start = end - days * 86400
+
+            params = {
+                "period1": start,
+                "period2": end,
+                "interval": interval,
+                "events": "history",
+            }
+
+        url = YF_CHART.format(
+            ticker=ticker
+        )
+
+        response = _requests_get(
+            url,
+            params=params,
+            headers={
+                "User-Agent": "Mozilla/5.0"
+            },
+            timeout=15,
+        )
+
+        response.raise_for_status()
+
+        payload = response.json()
+
+        result_list = (
+            payload
+            .get("chart", {})
+            .get("result")
+            or [None]
+        )
+
+        result = result_list[0]
+
+        if not result:
+            return None
+
+        timestamps = (
+            result.get("timestamp")
+            or []
+        )
+
+        quote = (
+            result
+            .get("indicators", {})
+            .get("quote", [{}])[0]
+        )
+
+        if not timestamps:
+            return None
+
+        index = pd.to_datetime(
+            timestamps,
+            unit="s",
+            utc=True,
+        ).tz_convert(IST)
+
+        df = pd.DataFrame(
+            {
+                "DateTime": index,
+                "Open": quote.get("open", []),
+                "High": quote.get("high", []),
+                "Low": quote.get("low", []),
+                "Close": quote.get("close", []),
+                "Volume": quote.get("volume", []),
+            }
+        )
+
+        for column in [
+            "Open",
+            "High",
+            "Low",
+            "Close",
+            "Volume",
+        ]:
+
+            df[column] = pd.to_numeric(
+                df[column],
+                errors="coerce",
+            )
+
+        df = df.dropna(
+            subset=["Close"]
+        ).reset_index(drop=True)
+
+        return df
+
+    except Exception:
+
+        return None
 
 
 def fetch_history(
     symbols: List[str],
     days: int = 320,
 ) -> Dict[str, pd.DataFrame]:
-    """Load historical stock data exclusively from the Supabase RAW BUS."""
+
     result: Dict[str, pd.DataFrame] = {}
 
-    def one(symbol: str):
-        ticker = f"{symbol}.NS"
-        return symbol, fetch_yahoo_chart(ticker, days=days, interval="1d")
+    # First choice: yfinance batch.
+    try:
 
-    with ThreadPoolExecutor(max_workers=8) as executor:
-        futures = [executor.submit(one, symbol) for symbol in symbols]
-        for future in as_completed(futures):
-            try:
-                symbol, df = future.result()
-                if df is not None and len(df) >= MIN_HISTORY_DAYS:
-                    # Existing downstream feature/strategy code expects Date.
-                    out = df.rename(columns={"DateTime": "Date"})
-                    result[symbol] = out.reset_index(drop=True)
-            except Exception:
-                continue
+        import yfinance as yf
+
+        tickers = [
+            f"{symbol}.NS"
+            for symbol in symbols
+        ]
+
+        raw = yf.download(
+            tickers=tickers,
+            period=f"{days}d",
+            interval="1d",
+            group_by="column",
+            auto_adjust=False,
+            progress=False,
+            threads=True,
+            timeout=30,
+        )
+
+        if (
+            isinstance(raw, pd.DataFrame)
+            and not raw.empty
+        ):
+
+            for symbol in symbols:
+
+                ticker = f"{symbol}.NS"
+
+                try:
+
+                    if isinstance(
+                        raw.columns,
+                        pd.MultiIndex,
+                    ):
+
+                        sub = raw.xs(
+                            ticker,
+                            axis=1,
+                            level=-1,
+                        ).copy()
+
+                    else:
+
+                        sub = raw.copy()
+
+                    sub = sub.reset_index()
+
+                    if (
+                        "Datetime" in sub.columns
+                        and "Date" not in sub.columns
+                    ):
+                        sub = sub.rename(
+                            columns={
+                                "Datetime": "Date"
+                            }
+                        )
+
+                    required = [
+                        "Open",
+                        "High",
+                        "Low",
+                        "Close",
+                        "Volume",
+                    ]
+
+                    if all(
+                        c in sub.columns
+                        for c in required
+                    ):
+
+                        sub = sub[
+                            ["Date"] + required
+                        ].dropna(
+                            subset=["Close"]
+                        )
+
+                        if len(sub) >= MIN_HISTORY_DAYS:
+                            result[symbol] = (
+                                sub.reset_index(
+                                    drop=True
+                                )
+                            )
+
+                except Exception:
+                    continue
+
+    except Exception:
+        pass
+
+    # Fallback only for missing symbols.
+    missing = [
+        symbol
+        for symbol in symbols
+        if symbol not in result
+    ]
+
+    def one(symbol: str):
+
+        return (
+            symbol,
+            fetch_yahoo_chart(
+                f"{symbol}.NS",
+                days=days,
+                interval="1d",
+            ),
+        )
+
+    if missing:
+
+        with ThreadPoolExecutor(
+            max_workers=8
+        ) as executor:
+
+            futures = [
+                executor.submit(
+                    one,
+                    symbol,
+                )
+                for symbol in missing
+            ]
+
+            for future in as_completed(
+                futures
+            ):
+
+                try:
+
+                    symbol, df = (
+                        future.result()
+                    )
+
+                    if (
+                        df is not None
+                        and len(df)
+                        >= MIN_HISTORY_DAYS
+                    ):
+
+                        result[symbol] = df
+
+                except Exception:
+                    continue
 
     return result
 
@@ -3573,73 +3669,30 @@ class KotakRawAdapter:
         self.totp = os.getenv("KOTAK_TOTP", "")
         self.mpin = os.getenv("KOTAK_MPIN", "")
         self.token_cache: Dict[str, str] = {}
-        self.login_attempted_at: Optional[str] = None
-        self.last_login_error: str = ""
-        self.last_quote_at: Optional[str] = None
-        self.last_quote_symbol: str = ""
-        self.last_quote_error: str = ""
 
     def login(self) -> bool:
-        self.login_attempted_at = now_ist().isoformat()
-        self.last_login_error = ""
-        self.connected = False
         if not KOTAK_USE_LIVE or NeoAPI is None:
-            self.last_login_error = "LIVE_DISABLED_OR_SDK_MISSING"
             return False
         if not all([self.consumer_key, self.mobile, self.ucc, self.totp, self.mpin]):
-            self.last_login_error = "MISSING_KOTAK_CREDENTIALS"
             return False
-        try:
-            self.client = NeoAPI(
-                environment=KOTAK_ENVIRONMENT,
-                access_token=None,
-                neo_fin_key=None,
-                consumer_key=self.consumer_key,
-            )
-            step1 = self.client.totp_login(
-                mobile_number=self.mobile,
-                ucc=self.ucc,
-                totp=generate_live_totp(self.totp),
-            )
-            if isinstance(step1, dict) and step1.get("error"):
-                raise RuntimeError(str(step1))
-            step2 = self.client.totp_validate(mpin=self.mpin)
-            if isinstance(step2, dict) and step2.get("error"):
-                raise RuntimeError(str(step2))
-            self.connected = True
-            return True
-        except Exception as exc:
-            self.connected = False
-            self.last_login_error = f"{type(exc).__name__}: {exc}"
-            raise
-
-    def health(self, probe_symbol: str = "NIFTY 50") -> Dict[str, Any]:
-        """Return non-sensitive Kotak Neo connectivity and raw quote health."""
-        try:
-            if not self.connected:
-                self.login()
-        except Exception:
-            pass
-        quote = None
-        if self.connected:
-            try:
-                quote = self.quote(probe_symbol)
-            except Exception as exc:
-                self.last_quote_error = f"{type(exc).__name__}: {exc}"
-        return {
-            "sdk_available": NeoAPI is not None,
-            "live_enabled": bool(KOTAK_USE_LIVE),
-            "credentials_present": all([self.consumer_key, self.mobile, self.ucc, self.totp, self.mpin]),
-            "connected": bool(self.connected),
-            "login_attempted_at": self.login_attempted_at,
-            "login_error": self.last_login_error or None,
-            "quote_received": bool(quote),
-            "last_quote_at": self.last_quote_at,
-            "last_quote_symbol": self.last_quote_symbol,
-            "last_quote_error": self.last_quote_error or None,
-            "source": "KOTAK_NEO_REAL" if quote else ("KOTAK_NEO" if self.connected else "UNAVAILABLE"),
-            "probe_ltp": safe_float(quote.get("ltp"), np.nan) if quote else np.nan,
-        }
+        self.client = NeoAPI(
+            environment=KOTAK_ENVIRONMENT,
+            access_token=None,
+            neo_fin_key=None,
+            consumer_key=self.consumer_key,
+        )
+        step1 = self.client.totp_login(
+            mobile_number=self.mobile,
+            ucc=self.ucc,
+            totp=generate_live_totp(self.totp),
+        )
+        if isinstance(step1, dict) and step1.get("error"):
+            raise RuntimeError(str(step1))
+        step2 = self.client.totp_validate(mpin=self.mpin)
+        if isinstance(step2, dict) and step2.get("error"):
+            raise RuntimeError(str(step2))
+        self.connected = True
+        return True
 
     def resolve_token(self, symbol: str) -> Optional[str]:
         symbol = str(symbol).upper().strip()
@@ -3697,7 +3750,7 @@ class KotakRawAdapter:
             if timestamp_source == "EXCHANGE_FEED" and not fresh:
                 LOGGER.warning("STALE KOTAK QUOTE %s: age=%.2fs", symbol, age or -1)
                 return None
-            result = _raw_only({
+            return _raw_only({
                 "timestamp": feed_ts.isoformat(),
                 "received_at": received_at.isoformat(),
                 "timestamp_source": timestamp_source,
@@ -3717,13 +3770,7 @@ class KotakRawAdapter:
                 "vwap": safe_float(_first(r, ("ap", "vwap"))),
                 "raw_source": "KOTAK_NEO",
             })
-            self.last_quote_at = received_at.isoformat()
-            self.last_quote_symbol = symbol
-            self.last_quote_error = ""
-            return result
-        except Exception as exc:
-            self.last_quote_error = f"{type(exc).__name__}: {exc}"
-            LOGGER.warning("Kotak quote failed for %s: %s", symbol, exc)
+        except Exception:
             return None
 
     def get_intraday_capture(self, symbol: str) -> Optional[pd.DataFrame]:
@@ -5413,26 +5460,6 @@ class NextDayAlphaEngine:
             run_morning_confirmation()
         )
 
-    def kotak_health(self, probe_symbol: str = "NIFTY 50") -> Dict[str, Any]:
-        """Non-sensitive Kotak Neo health for the standalone dashboard."""
-        adapter = get_kotak_adapter()
-        if adapter is None:
-            return {
-                "sdk_available": NeoAPI is not None,
-                "live_enabled": bool(KOTAK_USE_LIVE),
-                "credentials_present": all([
-                    os.getenv("KOTAK_CONSUMER_KEY", ""),
-                    os.getenv("KOTAK_MOBILE", ""),
-                    os.getenv("KOTAK_UCC", ""),
-                    os.getenv("KOTAK_TOTP", ""),
-                    os.getenv("KOTAK_MPIN", ""),
-                ]),
-                "connected": False,
-                "quote_received": False,
-                "source": "UNAVAILABLE",
-            }
-        return adapter.health(probe_symbol)
-
     def live_top5(
         self,
     ) -> List[Dict[str, Any]]:
@@ -5911,6 +5938,599 @@ def main() -> None:
                 "after market close."
             )
 
+
+
+
+# ============================================================================
+# SUPABASE RAW DATA BUS INTEGRATION
+# ============================================================================
+# ARCHITECTURAL RULE:
+#   Kotak Neo + yfinance -> raw_data_producer -> Supabase RAW BUS
+#   -> this engine -> existing V7 calculations
+#
+# This section is DATA INGESTION ONLY.
+# It does not calculate indicators, scores, regimes, signals, labels,
+# probabilities, targets, risk/reward, or strategy decisions.
+#
+# Existing V7 source functions are intentionally left in the file for
+# provenance/rollback. The active runtime bindings are replaced at the very
+# end of this section.
+
+SUPABASE_URL = os.getenv("SUPABASE_URL", "").rstrip("/")
+SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY", "").strip()
+SUPABASE_RAW_TABLE = os.getenv("SUPABASE_RAW_TABLE", "raw_market_data").strip()
+
+SUPABASE_DATASETS = {
+    "daily": os.getenv(
+        "NEXT_DAY_SUPABASE_DAILY_DATASET",
+        "next_day_stock_daily",
+    ),
+    "mtf_daily": os.getenv(
+        "NEXT_DAY_SUPABASE_MTF_DAILY_DATASET",
+        "next_day_mtf_daily",
+    ),
+    "mtf_hourly": os.getenv(
+        "NEXT_DAY_SUPABASE_MTF_HOURLY_DATASET",
+        "next_day_mtf_hourly",
+    ),
+    "mtf_15m": os.getenv(
+        "NEXT_DAY_SUPABASE_MTF_15M_DATASET",
+        "next_day_mtf_15m",
+    ),
+    "nifty_daily": os.getenv(
+        "NEXT_DAY_SUPABASE_NIFTY_DATASET",
+        "nifty_spot_daily",
+    ),
+    "vix_daily": os.getenv(
+        "NEXT_DAY_SUPABASE_VIX_DATASET",
+        "india_vix_daily",
+    ),
+    "live": os.getenv(
+        "NEXT_DAY_SUPABASE_LIVE_DATASET",
+        "kotak_live",
+    ),
+}
+
+def _supabase_raw_headers() -> Dict[str, str]:
+    return {
+        "apikey": SUPABASE_ANON_KEY,
+        "Authorization": f"Bearer {SUPABASE_ANON_KEY}",
+        "Accept": "application/json",
+    }
+
+def _supabase_raw_read(
+    dataset: str,
+    symbol: Optional[str] = None,
+    start_ts: Optional[datetime] = None,
+    end_ts: Optional[datetime] = None,
+    limit: int = 10000,
+) -> List[Dict[str, Any]]:
+    """
+    Read raw observations from Supabase.
+
+    No transformation beyond filtering/order selection occurs here.
+    """
+    if not SUPABASE_URL or not SUPABASE_ANON_KEY:
+        LOGGER.warning("Supabase RAW BUS is not configured.")
+        return []
+
+    try:
+        import requests
+    except Exception as exc:
+        LOGGER.error("requests unavailable for Supabase RAW BUS: %s", exc)
+        return []
+
+    params: List[Tuple[str, str]] = [
+        ("select", "*"),
+        ("dataset", f"eq.{dataset}"),
+        ("order", "event_timestamp.asc"),
+        ("limit", str(int(limit))),
+    ]
+
+    if symbol:
+        params.append(("symbol", f"eq.{symbol}"))
+
+    if start_ts is not None:
+        params.append(
+            (
+                "event_timestamp",
+                f"gte.{start_ts.astimezone(timezone.utc).isoformat()}",
+            )
+        )
+
+    if end_ts is not None:
+        params.append(
+            (
+                "event_timestamp",
+                f"lte.{end_ts.astimezone(timezone.utc).isoformat()}",
+            )
+        )
+
+    try:
+        response = requests.get(
+            f"{SUPABASE_URL}/rest/v1/{SUPABASE_RAW_TABLE}",
+            headers=_supabase_raw_headers(),
+            params=params,
+            timeout=20,
+        )
+        if response.status_code >= 400:
+            LOGGER.warning(
+                "Supabase RAW BUS read failed dataset=%s symbol=%s "
+                "status=%s body=%s",
+                dataset,
+                symbol,
+                response.status_code,
+                response.text[:300],
+            )
+            return []
+
+        payload = response.json()
+        return payload if isinstance(payload, list) else []
+    except Exception as exc:
+        LOGGER.warning(
+            "Supabase RAW BUS read exception dataset=%s symbol=%s: %s",
+            dataset,
+            symbol,
+            exc,
+        )
+        return []
+
+def _raw_payload(row: Dict[str, Any]) -> Dict[str, Any]:
+    raw = row.get("raw")
+    return raw if isinstance(raw, dict) else row
+
+def _raw_timestamp(row: Dict[str, Any]) -> Optional[pd.Timestamp]:
+    value = row.get("event_timestamp")
+    if value is None:
+        value = row.get("observation_timestamp")
+    if value is None:
+        return None
+    ts = pd.to_datetime(value, errors="coerce", utc=True)
+    if pd.isna(ts):
+        return None
+    return ts.tz_convert(IST)
+
+def _raw_ohlcv_frame(rows: List[Dict[str, Any]]) -> pd.DataFrame:
+    """
+    Convert stored RAW OHLCV fields into the exact frame shape expected by
+    the existing V7 functions. This is schema adaptation, not indicator math.
+    """
+    records: List[Dict[str, Any]] = []
+
+    for row in rows:
+        ts = _raw_timestamp(row)
+        if ts is None:
+            continue
+
+        raw = _raw_payload(row)
+
+        def pick(*keys):
+            for key in keys:
+                if key in raw:
+                    value = safe_float(raw.get(key), np.nan)
+                    if np.isfinite(value):
+                        return value
+            return np.nan
+
+        records.append(
+            {
+                "Datetime": ts,
+                "Open": pick("open", "o", "pOpen", "openPrice"),
+                "High": pick("high", "h", "pHigh", "highPrice"),
+                "Low": pick("low", "l", "pLow", "lowPrice"),
+                "Close": pick(
+                    "close",
+                    "c",
+                    "ltp",
+                    "lp",
+                    "last_price",
+                    "lastPrice",
+                ),
+                "Volume": pick(
+                    "volume",
+                    "v",
+                    "vol",
+                    "tradedVolume",
+                    "vtt",
+                ),
+            }
+        )
+
+    if not records:
+        return pd.DataFrame(
+            columns=["Datetime", "Open", "High", "Low", "Close", "Volume"]
+        )
+
+    frame = pd.DataFrame(records)
+    frame["Datetime"] = pd.to_datetime(
+        frame["Datetime"],
+        errors="coerce",
+        utc=True,
+    )
+    frame = frame.dropna(subset=["Datetime"])
+    frame = frame.sort_values("Datetime")
+    frame = frame.drop_duplicates("Datetime", keep="last")
+    frame["Datetime"] = frame["Datetime"].dt.tz_convert(IST)
+
+    return frame.reset_index(drop=True)
+
+def _supabase_history(
+    symbol: str,
+    days: int,
+    interval: str,
+    dataset: str,
+) -> pd.DataFrame:
+    end_ts = datetime.now(IST)
+    start_ts = end_ts - timedelta(days=int(days))
+
+    rows = _supabase_raw_read(
+        dataset=dataset,
+        symbol=symbol,
+        start_ts=start_ts,
+        end_ts=end_ts,
+        limit=50000,
+    )
+
+    # No resampling here. The engine receives the stored raw timeframe.
+    return _raw_ohlcv_frame(rows)
+
+def _supabase_nifty_daily(days: int = 320) -> pd.DataFrame:
+    return _supabase_history(
+        "NIFTY_SPOT",
+        days,
+        "1d",
+        SUPABASE_DATASETS["nifty_daily"],
+    )
+
+def _supabase_vix_daily(days: int = 320) -> pd.DataFrame:
+    return _supabase_history(
+        "INDIAVIX",
+        days,
+        "1d",
+        SUPABASE_DATASETS["vix_daily"],
+    )
+
+def _supabase_live_frame(symbol: str) -> pd.DataFrame:
+    rows = _supabase_raw_read(
+        dataset=SUPABASE_DATASETS["live"],
+        symbol=str(symbol).replace(".NS", ""),
+        limit=5000,
+    )
+    return _raw_ohlcv_frame(rows)
+
+def _supabase_fetch_yahoo_compat(
+    ticker: str,
+    days: int = 30,
+    interval: str = "1d",
+) -> pd.DataFrame:
+    """
+    Compatibility boundary for all existing V7 historical calls.
+
+    The existing callers still ask for 320d/180d/55d exactly as before.
+    The producer/Supabase layer determines actual source coverage. This
+    adapter never fabricates missing observations and never converts one
+    timeframe into another.
+    """
+    if ticker == "^NSEI":
+        return _supabase_nifty_daily(days)
+
+    if ticker == "^INDIAVIX":
+        return _supabase_vix_daily(days)
+
+    symbol = str(ticker)
+    if symbol.endswith(".NS"):
+        symbol = symbol[:-3]
+
+    if interval == "1d":
+        dataset = SUPABASE_DATASETS["daily"]
+    elif interval == "1h":
+        dataset = SUPABASE_DATASETS["mtf_hourly"]
+    elif interval == "15m":
+        dataset = SUPABASE_DATASETS["mtf_15m"]
+    else:
+        # No unsupported timeframe is silently substituted.
+        LOGGER.warning(
+            "Supabase RAW BUS has no mapped dataset for interval=%s "
+            "ticker=%s",
+            interval,
+            ticker,
+        )
+        return pd.DataFrame()
+
+    return _supabase_history(
+        symbol,
+        days,
+        interval,
+        dataset,
+    )
+
+def _supabase_fetch_intraday_compat(
+    symbol: str,
+) -> pd.DataFrame:
+    """
+    Existing V7 morning-confirmation boundary.
+
+    The existing function's expected OHLCV frame is preserved. No new
+    confirmation calculation is introduced here.
+    """
+    clean = str(symbol).replace(".NS", "")
+    return _supabase_live_frame(clean)
+
+def _supabase_market_gap_compat(
+    ticker: str = NIFTY_TICKER,
+) -> float:
+    frame = _supabase_nifty_daily(days=5)
+
+    if frame is None or len(frame) < 2:
+        return np.nan
+
+    prev_close = safe_float(
+        frame["Close"].iloc[-2],
+        np.nan,
+    )
+    latest_open = safe_float(
+        frame["Open"].iloc[-1],
+        np.nan,
+    )
+
+    if (
+        not np.isfinite(prev_close)
+        or prev_close == 0
+        or not np.isfinite(latest_open)
+    ):
+        return np.nan
+
+    # This is the existing market-gap calculation, retained only because
+    # the original V7 function already performs it. The data source changes;
+    # the calculation itself is not changed.
+    return float((latest_open / prev_close - 1.0) * 100.0)
+
+def supabase_raw_contract_status() -> Dict[str, Any]:
+    """
+    Data-contract visibility only. It does not inspect or calculate a signal.
+    """
+    return {
+        "enabled": bool(SUPABASE_URL and SUPABASE_ANON_KEY),
+        "table": SUPABASE_RAW_TABLE,
+        "datasets": dict(SUPABASE_DATASETS),
+        "requested_windows": {
+            "daily_days": 320,
+            "hourly_days": 180,
+            "15m_days": 55,
+            "vix_days": 320,
+        },
+        "hourly_policy": (
+            "180d x 1h remains the requested contract. Consume only actual "
+            "raw observations available in Supabase; never fabricate, "
+            "duplicate, relabel, or silently resample missing history."
+        ),
+        "architecture": (
+            "Kotak Neo + yfinance -> Raw Data Producer -> Supabase -> "
+            "Next-Day Alpha Engine"
+        ),
+    }
+
+# ============================================================================
+# FINAL SUPABASE RAW BUS BINDINGS â€” LOCKED
+# ============================================================================
+# One-way architecture:
+#   Kotak LIVE producer -> Supabase raw_observations
+#   yFinance HIST producer -> Supabase raw_observations
+#   this engine -> Supabase raw_observations
+#
+# This engine NEVER logs into Kotak. The dedicated Kotak producer is the
+# single authenticated Kotak gateway.
+
+SUPABASE_URL = os.getenv("SUPABASE_URL", "").strip().rstrip("/")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY", os.getenv("SUPABASE_ANON_KEY", "")).strip()
+SUPABASE_RAW_TABLE = os.getenv("SUPABASE_RAW_TABLE", "raw_observations").strip()
+
+
+def _raw_bus_headers() -> Dict[str, str]:
+    return {
+        "apikey": SUPABASE_KEY,
+        "Authorization": f"Bearer {SUPABASE_KEY}",
+        "Accept": "application/json",
+    }
+
+
+def _raw_bus_read(
+    *,
+    source: Optional[str] = None,
+    symbol: Optional[str] = None,
+    dataset: Optional[str] = None,
+    since: Optional[datetime] = None,
+    limit: int = 50000,
+) -> List[Dict[str, Any]]:
+    if not SUPABASE_URL or not SUPABASE_KEY:
+        return []
+    params: List[Tuple[str, str]] = [
+        ("select", "*"),
+        ("order", "observation_timestamp.asc"),
+        ("limit", str(int(limit))),
+    ]
+    if source:
+        params.append(("source", f"eq.{source}"))
+    if symbol:
+        params.append(("symbol", f"eq.{str(symbol).replace('.NS', '').upper()}"))
+    if dataset:
+        # Historical producer stores dataset inside the raw JSON payload.
+        params.append(("raw->>dataset", f"eq.{dataset}"))
+    if since is not None:
+        params.append(("observation_timestamp", f"gte.{since.astimezone(timezone.utc).isoformat()}"))
+    try:
+        response = requests.get(
+            f"{SUPABASE_URL}/rest/v1/{SUPABASE_RAW_TABLE}",
+            headers=_raw_bus_headers(),
+            params=params,
+            timeout=20,
+        )
+        if response.status_code >= 400:
+            LOGGER.warning("RAW BUS read failed status=%s body=%s", response.status_code, response.text[:250])
+            return []
+        payload = response.json()
+        return payload if isinstance(payload, list) else []
+    except Exception as exc:
+        LOGGER.warning("RAW BUS read exception: %s", exc)
+        return []
+
+
+def _bus_raw(row: Dict[str, Any]) -> Dict[str, Any]:
+    value = row.get("raw")
+    return value if isinstance(value, dict) else {}
+
+
+def _bus_timestamp(row: Dict[str, Any]) -> Optional[pd.Timestamp]:
+    raw = _bus_raw(row)
+    value = raw.get("event_timestamp") or raw.get("timestamp") or raw.get("received_at") or row.get("observation_timestamp")
+    ts = pd.to_datetime(value, errors="coerce", utc=True)
+    if pd.isna(ts):
+        return None
+    return ts.tz_convert(IST)
+
+
+def _bus_number(raw: Dict[str, Any], *keys: str, default=np.nan) -> float:
+    for key in keys:
+        try:
+            value = float(raw.get(key))
+            if np.isfinite(value):
+                return value
+        except Exception:
+            pass
+    return default
+
+
+def _historical_frame(rows: List[Dict[str, Any]]) -> pd.DataFrame:
+    records = []
+    for row in rows:
+        raw = _bus_raw(row)
+        ts = _bus_timestamp(row)
+        if ts is None:
+            continue
+        records.append({
+            "Datetime": ts,
+            "Open": _bus_number(raw, "open", "o", "pOpen", "openPrice"),
+            "High": _bus_number(raw, "high", "h", "pHigh", "highPrice"),
+            "Low": _bus_number(raw, "low", "l", "pLow", "lowPrice"),
+            "Close": _bus_number(raw, "close", "c", "ltp", "lp", "last_price", "lastPrice"),
+            "Volume": _bus_number(raw, "volume", "v", "vol", "tradedVolume", "vtt", default=0.0),
+        })
+    if not records:
+        return pd.DataFrame(columns=["Datetime", "Open", "High", "Low", "Close", "Volume"])
+    frame = pd.DataFrame(records).sort_values("Datetime").drop_duplicates("Datetime", keep="last")
+    return frame.reset_index(drop=True)
+
+
+def _supabase_history(symbol: str, days: int, interval: str, dataset: str) -> pd.DataFrame:
+    since = datetime.now(IST) - timedelta(days=int(days))
+    rows = _raw_bus_read(source="yahoo_historical", symbol=symbol, dataset=dataset, since=since)
+    return _historical_frame(rows)
+
+
+def _supabase_fetch_yahoo_compat(ticker: str, days: int = 320, interval: str = "1d") -> pd.DataFrame:
+    ticker = str(ticker)
+    if ticker == "^NSEI":
+        return _supabase_history("NIFTY_SPOT", days, interval, "nifty_spot_daily")
+    if ticker == "^INDIAVIX":
+        return _supabase_history("INDIAVIX", days, interval, "india_vix_daily")
+    symbol = ticker[:-3] if ticker.upper().endswith(".NS") else ticker
+    dataset = {
+        "1d": "next_day_stock_daily",
+        "1h": "next_day_mtf_hourly",
+        "15m": "next_day_mtf_15m",
+    }.get(interval)
+    if not dataset:
+        return pd.DataFrame()
+    return _supabase_history(symbol, days, interval, dataset)
+
+
+def _supabase_live_frame(symbol: str) -> pd.DataFrame:
+    clean = str(symbol).replace(".NS", "").upper().strip()
+    since = datetime.now(IST) - timedelta(minutes=30)
+    rows = _raw_bus_read(source="kotak_live", symbol=clean, since=since, limit=10000)
+    records = []
+    for row in rows:
+        raw = _bus_raw(row)
+        ts = _bus_timestamp(row)
+        ltp = _bus_number(raw, "ltp", "lp", "last_price", "lastPrice", "c")
+        if ts is None or not np.isfinite(ltp):
+            continue
+        # Producer snapshots are quote observations, not candles. For the
+        # opening-window consumer, LTP is the raw observation price.
+        records.append({
+            "Datetime": ts,
+            "Open": ltp,
+            "High": ltp,
+            "Low": ltp,
+            "Close": ltp,
+            "Volume": _bus_number(raw, "volume", "v", "tradedVolume", default=0.0),
+        })
+    if not records:
+        return pd.DataFrame(columns=["Datetime", "Open", "High", "Low", "Close", "Volume"])
+    return pd.DataFrame(records).sort_values("Datetime").drop_duplicates("Datetime", keep="last").reset_index(drop=True)
+
+
+def _supabase_fetch_intraday_compat(symbol: str) -> pd.DataFrame:
+    return _supabase_live_frame(symbol)
+
+
+def _supabase_market_gap_compat(ticker: str = NIFTY_TICKER) -> float:
+    frame = _supabase_history("NIFTY_SPOT", 5, "1d", "nifty_spot_daily")
+    if frame is None or len(frame) < 2:
+        return np.nan
+    prev_close = safe_float(frame["Close"].iloc[-2], np.nan)
+    latest_open = safe_float(frame["Open"].iloc[-1], np.nan)
+    if not np.isfinite(prev_close) or prev_close == 0 or not np.isfinite(latest_open):
+        return np.nan
+    return float((latest_open / prev_close - 1.0) * 100.0)
+
+
+def _supabase_kotak_snapshot(symbols: List[str]) -> Dict[str, Dict[str, Any]]:
+    out: Dict[str, Dict[str, Any]] = {}
+    for symbol in symbols:
+        frame = _supabase_live_frame(symbol)
+        if frame.empty:
+            continue
+        row = frame.iloc[-1]
+        out[str(symbol).upper()] = {
+            "symbol": str(symbol).upper(),
+            "ltp": safe_float(row.get("Close"), np.nan),
+            "timestamp": row.get("Datetime").isoformat() if hasattr(row.get("Datetime"), "isoformat") else None,
+            "raw_source": "KOTAK_NEO_VIA_SUPABASE_RAW_BUS",
+        }
+    return out
+
+
+def get_kotak_adapter() -> Optional[Any]:
+    # HARD LOCK: Next-Day Alpha never authenticates with Kotak.
+    return None
+
+
+def capture_kotak_day_ahead_snapshot(symbols: List[str]) -> Dict[str, Dict[str, Any]]:
+    return _supabase_kotak_snapshot(symbols)
+
+
+def capture_kotak_opening_window(symbols: List[str]) -> None:
+    # The dedicated Kotak producer already publishes the live raw stream.
+    return None
+
+
+def supabase_raw_contract_status() -> Dict[str, Any]:
+    return {
+        "enabled": bool(SUPABASE_URL and SUPABASE_KEY),
+        "table": SUPABASE_RAW_TABLE,
+        "live_source": "kotak_live",
+        "historical_source": "yahoo_historical",
+        "architecture": "Kotak + yFinance producers -> Supabase RAW BUS -> Next-Day Alpha",
+        "direct_kotak_login": False,
+        "totp_required_here": False,
+    }
+
+
+# Keep all existing calculation/orchestration function names unchanged.
+fetch_yahoo_chart = _supabase_fetch_yahoo_compat
+fetch_intraday = _supabase_fetch_intraday_compat
+market_gap = _supabase_market_gap_compat
 
 if __name__ == "__main__":
     main()
