@@ -1,9 +1,6 @@
-# NIFTY Raw Bus â€” Kotak Neo LIVE environment
-# Python 3.11+
-# Scope: Kotak Neo live raw observations -> Supabase only.
-# No yfinance dependency in this environment.
-
-# Kotak Neo's v2 SDK is published by Kotak from GitHub; the import name is neo_api_client.
+# Kotak Neo LIVE RAW environment
+# Python 3.11
+# Historical/yfinance ingestion is intentionally deployed separately.
 git+https://github.com/Kotak-Neo/Kotak-neo-api-v2.git@v2.0.2#egg=neo_api_client
 requests>=2.31,<3
 streamlit>=1.37,<2
