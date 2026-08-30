@@ -1,0 +1,11 @@
+# NIFTY Raw Bus — yfinance HISTORY environment
+# Python 3.11+
+# Scope: yfinance historical raw observations -> Supabase only.
+# No Kotak Neo dependency in this environment.
+
+yfinance==0.2.38
+pandas>=2.0
+numpy>=1.24
+pyarrow>=14.0
+requests>=2.31,<3
+streamlit>=1.35,<2
