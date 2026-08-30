@@ -751,7 +751,9 @@ class OptionChainEngine:
         atm_pe = safe_float(chain.get("pe_oi_atm"), 0.0)
         atm_sum = atm_ce + atm_pe
         atm_imbalance = (atm_pe - atm_ce) / (atm_sum + 1e-5) if atm_sum > 0 else 0.0
-        atm_strike = safe_float(chain.get("atm_strike"), round(spot_price / 50.0) * 50.0 if spot_price > 0 else 24500.0)
+        atm_strike = safe_float(chain.get("atm_strike"), np.nan)
+        if not is_valid_number(atm_strike) and is_valid_number(spot_price) and spot_price > 0:
+            atm_strike = float(round(spot_price / 50.0) * 50.0)
 
         exp_dt = chain.get("active_expiry")
         if isinstance(exp_dt, datetime):
@@ -1773,8 +1775,8 @@ class IntegratedMarketReasoningEngine:
         ranked = sorted(evidence.items(), key=lambda kv: abs(kv[1]), reverse=True)
         reasons=[]; contradictions=[]
         for k,v in ranked[:4]:
-            if v >= 0.10: reasons.append(f"{k}â†’CE")
-            elif v <= -0.10: reasons.append(f"{k}â†’PE")
+            if v >= 0.10: reasons.append(f"{k}->CE")
+            elif v <= -0.10: reasons.append(f"{k}->PE")
         for k,v in ranked:
             if (ce_score>55 and v < -0.18) or (pe_score>55 and v > 0.18):
                 contradictions.append(f"{k} opposite")
@@ -2210,10 +2212,13 @@ class KotakNeoAdapter:
         self.tick_buffer = deque(maxlen=2000)
 
         self.spot_token = CONFIG.get("nifty_spot_token", "Nifty 50")
-        self.future_token = CONFIG.get("nifty_future_token", "53000")
+        # Future identity is resolved from the live Kotak instrument master.
+        # Never seed the adapter with a dummy/hard-coded future token.
+        self.future_token = CONFIG.get("nifty_future_token", "").strip()
         self.future_symbol = ""
         self.future_expiry = None
         self.pcr_tokens: List[str] = []
+        self.pcr_atm_strike = np.nan
         self.pcr_records: Dict[str, Dict[str, Any]] = {}
         self.active_pcr_expiry: Optional[datetime] = None
         self.heavy_tokens: Dict[str, str] = dict(NSE_CASH_TOKENS)
@@ -2328,6 +2333,25 @@ class KotakNeoAdapter:
         self.conn_state = "AUTHENTICATED"
         return True
 
+    def _authoritative_spot_price(self) -> float:
+        """Return Spot only from the canonical NIFTY 50 index quote.
+
+        Options must never use the futures price as an ATM/strike reference.
+        If the authoritative Spot quote is unavailable, return NaN rather
+        than manufacturing a market price.
+        """
+        with self.lock:
+            raw = self.latest.get(str(self.spot_token), {})
+            price = extract_tick_price(raw)
+        return float(price) if is_valid_number(price) and price > 1000 else np.nan
+
+    @staticmethod
+    def _spot_atm_strike(spot_price: float, step: float) -> float:
+        """Compute the nearest standard NIFTY strike from Spot only."""
+        if not is_valid_number(spot_price) or spot_price <= 0 or step <= 0:
+            return np.nan
+        return float(round(float(spot_price) / float(step)) * float(step))
+
     def resolve_current_nifty_future_token(self) -> str:
         try:
             res = self.client.search_scrip(exchange_segment="nse_fo", symbol="NIFTY")
@@ -2375,74 +2399,138 @@ class KotakNeoAdapter:
         self.discovery_log.append("OK Configured Nifty Spot Index: Nifty 50")
 
         self.future_token = self.resolve_current_nifty_future_token()
-        self.token_to_symbol[self.future_token] = "NIFTY_FUT"
-        self.discovery_log.append(f"OK Configured Active Future Token: {self.future_token}")
+        if self.future_token:
+            self.token_to_symbol[self.future_token] = "NIFTY_FUT"
+            self.discovery_log.append(f"OK Configured Active Future Token: {self.future_token}")
+        else:
+            self.discovery_log.append("WARNING Active NIFTY Future token not resolved")
 
         if auto_pcr:
-            self.discover_pcr_chain()
+            # Spot may not have arrived immediately after authentication.
+            # PCR/option discovery is therefore deferred until an
+            # authoritative NIFTY Spot quote is available.
+            if is_valid_number(self._authoritative_spot_price()):
+                self.discover_pcr_chain()
+            else:
+                self.discovery_log.append(
+                    "WAITING FOR AUTHORITATIVE NIFTY SPOT BEFORE OPTION DISCOVERY"
+                )
         return True
 
     def discover_pcr_chain(self, center_strike: Optional[float] = None) -> int:
+        """Discover the active NIFTY option set using authoritative Spot.
+
+        Contract identity and expiry come from Kotak's instrument master.
+        The ATM strike is selected from the *weekly/current active expiry*
+        using the actual NIFTY Spot price. Futures are never used here.
+        """
         if not self.connected or not self.client:
             return 0
-        try:
-            if not center_strike or not is_valid_number(center_strike):
-                with self.lock:
-                    spot_tick = self.latest.get("Nifty 50", {})
-                    center_strike = extract_tick_price(spot_tick)
-                    if not is_valid_number(center_strike) or center_strike <= 0:
-                        center_strike = 24300.0
 
-            step = CONFIG["pcr_strike_step"]
-            atm = round(center_strike / step) * step
-            count = CONFIG["pcr_strike_count"]
-            target_strikes = [atm + (i * step) for i in range(-count, count + 1)]
-            
+        try:
+            if not is_valid_number(center_strike) or float(center_strike) <= 0:
+                center_strike = self._authoritative_spot_price()
+
+            if not is_valid_number(center_strike) or float(center_strike) <= 0:
+                self.pcr_error = "Authoritative NIFTY Spot unavailable; option discovery skipped."
+                return 0
+
+            spot_price = float(center_strike)
+            step = float(CONFIG["pcr_strike_step"])
+            count = int(CONFIG["pcr_strike_count"])
+
             res = self.client.search_scrip(exchange_segment="nse_fo", symbol="NIFTY")
             records = record_list(res)
             now_d = now_ist().date()
-            
+
             nifty_opt_pattern = re.compile(r"^NIFTY\d{2}[A-Z0-9]+(CE|PE)$", re.IGNORECASE)
-            valid_expiries = []
+            option_rows = []
+            expiry_dates = set()
+
             for r in records:
                 sym = str(r.get("pTrdSymbol", r.get("ts", r.get("symbol", "")))).upper().strip()
-                is_opt = nifty_opt_pattern.match(sym) or ("NIFTY" in sym and (sym.endswith("CE") or sym.endswith("PE")))
-                if not is_opt or any(x in sym for x in ["NXT", "FPI", "FIN", "BANK", "MID", "IT", "SENSEX", "BANKEX"]):
+                is_opt = nifty_opt_pattern.match(sym) or (
+                    "NIFTY" in sym and (sym.endswith("CE") or sym.endswith("PE"))
+                )
+                if not is_opt or any(x in sym for x in [
+                    "NXT", "FPI", "FIN", "BANK", "MID", "IT", "SENSEX", "BANKEX"
+                ]):
                     continue
+
                 op_type = option_type_from_record(r)
-                if op_type in ("CE", "PE"):
-                    exp = expiry_from_record(r)
-                    if exp and exp.date() >= now_d:
-                        valid_expiries.append(exp)
-            
-            if not valid_expiries:
-                return 0
-            
-            self.active_pcr_expiry = min(valid_expiries, key=lambda x: x.date())
-            target_exp_date = self.active_pcr_expiry.date()
-            
-            discovered = []
-            for r in records:
-                sym = str(r.get("pTrdSymbol", r.get("ts", r.get("symbol", "")))).upper().strip()
-                is_opt = nifty_opt_pattern.match(sym) or ("NIFTY" in sym and (sym.endswith("CE") or sym.endswith("PE")))
-                if not is_opt or any(x in sym for x in ["NXT", "FPI", "FIN", "BANK", "MID", "IT", "SENSEX", "BANKEX"]):
-                    continue
                 exp = expiry_from_record(r)
                 strike = strike_from_record(r)
-                op_type = option_type_from_record(r)
                 tok = token_from_record(r)
-                if tok and strike in target_strikes and op_type in ("CE", "PE"):
-                    if exp and exp.date() == target_exp_date:
-                        discovered.append(tok)
-                        self.pcr_records[tok] = {
-                            "strike": strike, "option_type": op_type,
-                            "expiry": exp, "symbol": str(r.get("pTrdSymbol", ""))
-                        }
-            self.pcr_tokens = list(set(discovered))
-            self.discovery_log.append(f"OK Single-Expiry PCR ({target_exp_date}): {len(self.pcr_tokens)} Strikes Mapped")
+
+                if op_type not in ("CE", "PE") or not exp or not tok:
+                    continue
+                if exp.date() < now_d or not is_valid_number(strike):
+                    continue
+
+                option_rows.append((str(tok), sym, exp, float(strike), op_type))
+                expiry_dates.add(exp.date())
+
+            if not option_rows or not expiry_dates:
+                self.pcr_error = "No valid NIFTY option contracts found."
+                return 0
+
+            # Nearest non-expired expiry is the active weekly/current expiry.
+            target_exp_date = min(expiry_dates)
+            chosen = [r for r in option_rows if r[2].date() == target_exp_date]
+
+            # Choose ATM from actual contracts in that expiry, using Spot.
+            # Prefer a strike for which BOTH CE and PE exist.
+            paired_strikes = sorted({
+                strike for strike in {r[3] for r in chosen}
+                if any(r[3] == strike and r[4] == "CE" for r in chosen)
+                and any(r[3] == strike and r[4] == "PE" for r in chosen)
+            })
+
+            if paired_strikes:
+                atm = float(min(paired_strikes, key=lambda x: abs(x - spot_price)))
+            else:
+                available_strikes = sorted({r[3] for r in chosen})
+                if not available_strikes:
+                    self.pcr_error = "Active NIFTY expiry contains no usable strikes."
+                    return 0
+                atm = float(min(available_strikes, key=lambda x: abs(x - spot_price)))
+
+            low = atm - count * step
+            high = atm + count * step
+            local = [r for r in chosen if low <= r[3] <= high]
+
+            # Keep only real contracts and never synthesize CE/PE tokens.
+            self.pcr_tokens = []
+            self.pcr_records = {}
+            for tok, sym, exp, strike, op_type in sorted(
+                local, key=lambda x: (x[3], x[4], x[0])
+            ):
+                self.pcr_tokens.append(tok)
+                self.pcr_records[tok] = {
+                    "strike": strike,
+                    "option_type": op_type,
+                    "expiry": exp,
+                    "symbol": sym,
+                }
+
+            if not self.pcr_tokens:
+                self.pcr_error = "No CE/PE contracts in the Spot-derived ATM window."
+                return 0
+
+            self.active_pcr_expiry = min(
+                (r[2] for r in chosen), key=lambda x: x.date()
+            )
+            self.pcr_atm_strike = atm
+            self.pcr_error = ""
+            self.discovery_log.append(
+                f"OK Spot-derived Option ATM: Spot={spot_price:.2f} | ATM={atm:.0f} | "
+                f"Expiry={target_exp_date} | CE/PE contracts={len(self.pcr_tokens)}"
+            )
             return len(self.pcr_tokens)
+
         except Exception as e:
             self.last_error = f"PCR Discovery error: {e}"
+            self.pcr_error = self.last_error
             return 0
 
     def fetch_real_option_oi(self):
@@ -2509,6 +2597,23 @@ class KotakNeoAdapter:
                     self.tick_buffer.append(spot)
                     self.current_bar_ticks.append(spot)
                     break
+
+            # ------------------------------------------------------------
+            # SPOT -> OPTION ATM SYNCHRONIZATION
+            # ------------------------------------------------------------
+            authoritative_spot = self._authoritative_spot_price()
+            if is_valid_number(authoritative_spot):
+                target_atm = self._spot_atm_strike(
+                    authoritative_spot, float(CONFIG["pcr_strike_step"])
+                )
+                if (
+                    not is_valid_number(self.pcr_atm_strike)
+                    or target_atm != float(self.pcr_atm_strike)
+                    or not self.pcr_tokens
+                ):
+                    # This is intentionally Spot-driven. A futures move can
+                    # never change the selected CE/PE strike by itself.
+                    self.discover_pcr_chain(center_strike=authoritative_spot)
 
             # ------------------------------------------------------------
             # FUTURE / HEAVYWEIGHTS / OPTIONS
@@ -2582,16 +2687,24 @@ class KotakNeoAdapter:
 
         sub_tokens = [
             {"instrument_token": "Nifty 50", "exchange_segment": "nse_cm"},
-            {"instrument_token": str(self.future_token), "exchange_segment": "nse_fo"},
         ]
+        if self.future_token:
+            sub_tokens.append({
+                "instrument_token": str(self.future_token),
+                "exchange_segment": "nse_fo",
+            })
         for tok in self.heavy_tokens.values():
             sub_tokens.append({"instrument_token": str(tok), "exchange_segment": "nse_cm"})
         for tok in self.pcr_tokens:
             sub_tokens.append({"instrument_token": str(tok), "exchange_segment": "nse_fo"})
             
         try:
-            self.client.subscribe(instrument_tokens=[{"instrument_token": "Nifty 50", "exchange_segment": "nse_cm"}], isIndex=True)
-            self.client.subscribe(instrument_tokens=sub_tokens[1:], isIndex=False)
+            self.client.subscribe(
+                instrument_tokens=[{"instrument_token": "Nifty 50", "exchange_segment": "nse_cm"}],
+                isIndex=True,
+            )
+            if len(sub_tokens) > 1:
+                self.client.subscribe(instrument_tokens=sub_tokens[1:], isIndex=False)
         except Exception as exc:
             self.last_error = f"Subscribe error: {exc}"
 
@@ -2724,7 +2837,8 @@ class KotakNeoAdapter:
         ivg=iv if is_valid_number(iv) and iv>0 else CONFIG["default_atm_iv"]
         g=GreeksEngine.compute_second_order_greeks(spot,float(atm),minutes if is_valid_number(minutes) else 375.0,iv=ivg,r=CONFIG["risk_free_rate"])
         delta=norm_cdf(g["d1"]) if option_type=="CE" else norm_cdf(g["d1"])-1.0
-        return {"option_ltp":current,"option_oi":oi,"option_oi_change":oi_change,"option_volume":safe_float(latest.get("last_volume") or latest.get("v") or latest.get("volume"),0.0),"option_iv":iv,"option_vwap":ovwap,"option_rsi":self._option_rsi(closes),"option_slope3":calc_3bar_slope(closes),"option_atr3":self._option_atr(hist),"option_support":support,"option_resistance":resistance,"option_delta":delta,"option_strike":float(atm),"option_symbol":info.get("symbol",""),"option_expiry":info.get("expiry"),"option_token":tok}
+        actual_strike = safe_float(info.get("strike"), float(atm))
+        return {"option_ltp":current,"option_oi":oi,"option_oi_change":oi_change,"option_volume":safe_float(latest.get("last_volume") or latest.get("v") or latest.get("volume"),0.0),"option_iv":iv,"option_vwap":ovwap,"option_rsi":self._option_rsi(closes),"option_slope3":calc_3bar_slope(closes),"option_atr3":self._option_atr(hist),"option_support":support,"option_resistance":resistance,"option_delta":delta,"option_strike":actual_strike,"option_symbol":info.get("symbol",""),"option_expiry":info.get("expiry"),"option_token":tok}
 
     def _option_side_chain(self, atm, ticks_source, bar_time):
         ce=self._build_option_side("CE",atm,ticks_source,bar_time);pe=self._build_option_side("PE",atm,ticks_source,bar_time);out={}
@@ -2749,23 +2863,50 @@ class KotakNeoAdapter:
             _, spot_prices = _prices("Nifty 50")
             if not spot_prices:
                 last = extract_tick_price(self.latest.get("Nifty 50", {}))
-                spot_o = spot_h = spot_l = spot_c = last if is_valid_number(last) else 24300.0
+                if is_valid_number(last) and last > 1000:
+                    spot_o = spot_h = spot_l = spot_c = float(last)
+                else:
+                    # No authoritative Spot -> no valid 3-minute market bar.
+                    # Do not substitute a futures price or a magic number.
+                    return
             else:
-                spot_o, spot_h, spot_l, spot_c = spot_prices[0], max(spot_prices), min(spot_prices), spot_prices[-1]
+                spot_o, spot_h, spot_l, spot_c = (
+                    spot_prices[0], max(spot_prices), min(spot_prices), spot_prices[-1]
+                )
+
+            # Option selection is always synchronized to the actual Spot.
+            target_atm = self._spot_atm_strike(
+                spot_c, float(CONFIG["pcr_strike_step"])
+            )
+            if is_valid_number(target_atm):
+                if (
+                    not is_valid_number(self.pcr_atm_strike)
+                    or target_atm != float(self.pcr_atm_strike)
+                    or not self.pcr_tokens
+                ):
+                    self.discover_pcr_chain(center_strike=spot_c)
 
             fut_ticks, fut_prices = _prices(self.future_token)
             if not fut_prices:
-                last = extract_tick_price(self.latest.get(str(self.future_token), {})) or spot_c
-                fut_o = fut_h = fut_l = fut_c = last if is_valid_number(last) else 24400.0
-                fut_vol = 1000.0
-                fut_oi = self._extract_oi(self.latest.get(str(self.future_token), {})) or 12784330.0
+                last = extract_tick_price(self.latest.get(str(self.future_token), {}))
+                fut_o = fut_h = fut_l = fut_c = (
+                    float(last) if is_valid_number(last) and last > 0 else np.nan
+                )
+                fut_vol = np.nan
+                fut_oi = self._extract_oi(self.latest.get(str(self.future_token), {}))
                 l2_snap = {}
             else:
-                fut_o, fut_h, fut_l, fut_c = fut_prices[0], max(fut_prices), min(fut_prices), fut_prices[-1]
+                fut_o, fut_h, fut_l, fut_c = (
+                    fut_prices[0], max(fut_prices), min(fut_prices), fut_prices[-1]
+                )
                 fut_vol = self._resolve_volume_clean(fut_ticks)
                 last_fut_t = fut_ticks[-1] if fut_ticks else {}
-                fut_oi = self._extract_oi(last_fut_t) or self._extract_oi(self.latest.get(str(self.future_token), {})) or 12784330.0
-                
+                fut_oi = self._extract_oi(last_fut_t)
+                if not is_valid_number(fut_oi):
+                    fut_oi = self._extract_oi(
+                        self.latest.get(str(self.future_token), {})
+                    )
+
                 l2_snap = {
                     "best_bid": safe_float(last_fut_t.get("bp") or last_fut_t.get("bid_price"), fut_c),
                     "best_ask": safe_float(last_fut_t.get("ap") or last_fut_t.get("ask_price"), fut_c),
@@ -2789,9 +2930,9 @@ class KotakNeoAdapter:
 
             total_ce_oi = total_pe_oi = total_ce_vol = total_pe_vol = 0.0
             atm_ce_oi = atm_pe_oi = np.nan
-            spot_approx = spot_c if is_valid_number(spot_c) and spot_c > 0 else 24300.0
-            step = CONFIG["pcr_strike_step"]
-            atm = round(spot_approx / step) * step
+            spot_approx = float(spot_c) if is_valid_number(spot_c) and spot_c > 0 else np.nan
+            step = float(CONFIG["pcr_strike_step"])
+            atm = self._spot_atm_strike(spot_approx, step)
             
             for tok in self.pcr_tokens:
                 info = self.pcr_records.get(str(tok), {})
@@ -3050,6 +3191,12 @@ def run_unit_tests() -> bool:
     est, vel = kf.update(24050.0)
     assert is_valid_number(est)
     assert not is_valid_number(extract_tick_price({"iv":0.25}))
+    # Critical option-mapping invariant: Spot, never Future, determines ATM.
+    assert KotakNeoAdapter._spot_atm_strike(24175.65, 50.0) == 24200.0
+    assert KotakNeoAdapter._spot_atm_strike(24341.90, 50.0) == 24350.0
+    # Therefore the displayed 24300 strike cannot be produced from Spot=24175.65.
+    assert KotakNeoAdapter._spot_atm_strike(24175.65, 50.0) != 24300.0
+
     ste=SpotTacticalEngine(maxlen=20)
     tc=Candle3Min(now_ist().replace(hour=11,minute=30),24000,24020,23980,24010,24300,24320,24290,24310,1000,500)
     assert "spot_rsi_14" in ste.compute(tc)
@@ -3367,7 +3514,7 @@ def _v9_reason(e):
     ):
         if abs(value) >= 0.15:
             side = "CE" if value > 0 else "PE"
-            parts.append(f"{name}â†’{side}({value:+.2f})")
+            parts.append(f"{name}->{side}({value:+.2f})")
     if e.get("demand_sweep"):
         parts.append("Demand sweep")
     if e.get("demand_reclaim"):
@@ -3771,7 +3918,7 @@ def build_human_market_map(feats, v10_state=None):
     if d_sweep and d_reclaim:
         location_state = "DEMAND SWEPT + RECLAIMED"
     elif d_sweep:
-        location_state = "DEMAND SWEPT â€” RECLAIM PENDING"
+        location_state = "DEMAND SWEPT - RECLAIM PENDING"
     elif is_valid_number(d_low) and is_valid_number(d_high) and d_low <= price <= d_high:
         location_state = "PRICE INSIDE DEMAND"
     elif is_valid_number(d_low) and price < d_low:
@@ -3783,25 +3930,25 @@ def build_human_market_map(feats, v10_state=None):
 
     if d_sweep and d_reclaim and ce > pe and mom >= -0.05:
         if (bos > 0 or choch > 0) and mom >= 0.05:
-            setup_state = "CE CONFIRMED â€” STRUCTURE + MOMENTUM"
+            setup_state = "CE CONFIRMED - STRUCTURE + MOMENTUM"
             setup_stage = "CONFIRMED"
         else:
-            setup_state = "CE EARLY REVERSAL â€” BUILDING"
+            setup_state = "CE EARLY REVERSAL - BUILDING"
             setup_stage = "EARLY"
     elif d_sweep and not d_reclaim:
-        setup_state = "CE WATCH â€” WAIT FOR DEMAND RECLAIM"
+        setup_state = "CE WATCH - WAIT FOR DEMAND RECLAIM"
         setup_stage = "WAIT_RECLAIM"
     elif is_valid_number(d_low) and price < d_low:
-        setup_state = "PE RISK â€” DEMAND INVALIDATED"
+        setup_state = "PE RISK - DEMAND INVALIDATED"
         setup_stage = "INVALIDATED"
     elif s_sweep and s_reject and pe > ce:
-        setup_state = "PE EARLY REVERSAL â€” BUILDING"
+        setup_state = "PE EARLY REVERSAL - BUILDING"
         setup_stage = "PE_EARLY"
     elif edge >= 8:
-        setup_state = "CE BIAS â€” NO CLEAN LOCATION TRIGGER"
+        setup_state = "CE BIAS - NO CLEAN LOCATION TRIGGER"
         setup_stage = "BIAS"
     elif edge <= -8:
-        setup_state = "PE BIAS â€” NO CLEAN LOCATION TRIGGER"
+        setup_state = "PE BIAS - NO CLEAN LOCATION TRIGGER"
         setup_stage = "BIAS"
     else:
         setup_state = "CONFLICTED / NO EDGE"
@@ -4315,8 +4462,8 @@ def main():
         with c: st.metric("CE / PE Evidence",f"{d.ce_evidence_score:.0f} / {d.pe_evidence_score:.0f}")
         with e: st.metric("Edge",f"{d.net_ce_pe_edge:+.2f}")
         if d.action in ("CE","PE"):
-            st.write(f"**{d.action} {d.option_strike:.0f}** Â· Entry `â‚¹{d.option_entry_estimate:.2f}` Â· Target `â‚¹{d.option_target_price:.2f}` Â· SL `â‚¹{d.option_stop_price:.2f}`")
-            st.caption(f"Option premium S/R: `{d.option_support:.2f}` / `{d.option_resistance:.2f}` Â· Premium ATR `{d.option_premium_atr:.2f}`")
+            st.write(f"**{d.action} {d.option_strike:.0f}** | Entry `Rs. {d.option_entry_estimate:.2f}` | Target `Rs. {d.option_target_price:.2f}` | SL `Rs. {d.option_stop_price:.2f}`")
+            st.caption(f"Option premium S/R: `{d.option_support:.2f}` / `{d.option_resistance:.2f}` | Premium ATR `{d.option_premium_atr:.2f}`")
         if d.action in ("CE", "PE"):
             st.success(d.reason)
         else:
@@ -4404,7 +4551,7 @@ def main():
                 f2.markdown(f"**Slope (3-Bar)**<br>{get_colored_text(val_slope, 'stretch_slope_3')}", unsafe_allow_html=True)
                 
                 val_pcr = latest_row.get("pcr_oi", 1.0)
-                f3.markdown(f"**PCR (OI) â€” Local Â±5 Strikes (11)**<br>{get_colored_text(val_pcr, 'pcr_oi')}", unsafe_allow_html=True)
+                f3.markdown(f"**PCR (OI) - Local +/-5 Strikes (11)**<br>{get_colored_text(val_pcr, 'pcr_oi')}", unsafe_allow_html=True)
                 
                 val_breadth = latest_row.get("breadth_10", 0.5)
                 f4.markdown(f"**Breadth (10)**<br>{get_colored_text(val_breadth, 'breadth_10')}", unsafe_allow_html=True)
@@ -4433,14 +4580,14 @@ def main():
 
     if latest_row:
         st.markdown('<div class="terminal-card">', unsafe_allow_html=True)
-        st.markdown('<div class="option-section-title">CE vs PE â€” Current Data</div>', unsafe_allow_html=True)
-        st.markdown('<div class="option-section-subtitle">Option-premium decision view Â· green = supporting Â· red = against</div>', unsafe_allow_html=True)
+        st.markdown('<div class="option-section-title">CE vs PE - Current Data</div>', unsafe_allow_html=True)
+        st.markdown('<div class="option-section-subtitle">Option-premium decision view | green = supporting | red = against</div>', unsafe_allow_html=True)
 
         def _opt_num(key, default=np.nan):
             return safe_float(latest_row.get(key), default)
 
         def _fmt_num(x, digits=2):
-            return f"{x:.{digits}f}" if is_valid_number(x) else "â€”"
+            return f"{x:.{digits}f}" if is_valid_number(x) else "-"
 
         def _metric_class(ok, available=True):
             if not available:
@@ -4481,17 +4628,17 @@ def main():
                 rows.append(f'<div class="option-row"><span class="option-label">{label}</span><span class="option-value {cls}">{value}</span></div>')
 
             add("Strike", _fmt_num(strike, 0))
-            add("Premium", f"â‚¹{_fmt_num(premium)}")
+            add("Premium", f"Rs. {_fmt_num(premium)}")
             add("Premium RSI", _fmt_num(rsi), _metric_class(rsi_ok, is_valid_number(rsi)))
             add("3-Bar Slope", _fmt_num(slope), _metric_class(slope_ok, is_valid_number(slope)))
-            add("Premium vs VWAP", ("ABOVE" if vwap_ok else "BELOW") if is_valid_number(premium) and is_valid_number(vwap) else "â€”", _metric_class(vwap_ok, is_valid_number(premium) and is_valid_number(vwap)))
+            add("Premium vs VWAP", ("ABOVE" if vwap_ok else "BELOW") if is_valid_number(premium) and is_valid_number(vwap) else "-", _metric_class(vwap_ok, is_valid_number(premium) and is_valid_number(vwap)))
             if sr_available:
                 room = resistance - premium
-                add("Premium S/R", f"â‚¹{premium:.2f} Â· room â‚¹{room:.2f}", _metric_class(sr_ok, True))
+                add("Premium S/R", f"Rs. {premium:.2f} | room Rs. {room:.2f}", _metric_class(sr_ok, True))
             else:
                 add("Premium S/R", "Unavailable", "option-neutral")
-            add("OI", f"{oi:,.0f}" if is_valid_number(oi) else "â€”")
-            add("OI Î”", f"{oi_ch:+,.0f}" if is_valid_number(oi_ch) else "â€”")
+            add("OI", f"{oi:,.0f}" if is_valid_number(oi) else "-")
+            add("OI Delta", f"{oi_ch:+,.0f}" if is_valid_number(oi_ch) else "-")
             add("IV", _fmt_num(iv, 3))
             add("Delta", _fmt_num(delta, 3))
             add("Evidence", f"{score:.0f} vs {opposite_score:.0f}", _metric_class(score_ok, is_valid_number(score) and is_valid_number(opposite_score)))
@@ -4500,8 +4647,8 @@ def main():
 
             return (f'<div class="option-compare-card">'
                     f'<div class="option-side-title {title_cls}">{side}</div>'
-                    f'<div class="option-score {title_cls}">Evidence: {score:.0f} Â· ' + ("LEADING" if score_ok else "NOT LEADING") + '</div>'
-                    + ''.join(rows) + '<div class="option-note">Green = supports this side Â· Red = works against this side</div></div>')
+                    f'<div class="option-score {title_cls}">Evidence: {score:.0f} | ' + ("LEADING" if score_ok else "NOT LEADING") + '</div>'
+                    + ''.join(rows) + '<div class="option-note">Green = supports this side | Red = works against this side</div></div>')
 
         ce_score = _opt_num("v10_ce_evidence", _opt_num("v9_ce_score", 50.0))
         pe_score = _opt_num("v10_pe_evidence", _opt_num("v9_pe_score", 50.0))
@@ -4513,13 +4660,13 @@ def main():
 
         x1, x2, x3, x4 = st.columns(4)
         _spot_ui = _opt_num("spot_c", np.nan)
-        x1.metric("NIFTY SPOT", f"â‚¹{_spot_ui:.2f}" if is_valid_number(_spot_ui) and _spot_ui > 1000 else "â€”")
-        x2.metric("DEMAND", f"{_opt_num('demand_zone_low', 0.0):.2f}Ã¢â‚¬â€œ{_opt_num('demand_zone_high', 0.0):.2f}")
-        x3.metric("FUT VWAP", f"â‚¹{_opt_num('fut_vwap', 0.0):.2f}")
+        x1.metric("NIFTY SPOT", f"Rs. {_spot_ui:.2f}" if is_valid_number(_spot_ui) and _spot_ui > 1000 else "-")
+        x2.metric("DEMAND", f"{_opt_num('demand_zone_low', 0.0):.2f}-{_opt_num('demand_zone_high', 0.0):.2f}")
+        x3.metric("FUT VWAP", f"Rs. {_opt_num('fut_vwap', 0.0):.2f}")
         x4.metric("SPOT RSI", f"{_opt_num('spot_rsi_14', 50.0):.1f}")
         st.markdown('</div>', unsafe_allow_html=True)
         with st.expander("Research / Audit Details", expanded=False):
-            st.write({"V9 CE":latest_row.get("v9_ce_score"),"V9 PE":latest_row.get("v9_pe_score"),"V10 CE":latest_row.get("v10_ce_evidence"),"V10 PE":latest_row.get("v10_pe_evidence"),"PCR local Â±5":latest_row.get("pcr_oi"),"Breadth":latest_row.get("breadth_10"),"SLP":latest_row.get("slp_top5_pressure"),"OBI":latest_row.get("order_book_imbalance")})
+            st.write({"V9 CE":latest_row.get("v9_ce_score"),"V9 PE":latest_row.get("v9_pe_score"),"V10 CE":latest_row.get("v10_ce_evidence"),"V10 PE":latest_row.get("v10_pe_evidence"),"PCR local +/-5":latest_row.get("pcr_oi"),"Breadth":latest_row.get("breadth_10"),"SLP":latest_row.get("slp_top5_pressure"),"OBI":latest_row.get("order_book_imbalance")})
 
     if is_streaming:
         time.sleep(CONFIG["ui_refresh_sec"])
