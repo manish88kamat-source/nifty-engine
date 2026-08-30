@@ -1,200 +1,198 @@
 #!/usr/bin/env python3
 """
-Standalone Streamlit UI for the isolated Next-Day Alpha Engine.
+NEXT-DAY ALPHA UI â€” RAW BUS LOCKED
 
-This UI is intentionally aligned with the current engine contract:
-- Historical data: Supabase RAW BUS
-- Live/opening raw data: Kotak Neo
-- Day-ahead output: TOP 5
-- Morning confirmation: 09:15-09:20
-- Final outcome: FINAL 2 / FINAL 1 / NO TRADE
+Architecture lock:
+    Kotak Neo -> raw_data_producer_kotak_live.py -> Supabase raw_observations
+    yfinance  -> raw_data_producer_yfinance_history.py -> Supabase raw_observations
+    Supabase RAW BUS -> Next-Day Alpha Engine/UI
 
-It does not import or modify app.py, the NIFTY 3-Min engine,
-or GSR decision paths.
+This UI NEVER logs into Kotak Neo and NEVER asks for TOTP.
+It is a read-only consumer of the common Supabase RAW BUS.
+The existing NIFTY 3-Min and GSR paths are untouched.
 """
 
 from __future__ import annotations
 
+import json
 import os
+from datetime import datetime, timedelta
 from pathlib import Path
+from typing import Any, Dict, List, Optional
 
 import pandas as pd
+import requests
 import streamlit as st
 
 from next_day_alpha_engine import NextDayAlphaEngine
+import next_day_alpha_raw_bus_patch  # noqa: F401 - binds engine to Supabase RAW BUS
 
-
+IST_OFFSET = timedelta(hours=5, minutes=30)
 ROOT = Path(__file__).resolve().parent
+RAW_TABLE = os.getenv("SUPABASE_RAW_TABLE", "raw_observations")
 
-
-# ---------------------------------------------------------------------------
-# PAGE
-# ---------------------------------------------------------------------------
-
-st.set_page_config(
-    page_title="Next-Day Alpha",
-    page_icon="ðŸ“ˆ",
-    layout="wide",
-)
-
+st.set_page_config(page_title="Next-Day Alpha", page_icon="ðŸ“ˆ", layout="wide")
 st.title("NEXT-DAY INTRADAY STOCK ALPHA")
-st.caption(
-    "Standalone â€¢ Raw-data sharing only â€¢ "
-    "NIFTY / GSR decision paths untouched"
-)
+st.caption("Standalone â€¢ Supabase RAW BUS consumer â€¢ No direct Kotak login â€¢ No TOTP")
 
+def secret(name: str, default: str = "") -> str:
+    value = os.getenv(name, "").strip()
+    if value:
+        return value
+    try:
+        return str(st.secrets.get(name, default)).strip()
+    except Exception:
+        return default
 
-# ---------------------------------------------------------------------------
-# SINGLE ENGINE INSTANCE
-# ---------------------------------------------------------------------------
-# Streamlit reruns the script on every interaction. cache_resource prevents
-# every rerun from creating another background scheduler thread.
+SUPABASE_URL = secret("SUPABASE_URL").rstrip("/")
+SUPABASE_KEY = secret("SUPABASE_KEY")
+
+def sb_headers() -> Dict[str, str]:
+    return {
+        "apikey": SUPABASE_KEY,
+        "Authorization": f"Bearer {SUPABASE_KEY}",
+        "Accept": "application/json",
+    }
+
+def supabase_health() -> Dict[str, Any]:
+    if not SUPABASE_URL or not SUPABASE_KEY:
+        return {"configured": False, "reachable": False, "error": "SUPABASE_URL/SUPABASE_KEY missing"}
+    try:
+        r = requests.get(
+            f"{SUPABASE_URL}/rest/v1/{RAW_TABLE}",
+            headers=sb_headers(),
+            params={"select": "id", "limit": "1"},
+            timeout=10,
+        )
+        return {
+            "configured": True,
+            "reachable": r.status_code in (200, 206),
+            "http_status": r.status_code,
+            "error": "" if r.status_code in (200, 206) else r.text[:250],
+        }
+    except Exception as exc:
+        return {"configured": True, "reachable": False, "error": str(exc)}
+
+def raw_rows(symbol: Optional[str] = None, since_minutes: int = 15, limit: int = 1000) -> List[Dict[str, Any]]:
+    if not SUPABASE_URL or not SUPABASE_KEY:
+        return []
+    params: Dict[str, str] = {
+        "select": "*",
+        "order": "observation_timestamp.desc",
+        "limit": str(limit),
+    }
+    if symbol:
+        params["symbol"] = f"eq.{symbol.replace('.NS','').upper()}"
+    start = datetime.utcnow() - timedelta(minutes=since_minutes)
+    params["observation_timestamp"] = f"gte.{start.isoformat()}Z"
+    try:
+        r = requests.get(
+            f"{SUPABASE_URL}/rest/v1/{RAW_TABLE}",
+            headers=sb_headers(),
+            params=params,
+            timeout=15,
+        )
+        if r.status_code >= 400:
+            return []
+        payload = r.json()
+        return payload if isinstance(payload, list) else []
+    except Exception:
+        return []
+
+def payload_of(row: Dict[str, Any]) -> Dict[str, Any]:
+    raw = row.get("raw")
+    return raw if isinstance(raw, dict) else row
+
+def raw_value(raw: Dict[str, Any], *keys: str) -> Optional[float]:
+    for k in keys:
+        try:
+            v = float(raw.get(k))
+            if pd.notna(v):
+                return v
+        except Exception:
+            pass
+    return None
+
+def live_bus_health() -> Dict[str, Any]:
+    rows = raw_rows(since_minutes=10, limit=200)
+    kotak = []
+    for row in rows:
+        source = str(row.get("source", "")).lower()
+        if "kotak" in source or "neo" in source:
+            kotak.append(row)
+    if not kotak:
+        return {
+            "connected": False,
+            "quote_received": False,
+            "last_quote_at": None,
+            "symbol": None,
+            "ltp": None,
+            "rows": 0,
+        }
+    latest = kotak[0]
+    raw = payload_of(latest)
+    return {
+        "connected": True,
+        "quote_received": True,
+        "last_quote_at": latest.get("observation_timestamp") or raw.get("timestamp") or raw.get("received_at"),
+        "symbol": latest.get("symbol") or raw.get("symbol"),
+        "ltp": raw_value(raw, "ltp", "lp", "last_price", "lastPrice", "c", "close"),
+        "rows": len(kotak),
+    }
 
 @st.cache_resource
 def get_engine() -> NextDayAlphaEngine:
-    engine = NextDayAlphaEngine()
-    engine.start_if_due_background()
-    return engine
-
+    return NextDayAlphaEngine()
 
 engine = get_engine()
 
-
-# ---------------------------------------------------------------------------
-# ACTIONS
-# ---------------------------------------------------------------------------
-
-refresh = st.button("ðŸ”„ Refresh Dashboard", use_container_width=True)
-
-if refresh:
+if st.button("ðŸ”„ Refresh Dashboard", use_container_width=True):
     st.rerun()
 
-
-# Run any operation that is due. The background worker remains armed.
-try:
-    engine.run_if_due()
-except Exception as exc:
-    st.error(f"Engine auto-run failed: {exc}")
-
-
-# ---------------------------------------------------------------------------
-# KOTAK NEO HEALTH
-# ---------------------------------------------------------------------------
-
-try:
-    kotak = engine.kotak_health("NIFTY 50")
-except Exception as exc:
-    kotak = {
-        "sdk_available": False,
-        "live_enabled": False,
-        "credentials_present": False,
-        "connected": False,
-        "quote_received": False,
-        "source": "ERROR",
-        "login_error": f"{type(exc).__name__}: {exc}",
-    }
-
+# IMPORTANT: UI does not call engine.kotak_health(); it checks the common RAW BUS.
+sb = supabase_health()
+live = live_bus_health()
 
 h1, h2, h3, h4 = st.columns(4)
-
-h1.metric(
-    "Neo SDK",
-    "READY" if kotak.get("sdk_available") else "MISSING",
-)
-
-h2.metric(
-    "Neo Login",
-    "CONNECTED" if kotak.get("connected") else "OFFLINE",
-)
-
-h3.metric(
-    "Raw Quote",
-    "RECEIVED" if kotak.get("quote_received") else "NOT RECEIVED",
-)
-
-probe_ltp = kotak.get("probe_ltp")
-if isinstance(probe_ltp, (int, float)) and probe_ltp == probe_ltp:
-    ltp_text = f"{probe_ltp:.2f}"
-else:
-    ltp_text = "â€”"
-
-h4.metric("NIFTY LTP", ltp_text)
-
-
-with st.expander("KOTAK NEO LIVE HEALTH", expanded=False):
-    st.write(
-        {
-            "source": kotak.get("source"),
-            "live_enabled": kotak.get("live_enabled"),
-            "credentials_present": kotak.get("credentials_present"),
-            "connected": kotak.get("connected"),
-            "quote_received": kotak.get("quote_received"),
-            "last_quote_at": kotak.get("last_quote_at"),
-            "last_quote_symbol": kotak.get("last_quote_symbol"),
-            "login_error": kotak.get("login_error"),
-            "last_quote_error": kotak.get("last_quote_error"),
-        }
-    )
-
-
-# ---------------------------------------------------------------------------
-# SUPABASE RAW BUS HEALTH
-# ---------------------------------------------------------------------------
-# The current engine does not expose a data_source_health() method.
-# Therefore this UI does not call a nonexistent engine API.
-# We show configuration state and the authoritative source contract instead.
+h1.metric("RAW BUS", "READY" if sb.get("reachable") else "OFFLINE")
+h2.metric("LIVE RAW", "RECEIVED" if live.get("quote_received") else "NOT RECEIVED")
+h3.metric("LIVE SYMBOL", live.get("symbol") or "â€”")
+ltp = live.get("ltp")
+h4.metric("LTP", f"{ltp:.2f}" if isinstance(ltp, (int,float)) else "â€”")
 
 st.subheader("DATA SOURCE HEALTH")
-
-supabase_url = os.getenv("SUPABASE_URL", "").strip()
-supabase_key = os.getenv("SUPABASE_KEY", "").strip()
-
-# Streamlit Cloud secrets fallback.
-if not supabase_url or not supabase_key:
-    try:
-        supabase_url = str(st.secrets.get("SUPABASE_URL", "")).strip()
-        supabase_key = str(st.secrets.get("SUPABASE_KEY", "")).strip()
-    except Exception:
-        pass
-
-s1, s2 = st.columns(2)
-
-with s1:
-    if supabase_url and supabase_key:
-        st.success("SUPABASE RAW BUS: CONFIGURED")
-        st.caption("Historical market observations: Supabase RAW BUS")
+c1, c2 = st.columns(2)
+with c1:
+    if sb.get("reachable"):
+        st.success("SUPABASE RAW BUS: CONNECTED")
+        st.caption(f"Table: {RAW_TABLE}")
+    elif sb.get("configured"):
+        st.error("SUPABASE RAW BUS: UNREACHABLE")
+        st.caption(str(sb.get("error", "")))
     else:
         st.error("SUPABASE RAW BUS: NOT CONFIGURED")
         st.caption("Add SUPABASE_URL and SUPABASE_KEY to Streamlit Secrets.")
-
-with s2:
-    if kotak.get("connected") and kotak.get("quote_received"):
-        st.success("KOTAK NEO LIVE: CONNECTED + QUOTE RECEIVED")
-    elif kotak.get("connected"):
-        st.warning("KOTAK NEO LIVE: LOGIN OK â€¢ QUOTE NOT RECEIVED")
+with c2:
+    if live.get("quote_received"):
+        st.success("KOTAK LIVE â†’ RAW BUS: RECEIVED")
+        st.caption(f"Last raw quote: {live.get('last_quote_at')}")
     else:
-        st.warning("KOTAK NEO LIVE: OFFLINE")
+        st.warning("KOTAK LIVE â†’ RAW BUS: NO RECENT QUOTE")
+        st.caption("The separate Kotak Raw Producer must be running/connected.")
 
-    st.caption("Live/opening raw observations: Kotak Neo")
+with st.expander("RAW BUS LIVE HEALTH", expanded=False):
+    st.write(live)
 
-
-# ---------------------------------------------------------------------------
-# LATEST RESULT
-# ---------------------------------------------------------------------------
-
-result = engine.latest()
+try:
+    result = engine.latest()
+except Exception as exc:
+    result = {}
+    st.error(f"Engine result read failed: {exc}")
 
 if not result:
-    st.info(
-        "No saved day-ahead snapshot yet. "
-        "Background engine is armed for the 15:31 IST scan."
-    )
-    st.caption(
-        "Historical: Supabase RAW BUS â€¢ "
-        "Live/opening: Kotak Neo"
-    )
+    st.info("No saved day-ahead snapshot yet. The scheduled engine is armed for the next run.")
+    st.caption("Historical source: Supabase RAW BUS â€¢ Live/opening source: Supabase RAW BUS fed by Kotak Producer")
     st.stop()
-
 
 day = result.get("day_ahead", {})
 morning = result.get("morning_confirmation", {})
@@ -204,170 +202,86 @@ top5 = day.get("top5", [])
 final = morning.get("final", [])
 confirmations = morning.get("confirmations", [])
 
-
-# ---------------------------------------------------------------------------
-# ENGINE STATUS
-# ---------------------------------------------------------------------------
-
 c1, c2, c3, c4 = st.columns(4)
-
 c1.metric("TOP 5", len(top5))
 c2.metric("Morning", morning.get("status", "PENDING"))
 c3.metric("Final", len(final))
 c4.metric("Engine", result.get("version", "UNKNOWN"))
 
-
-# ---------------------------------------------------------------------------
-# DAY-AHEAD TOP 5
-# ---------------------------------------------------------------------------
-
 st.subheader("TOP 5 OVERNIGHT SHORTLIST")
-
 if top5:
     rows = []
-
     for x in top5:
-        rows.append(
-            {
-                "Rank": x.get("rank"),
-                "Stock": x.get("symbol"),
-                "Sector": x.get("industry", "UNKNOWN"),
-                "Thesis": x.get("direction"),
-                "Score": x.get("day_ahead_score"),
-                "Selection": x.get("selection_score"),
-                "Trend": x.get("trend_score"),
-                "Momentum": x.get("momentum_score"),
-                "RS": x.get("relative_strength_score"),
-                "Sector": x.get("sector_score"),
-                "Volume": x.get("volume_score"),
-                "Volatility": x.get("volatility_score"),
-                "Catalyst": x.get("catalyst_score"),
-                "Anti-FP": x.get("anti_false_positive_score"),
-                "LTP": x.get("ltp"),
-                "ATR %": x.get("atr_pct"),
-            }
-        )
-
-    st.dataframe(
-        pd.DataFrame(rows),
-        use_container_width=True,
-        hide_index=True,
-    )
+        rows.append({
+            "Rank": x.get("rank"),
+            "Stock": x.get("symbol"),
+            "Sector": x.get("industry", "UNKNOWN"),
+            "Thesis": x.get("direction"),
+            "Score": x.get("day_ahead_score"),
+            "Selection": x.get("selection_score"),
+            "Trend": x.get("trend_score"),
+            "Momentum": x.get("momentum_score"),
+            "RS": x.get("relative_strength_score"),
+            "Sector Score": x.get("sector_score"),
+            "Volume": x.get("volume_score"),
+            "Volatility": x.get("volatility_score"),
+            "Catalyst": x.get("catalyst_score"),
+            "Anti-FP": x.get("anti_false_positive_score"),
+            "LTP": x.get("ltp"),
+            "ATR %": x.get("atr_pct"),
+        })
+    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 else:
     st.info("NO QUALIFIED CANDIDATE")
 
-
-# ---------------------------------------------------------------------------
-# THESIS / RISK VIEW
-# ---------------------------------------------------------------------------
-
 st.subheader("THESIS â†’ RISK / SETUP")
-
 if top5:
     detail = []
-
     for x in top5:
-        detail.append(
-            {
-                "Stock": x.get("symbol"),
-                "Thesis": str(x.get("direction", "UNKNOWN")).upper(),
-                "Setup": x.get("setup_type", "UNKNOWN"),
-                "Score": x.get("day_ahead_score"),
-                "LTP": x.get("ltp"),
-                "ATR %": x.get("atr_pct"),
-                "1D %": x.get("ret_1d"),
-                "5D %": x.get("ret_5d"),
-                "20D %": x.get("ret_20d"),
-                "RS 5D": x.get("rs_5d"),
-                "RS 20D": x.get("rs_20d"),
-            }
-        )
-
-    st.dataframe(
-        pd.DataFrame(detail),
-        use_container_width=True,
-        hide_index=True,
-    )
-
-
-# ---------------------------------------------------------------------------
-# MORNING CONFIRMATION
-# ---------------------------------------------------------------------------
+        detail.append({
+            "Stock": x.get("symbol"),
+            "Thesis": str(x.get("direction", "UNKNOWN")).upper(),
+            "Setup": x.get("setup_type", "UNKNOWN"),
+            "Score": x.get("day_ahead_score"),
+            "LTP": x.get("ltp"),
+            "ATR %": x.get("atr_pct"),
+            "1D %": x.get("ret_1d"),
+            "5D %": x.get("ret_5d"),
+            "20D %": x.get("ret_20d"),
+            "RS 5D": x.get("rs_5d"),
+            "RS 20D": x.get("rs_20d"),
+        })
+    st.dataframe(pd.DataFrame(detail), use_container_width=True, hide_index=True)
 
 st.subheader("09:15â€“09:20 MORNING CONFIRMATION")
-
 if confirmations:
-    st.dataframe(
-        pd.DataFrame(confirmations),
-        use_container_width=True,
-        hide_index=True,
-    )
+    st.dataframe(pd.DataFrame(confirmations), use_container_width=True, hide_index=True)
 else:
-    st.info(
-        f"Morning confirmation: "
-        f"{morning.get('status', 'PENDING')}"
-    )
-
-
-# ---------------------------------------------------------------------------
-# FINAL TRADE CANDIDATES
-# ---------------------------------------------------------------------------
+    st.info(f"Morning confirmation: {morning.get('status', 'PENDING')}")
 
 if final:
     st.success("FINAL TRADE CANDIDATES")
-
-    st.dataframe(
-        pd.DataFrame(final),
-        use_container_width=True,
-        hide_index=True,
-    )
+    st.dataframe(pd.DataFrame(final), use_container_width=True, hide_index=True)
 else:
     st.info("NO TRADE â€” engine never forces two trades.")
 
-
-# ---------------------------------------------------------------------------
-# ARCHITECTURE / DATA CONTRACT
-# ---------------------------------------------------------------------------
-
 with st.expander("ENGINE / DATA CONTRACT", expanded=False):
-    st.write(
-        {
-            "engine": result.get("engine"),
-            "version": result.get("version"),
-            "generated_at": result.get("generated_at"),
-            "data_as_of": result.get("data_as_of"),
-            "NIFTY_3MIN_MODIFIED": architecture.get(
-                "nifty_3min_engine_modified"
-            ),
-            "shared_raw_data_allowed": architecture.get(
-                "shared_raw_data_allowed"
-            ),
-            "shared_calculated_features": architecture.get(
-                "shared_calculated_features"
-            ),
-            "shared_scores": architecture.get("shared_scores"),
-            "shared_decisions": architecture.get("shared_decisions"),
-            "shared_labels": architecture.get("shared_labels"),
-            "shared_predictions": architecture.get(
-                "shared_predictions"
-            ),
-            "next_day_can_read_nifty_calculations": architecture.get(
-                "next_day_can_read_nifty_calculations"
-            ),
-            "historical_source": "SUPABASE_RAW_BUS",
-            "live_source": architecture.get(
-                "live_intraday_primary",
-                "KOTAK_NEO",
-            ),
-            "catalyst_source": architecture.get(
-                "catalyst_primary",
-                "NSE_CORPORATE_FILINGS",
-            ),
-        }
-    )
+    st.write({
+        "engine": result.get("engine"),
+        "version": result.get("version"),
+        "generated_at": result.get("generated_at"),
+        "data_as_of": result.get("data_as_of"),
+        "NIFTY_3MIN_MODIFIED": architecture.get("nifty_3min_engine_modified"),
+        "shared_raw_data_allowed": architecture.get("shared_raw_data_allowed"),
+        "shared_calculated_features": architecture.get("shared_calculated_features"),
+        "shared_scores": architecture.get("shared_scores"),
+        "shared_decisions": architecture.get("shared_decisions"),
+        "shared_labels": architecture.get("shared_labels"),
+        "shared_predictions": architecture.get("shared_predictions"),
+        "historical_source": "SUPABASE_RAW_BUS",
+        "live_source": "KOTAK_NEO_VIA_SUPABASE_RAW_BUS",
+        "kotak_credentials_in_this_app": False,
+        "totp_in_this_app": False,
+    })
 
-
-st.caption(
-    "Quality scores are ranking scores, not win probabilities. "
-    "Historical calibration is required before making probability claims."
-)
+st.caption("Quality scores are ranking scores, not win probabilities. Raw BUS contains observations only.")
