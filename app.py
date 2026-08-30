@@ -1000,7 +1000,13 @@ class FeatureEngine:
             self.volume_history.append(volume)
         self.vwap_pv += typical * max(volume, 0.0)
         self.vwap_vol += max(volume, 0.0)
-        fut_vwap = self.vwap_pv / self.vwap_vol if self.vwap_vol > 0 else typical
+        # Never use the current Future price/typical price as a fake VWAP.
+        # If this bar has no usable volume, use an observed broker VWAP (if
+        # the adapter attached one); otherwise keep VWAP unavailable.
+        if self.vwap_vol > 0:
+            fut_vwap = self.vwap_pv / self.vwap_vol
+        else:
+            fut_vwap = safe_float(getattr(candle, "observed_fut_vwap", np.nan), np.nan)
 
         if prev:
             pc = prev[-1].fut_c
@@ -1108,6 +1114,14 @@ class FeatureEngine:
         or_res = self.or_eng.features(candle, atr if is_valid_number(atr) else 0.0)
         sess_res = self.sess.features(candle, atr if is_valid_number(atr) else 0.0)
         basket_input = {**advanced_res, **st_res, **hm_res, **ha_res, **pcr_features, **hw_res, **or_res, **sess_res,
+                        # Explicit CE/PE reference channel: NIFTY 50 Spot only.
+                        "spot_c": candle.spot_c,
+                        "spot_location_evidence": 0.0,
+                        "spot_momentum_evidence": 0.0,
+                        "spot_rsi_14": spot_tactical.get("spot_rsi_14", np.nan),
+                        "spot_macd_hist": spot_tactical.get("spot_macd_hist", np.nan),
+                        "spot_slope_3": spot_tactical.get("spot_slope_3", np.nan),
+                        "spot_bos_signal": spot_tactical.get("spot_bos_signal", 0),
                         "kalman_stretch": kalman_stretch, "stretch_slope_3": stretch_slope,
                         "order_book_imbalance": obi, "oi_long_buildup": oi_long_buildup,
                         "oi_short_buildup": oi_short_buildup, "twc": hw_res.get("twc",0.0),
@@ -1119,6 +1133,14 @@ class FeatureEngine:
         reasoning_input = {**basket_input, "data_quality_score": float(max(0.0, 1.0 - penalty)),
                            "prev_high": self.sess.prev_high, "prev_low": self.sess.prev_low}
         reasoning_res = self.reasoning.compute(candle, prev, reasoning_input)
+        basket_input["spot_location_evidence"] = float(np.clip(
+            0.35 * (safe_int(reasoning_res.get("demand_liquidity_sweep", 0)) -
+                    safe_int(reasoning_res.get("supply_liquidity_sweep", 0))) +
+            0.25 * (safe_int(reasoning_res.get("demand_reclaim", 0)) -
+                    safe_int(reasoning_res.get("supply_rejection", 0))) +
+            0.20 * safe_int(reasoning_res.get("bos_signal", 0)) +
+            0.20 * safe_int(spot_tactical.get("spot_bos_signal", 0)), -1.0, 1.0
+        ))
 
         # Explicit causal aliases for the V9/V10 state machine. The underlying
         # reasoning engine already computes these SMC events; older layers were
@@ -1192,7 +1214,10 @@ class FeatureEngine:
             **hw_res,
             "dispersion_10": safe_float(hw_res.get("dispersion_index"), 0.0),
             "volume_zscore": volume_zscore,
+            "spot_c": candle.spot_c,
             **spot_tactical,
+            "spot_location_evidence": basket_input.get("spot_location_evidence", 0.0),
+            "spot_momentum_evidence": basket_input.get("spot_momentum_evidence", 0.0),
             "atm_iv": atm_iv_obs,
             "iv_change": iv_change,
             **or_res,
@@ -2994,7 +3019,19 @@ class KotakNeoAdapter:
                 fut_o=fut_o, fut_h=fut_h, fut_l=fut_l, fut_c=fut_c, fut_volume=fut_vol, fut_oi=fut_oi,
                 heavy=hw_snap, option_chain=pcr_chain, l2_depth=l2_snap
             )
-            
+            # Carry a real broker/session VWAP into FeatureEngine when volume
+            # deltas are unavailable (for example outside market hours).
+            _fut_vwap_observed = extract_quote_field(
+                self.latest.get(str(self.future_token), {}),
+                ("vwap", "avp", "averagePrice", "average_price", "a")
+            )
+            if not is_valid_number(_fut_vwap_observed):
+                _fut_vwap_observed = extract_quote_field(
+                    (fut_ticks[-1] if fut_ticks else {}),
+                    ("vwap", "avp", "averagePrice", "average_price", "a")
+                )
+            candle.observed_fut_vwap = _fut_vwap_observed
+
             feats = self.feature_engine.compute(candle, self.candles_3m)
             atr_v = safe_float(feats.get("atr_14_prev"), 15.0)
 
@@ -3191,6 +3228,13 @@ def run_unit_tests() -> bool:
     est, vel = kf.update(24050.0)
     assert is_valid_number(est)
     assert not is_valid_number(extract_tick_price({"iv":0.25}))
+    # VWAP must never silently become the current Future price when volume is absent.
+    _fe = FeatureEngine(maxlen=20)
+    _cv = Candle3Min(now_ist().replace(hour=11, minute=30), 24100, 24120, 24080, 24110, 24320, 24340, 24300, 24330, np.nan, 1000)
+    _cv.observed_fut_vwap = 24313.85
+    _ff = _fe.compute(_cv, deque())
+    assert is_valid_number(_ff["fut_vwap"]) and abs(_ff["fut_vwap"] - 24313.85) < 1e-9
+
     # Critical option-mapping invariant: Spot, never Future, determines ATM.
     assert KotakNeoAdapter._spot_atm_strike(24175.65, 50.0) == 24200.0
     assert KotakNeoAdapter._spot_atm_strike(24341.90, 50.0) == 24350.0
@@ -4070,22 +4114,24 @@ def _v10_num(f, key, default=0.0):
 
 def _v10_directional_components(f):
     # Location/context
+    # Spot-only location context for CE/PE. Do not use FUT VWAP reclaim or
+    # other futures-price location as an option-side reference.
     location = (
-        0.28 * _v10_num(f, "v9_location_evidence") +
-        0.18 * _v10_num(f, "vwap_reclaim_signal") +
-        0.14 * _v10_num(f, "demand_zone_signal") -
-        0.14 * _v10_num(f, "supply_zone_signal") +
-        0.10 * _v10_num(f, "liquidity_sweep_signal") +
-        0.10 * _v10_num(f, "liquidity_reclaim_signal") +
-        0.06 * _v10_num(f, "fvg_signal")
+        0.30 * _v10_num(f, "spot_location_evidence", 0.0) +
+        0.18 * _v10_num(f, "demand_zone_signal") -
+        0.18 * _v10_num(f, "supply_zone_signal") +
+        0.14 * _v10_num(f, "liquidity_sweep_signal") +
+        0.12 * _v10_num(f, "liquidity_reclaim_signal") +
+        0.08 * _v10_num(f, "spot_bos_signal", 0.0)
     )
-    # Price/momentum
+    # Price/momentum for CE/PE MUST use NIFTY 50 Spot.
+    # Future-derived RSI/MACD/stretch are not allowed to decide the option side.
     momentum = (
-        0.28 * _v10_num(f, "v9_momentum_evidence") +
-        0.20 * _v10_sig(_v10_num(f, "rsi_14") - 50.0, 12.0) +
-        0.18 * _v10_sig(_v10_num(f, "macd_hist"), 1.0) +
-        0.18 * _v10_sig(_v10_num(f, "stretch_slope_3"), 0.08) +
-        0.16 * _v10_sig(_v10_num(f, "kalman_velocity"), 1.0)
+        0.28 * _v10_num(f, "spot_momentum_evidence", 0.0) +
+        0.22 * _v10_sig(_v10_num(f, "spot_rsi_14", 50.0) - 50.0, 12.0) +
+        0.18 * _v10_sig(_v10_num(f, "spot_macd_hist", 0.0), 1.0) +
+        0.17 * _v10_sig(_v10_num(f, "spot_slope_3", 0.0), 0.08) +
+        0.15 * _v10_num(f, "spot_bos_signal", 0.0)
     )
     # Futures / market internals
     futures_flow = (
