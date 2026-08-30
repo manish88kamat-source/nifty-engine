@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-NEXT-DAY ALPHA UI â€” RAW BUS LOCKED
+NEXT-DAY ALPHA UI — RAW BUS LOCKED
 
 Architecture lock:
     Kotak Neo -> raw_data_producer_kotak_live.py -> Supabase raw_observations
@@ -25,15 +25,14 @@ import requests
 import streamlit as st
 
 from next_day_alpha_engine import NextDayAlphaEngine
-import next_day_alpha_raw_bus_patch  # noqa: F401 - binds engine to Supabase RAW BUS
 
 IST_OFFSET = timedelta(hours=5, minutes=30)
 ROOT = Path(__file__).resolve().parent
 RAW_TABLE = os.getenv("SUPABASE_RAW_TABLE", "raw_observations")
 
-st.set_page_config(page_title="Next-Day Alpha", page_icon="ðŸ“ˆ", layout="wide")
+st.set_page_config(page_title="Next-Day Alpha", page_icon="📈", layout="wide")
 st.title("NEXT-DAY INTRADAY STOCK ALPHA")
-st.caption("Standalone â€¢ Supabase RAW BUS consumer â€¢ No direct Kotak login â€¢ No TOTP")
+st.caption("Standalone • Supabase RAW BUS consumer • No direct Kotak login • No TOTP")
 
 def secret(name: str, default: str = "") -> str:
     value = os.getenv(name, "").strip()
@@ -146,7 +145,7 @@ def get_engine() -> NextDayAlphaEngine:
 
 engine = get_engine()
 
-if st.button("ðŸ”„ Refresh Dashboard", use_container_width=True):
+if st.button("🔄 Refresh Dashboard", use_container_width=True):
     st.rerun()
 
 # IMPORTANT: UI does not call engine.kotak_health(); it checks the common RAW BUS.
@@ -156,9 +155,9 @@ live = live_bus_health()
 h1, h2, h3, h4 = st.columns(4)
 h1.metric("RAW BUS", "READY" if sb.get("reachable") else "OFFLINE")
 h2.metric("LIVE RAW", "RECEIVED" if live.get("quote_received") else "NOT RECEIVED")
-h3.metric("LIVE SYMBOL", live.get("symbol") or "â€”")
+h3.metric("LIVE SYMBOL", live.get("symbol") or "—")
 ltp = live.get("ltp")
-h4.metric("LTP", f"{ltp:.2f}" if isinstance(ltp, (int,float)) else "â€”")
+h4.metric("LTP", f"{ltp:.2f}" if isinstance(ltp, (int,float)) else "—")
 
 st.subheader("DATA SOURCE HEALTH")
 c1, c2 = st.columns(2)
@@ -174,10 +173,10 @@ with c1:
         st.caption("Add SUPABASE_URL and SUPABASE_KEY to Streamlit Secrets.")
 with c2:
     if live.get("quote_received"):
-        st.success("KOTAK LIVE â†’ RAW BUS: RECEIVED")
+        st.success("KOTAK LIVE → RAW BUS: RECEIVED")
         st.caption(f"Last raw quote: {live.get('last_quote_at')}")
     else:
-        st.warning("KOTAK LIVE â†’ RAW BUS: NO RECENT QUOTE")
+        st.warning("KOTAK LIVE → RAW BUS: NO RECENT QUOTE")
         st.caption("The separate Kotak Raw Producer must be running/connected.")
 
 with st.expander("RAW BUS LIVE HEALTH", expanded=False):
@@ -191,7 +190,7 @@ except Exception as exc:
 
 if not result:
     st.info("No saved day-ahead snapshot yet. The scheduled engine is armed for the next run.")
-    st.caption("Historical source: Supabase RAW BUS â€¢ Live/opening source: Supabase RAW BUS fed by Kotak Producer")
+    st.caption("Historical source: Supabase RAW BUS • Live/opening source: Supabase RAW BUS fed by Kotak Producer")
     st.stop()
 
 day = result.get("day_ahead", {})
@@ -234,7 +233,7 @@ if top5:
 else:
     st.info("NO QUALIFIED CANDIDATE")
 
-st.subheader("THESIS â†’ RISK / SETUP")
+st.subheader("THESIS → RISK / SETUP")
 if top5:
     detail = []
     for x in top5:
@@ -253,7 +252,7 @@ if top5:
         })
     st.dataframe(pd.DataFrame(detail), use_container_width=True, hide_index=True)
 
-st.subheader("09:15â€“09:20 MORNING CONFIRMATION")
+st.subheader("09:15–09:20 MORNING CONFIRMATION")
 if confirmations:
     st.dataframe(pd.DataFrame(confirmations), use_container_width=True, hide_index=True)
 else:
@@ -263,7 +262,7 @@ if final:
     st.success("FINAL TRADE CANDIDATES")
     st.dataframe(pd.DataFrame(final), use_container_width=True, hide_index=True)
 else:
-    st.info("NO TRADE â€” engine never forces two trades.")
+    st.info("NO TRADE — engine never forces two trades.")
 
 with st.expander("ENGINE / DATA CONTRACT", expanded=False):
     st.write({
