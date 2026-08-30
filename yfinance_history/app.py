@@ -20,6 +20,7 @@ Rules
 - No resampling.
 - No fabricated coverage.
 - Do not modify the Kotak LIVE producer.
+- NIFTY-500 constituents are resolved dynamically from NSE Indices.
 - Requested windows are requests only.
 - Actual rows returned by yfinance are authoritative.
 """
@@ -28,6 +29,8 @@ from __future__ import annotations
 
 import json
 import os
+import csv
+import io
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
@@ -53,10 +56,11 @@ CONFIG = {
     "batch_size": int(os.getenv("HISTORY_BATCH_SIZE", "250")),
     "workers": int(os.getenv("HISTORY_WORKERS", "6")),
     "timeout_sec": float(os.getenv("SUPABASE_TIMEOUT_SEC", "15")),
-    "tickers_file": os.getenv(
-        "NIFTY500_TICKERS_FILE",
-        "nifty500_yahoo_tickers.txt",
+    "nifty500_constituent_url": os.getenv(
+        "NIFTY500_CONSTITUENT_URL",
+        "https://www.niftyindices.com/IndexConstituent/ind_nifty500list.csv",
     ),
+    "nifty500_cache_ttl_sec": int(os.getenv("NIFTY500_CACHE_TTL_SEC", "21600")),
 }
 
 
@@ -215,40 +219,83 @@ class SupabaseRawPublisher:
 
 
 # ============================================================================
-# TICKER LOADING
+# DYNAMIC NIFTY-500 UNIVERSE
 # ============================================================================
 
-def parse_ticker_text(text: str) -> List[str]:
-    tickers: List[str] = []
-
-    for line in str(text or "").splitlines():
-        ticker = line.strip()
-
-        if not ticker or ticker.startswith("#"):
-            continue
-
-        tickers.append(ticker)
-
-    return list(dict.fromkeys(tickers))
+YAHOO_SUFFIX = ".NS"
 
 
-def load_tickers(path: str) -> List[str]:
-    file_path = Path(path)
+def _symbol_to_yahoo(symbol: str) -> str:
+    """Convert an NSE equity symbol to its Yahoo Finance NSE ticker."""
+    value = str(symbol or "").strip().upper()
+    if not value:
+        return ""
+    if value.endswith(YAHOO_SUFFIX):
+        return value
+    return f"{value}{YAHOO_SUFFIX}"
 
-    if not file_path.exists():
-        raise FileNotFoundError(
-            f"NIFTY-500 ticker file not found: {file_path}. "
-            "Add nifty500_yahoo_tickers.txt to the repository "
-            "or upload the ticker file in the sidebar."
+
+def fetch_nifty500_constituents() -> Tuple[List[str], str]:
+    """
+    Fetch the current NIFTY-500 constituent list directly from NSE Indices.
+
+    The constituent list is NOT stored in the repository. This prevents a
+    stale 500-symbol file from silently becoming the research universe.
+    """
+    url = CONFIG["nifty500_constituent_url"]
+    response = requests.get(
+        url,
+        headers={
+            "User-Agent": "Mozilla/5.0",
+            "Accept": "text/csv,application/octet-stream,*/*",
+            "Referer": "https://www.niftyindices.com/",
+        },
+        timeout=30,
+    )
+    response.raise_for_status()
+
+    text = response.content.decode("utf-8-sig", errors="replace")
+    reader = csv.DictReader(io.StringIO(text))
+    field_map = {
+        str(name).strip().lower(): name
+        for name in (reader.fieldnames or [])
+        if name
+    }
+
+    symbol_column = field_map.get("symbol")
+    if not symbol_column:
+        raise RuntimeError(
+            "NIFTY-500 constituent CSV did not contain a Symbol column."
         )
 
-    return parse_ticker_text(
-        file_path.read_text(encoding="utf-8")
-    )
+    symbols: List[str] = []
+    for row in reader:
+        raw_symbol = str(row.get(symbol_column, "") or "").strip()
+        yahoo_symbol = _symbol_to_yahoo(raw_symbol)
+        if yahoo_symbol:
+            symbols.append(yahoo_symbol)
+
+    symbols = list(dict.fromkeys(symbols))
+
+    # Guard against an HTML/error page or truncated response being accepted
+    # as a valid universe. Do not silently run an incomplete NIFTY-500 scan.
+    if len(symbols) < 450:
+        raise RuntimeError(
+            f"Dynamic NIFTY-500 constituent fetch returned only "
+            f"{len(symbols)} symbols; refusing incomplete universe."
+        )
+
+    return symbols, url
+
+
+@st.cache_data(ttl=CONFIG["nifty500_cache_ttl_sec"], show_spinner=False)
+def get_dynamic_nifty500() -> Tuple[List[str], str]:
+    return fetch_nifty500_constituents()
 
 
 # ============================================================================
 # YFINANCE RAW FETCH
+
 # ============================================================================
 
 def dataframe_rows(
@@ -510,12 +557,12 @@ def build_jobs(
 
 st.set_page_config(
     page_title="yfinance Historical Raw Producer",
-    page_icon="📚",
+    page_icon="ðŸ“š",
     layout="wide",
 )
 
-st.title("📚 Historical Raw Data Producer")
-st.caption("yfinance → HISTORICAL RAW → Supabase → all 3 engines")
+st.title("ðŸ“š Historical Raw Data Producer")
+st.caption("yfinance â†’ HISTORICAL RAW â†’ Supabase â†’ all 3 engines")
 
 st.info(
     "LOCKED CONTRACT: this worker publishes raw historical observations only. "
@@ -540,7 +587,7 @@ if "last_results" not in st.session_state:
 # ----------------------------------------------------------------------------
 
 with st.sidebar:
-    st.header("🗄️ Supabase RAW BUS")
+    st.header("ðŸ—„ï¸ Supabase RAW BUS")
 
     supabase_url = st.text_input(
         "Supabase URL",
@@ -558,7 +605,7 @@ with st.sidebar:
 
     st.markdown("---")
 
-    st.header("📁 NIFTY-500 Universe")
+    st.header("ðŸ“ NIFTY-500 Universe")
 
     ticker_upload = st.file_uploader(
         "Optional: upload nifty500_yahoo_tickers.txt",
@@ -571,25 +618,25 @@ with st.sidebar:
 
     st.markdown("---")
 
-    st.header("🎯 Historical Jobs")
+    st.header("ðŸŽ¯ Historical Jobs")
 
     run_nifty500 = st.checkbox(
-        "NIFTY-500 daily • 320d",
+        "NIFTY-500 daily â€¢ 320d",
         value=True,
     )
 
     run_benchmark = st.checkbox(
-        "NIFTY benchmark • 320d",
+        "NIFTY benchmark â€¢ 320d",
         value=True,
     )
 
     run_vix = st.checkbox(
-        "India VIX • 320d",
+        "India VIX â€¢ 320d",
         value=True,
     )
 
     run_v7 = st.checkbox(
-        "V7 MTF basket • 1h + 15m",
+        "V7 MTF basket â€¢ 1h + 15m",
         value=False,
         help=(
             "1h request = 180d; 15m request = 55d. "
@@ -606,7 +653,7 @@ with st.sidebar:
 
     st.markdown("---")
 
-    st.header("⚙️ Runtime")
+    st.header("âš™ï¸ Runtime")
 
     st.write(
         {
@@ -621,29 +668,22 @@ with st.sidebar:
 
 
 # ----------------------------------------------------------------------------
-# UNIVERSE RESOLUTION
+# DYNAMIC UNIVERSE RESOLUTION
 # ----------------------------------------------------------------------------
 
 nifty500_tickers: List[str] = []
 ticker_source = ""
 
 try:
-    if ticker_upload is not None:
-        ticker_text = ticker_upload.getvalue().decode(
-            "utf-8",
-            errors="replace",
-        )
-        nifty500_tickers = parse_ticker_text(ticker_text)
-        ticker_source = "uploaded file"
-    else:
-        nifty500_tickers = load_tickers(
-            CONFIG["tickers_file"]
-        )
-        ticker_source = CONFIG["tickers_file"]
-
+    nifty500_tickers, ticker_source = get_dynamic_nifty500()
 except Exception as exc:
     ticker_source = "not available"
-    st.warning(str(exc))
+    st.error(
+        "Unable to obtain the current NIFTY-500 constituent universe. "
+        "The NIFTY-500 job is disabled for this run rather than using a "
+        "stale/incomplete symbol list."
+    )
+    st.caption(str(exc))
 
 
 mtf_tickers: List[str] = []
@@ -689,7 +729,7 @@ c4.metric(
 # SUPABASE TEST
 # ----------------------------------------------------------------------------
 
-st.subheader("🔌 Supabase RAW BUS")
+st.subheader("ðŸ”Œ Supabase RAW BUS")
 
 test_col, run_col = st.columns(2)
 
@@ -730,7 +770,7 @@ with test_col:
 
 with run_col:
     run_clicked = st.button(
-        "🚀 Run Historical Raw Producer",
+        "ðŸš€ Run Historical Raw Producer",
         type="primary",
         use_container_width=True,
     )
@@ -747,9 +787,9 @@ if run_clicked:
 
     if run_nifty500 and not nifty500_tickers:
         st.error(
-            "NIFTY-500 job is selected but no NIFTY-500 ticker file "
-            "is available. Add nifty500_yahoo_tickers.txt to the repo "
-            "or upload it in the sidebar."
+            "NIFTY-500 job is selected but the current constituent universe "
+            "could not be fetched from NSE Indices. Fix the source/network "
+            "issue and run again."
         )
         st.stop()
 
@@ -775,7 +815,7 @@ if run_clicked:
         )
         st.stop()
 
-    st.subheader("📡 Producer Execution")
+    st.subheader("ðŸ“¡ Producer Execution")
 
     progress = st.progress(0)
     status_box = st.empty()
@@ -838,7 +878,7 @@ if run_clicked:
             )
 
             status_box.info(
-                f"Progress {pct}% • {message}"
+                f"Progress {pct}% â€¢ {message}"
             )
 
         results = run_jobs(
@@ -905,7 +945,7 @@ if run_clicked:
 
 if st.session_state.last_run_summary:
 
-    st.subheader("📊 Last Run Summary")
+    st.subheader("ðŸ“Š Last Run Summary")
 
     st.json(
         st.session_state.last_run_summary
@@ -918,7 +958,7 @@ if st.session_state.last_run_summary:
 
 if st.session_state.last_results:
 
-    st.subheader("📋 Job Results")
+    st.subheader("ðŸ“‹ Job Results")
 
     # Keep UI simple and dependency-light.
     display_rows = []
@@ -947,12 +987,12 @@ if st.session_state.last_results:
 # ARCHITECTURE AUDIT
 # ----------------------------------------------------------------------------
 
-st.subheader("🔒 Architecture Lock")
+st.subheader("ðŸ”’ Architecture Lock")
 
 st.code(
-    "Kotak Neo  → LIVE RAW       → Supabase raw_observations → all 3 engines\n"
-    "yfinance   → HISTORICAL RAW → Supabase raw_observations → all 3 engines\n"
-    "                 ↑\n"
+    "Kotak Neo  â†’ LIVE RAW       â†’ Supabase raw_observations â†’ all 3 engines\n"
+    "yfinance   â†’ HISTORICAL RAW â†’ Supabase raw_observations â†’ all 3 engines\n"
+    "                 â†‘\n"
     "        THIS APP ONLY\n\n"
     "No features / scores / labels / regime / decisions cross the bus.",
     language="text",
