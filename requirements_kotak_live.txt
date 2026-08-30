@@ -1,0 +1,8 @@
+# NIFTY Raw Bus — Kotak Neo LIVE environment
+# Python 3.11+
+# Scope: Kotak Neo live raw observations -> Supabase only.
+# No yfinance dependency in this environment.
+
+neo-api-client
+requests>=2.31,<3
+streamlit>=1.35,<2
