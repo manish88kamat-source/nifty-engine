@@ -795,13 +795,47 @@ def main():
 
         supabase_url = st.text_input(
             "Supabase URL",
-            value=env_or_secret("SUPABASE_URL", ""),
+            value=st.session_state.get(
+                "supabase_url_input",
+                env_or_secret("SUPABASE_URL", ""),
+            ),
+            key="supabase_url_input",
+            placeholder="https://your-project.supabase.co",
         )
+
         supabase_key = st.text_input(
             "Supabase Key",
-            value=env_or_secret("SUPABASE_KEY", ""),
+            value=st.session_state.get(
+                "supabase_key_input",
+                env_or_secret("SUPABASE_KEY", ""),
+            ),
             type="password",
+            key="supabase_key_input",
+            placeholder="Supabase anon/service key",
         )
+
+        # Explicit confirmation step: yfinance needs no authentication;
+        # only the Supabase destination must be configured and confirmed.
+        if st.button(
+            "✅ Confirm / Apply Configuration",
+            type="primary",
+            use_container_width=True,
+        ):
+            st.session_state["supabase_config_confirmed"] = True
+            st.session_state["supabase_config_confirmed_at"] = (
+                now_ist().strftime("%Y-%m-%d %H:%M:%S IST")
+            )
+            st.success("Supabase configuration applied.")
+
+        supabase_config_confirmed = bool(
+            st.session_state.get("supabase_config_confirmed", False)
+        )
+
+        if supabase_config_confirmed:
+            st.caption(
+                "✓ Supabase configuration active • "
+                f"{st.session_state.get('supabase_config_confirmed_at', '')}"
+            )
 
         supabase = SupabasePublisher(
             url_override=supabase_url,
@@ -809,7 +843,11 @@ def main():
         )
         historical = HistoricalRawProducer(supabase)
 
-        if st.button("Test Supabase RAW BUS"):
+        if st.button(
+            "🔌 Test Supabase RAW BUS",
+            disabled=not supabase_config_confirmed,
+            use_container_width=True,
+        ):
             health = supabase.health()
             if health.get("reachable"):
                 st.success("Supabase RAW BUS reachable.")
@@ -860,7 +898,7 @@ def main():
         st.markdown("---")
         st.header("🚀 Publish Historical RAW")
 
-        if st.button("Publish NIFTY History", type="primary"):
+        if st.button("Publish NIFTY History", type="primary", disabled=not supabase_config_confirmed):
             if not supabase.url or not supabase.key:
                 st.error("Supabase URL/Key missing.")
             else:
@@ -871,7 +909,7 @@ def main():
                 except Exception as exc:
                     st.error(f"NIFTY history publish failed: {exc}")
 
-        if st.button("Publish Next-Day 500 History"):
+        if st.button("Publish Next-Day 500 History", disabled=not supabase_config_confirmed):
             if not supabase.url or not supabase.key:
                 st.error("Supabase URL/Key missing.")
             else:
@@ -904,7 +942,7 @@ def main():
                         f"Next-Day 500 history publish failed: {exc}"
                     )
 
-        if st.button("Publish MTF + VIX"):
+        if st.button("Publish MTF + VIX", disabled=not supabase_config_confirmed):
             if not supabase.url or not supabase.key:
                 st.error("Supabase URL/Key missing.")
             else:
