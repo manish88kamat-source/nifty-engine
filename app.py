@@ -5627,7 +5627,7 @@ def main():
     is_logged_in = adapter.connected
 
     with st.sidebar:
-        st.subheader("[LIVE] Gateway Controls Ã¢â‚¬â€ Supabase RAW BUS")
+        st.subheader("[LIVE] Gateway Controls â€” Supabase RAW BUS")
         
         if is_logged_in:
             conn_txt = getattr(adapter, "conn_state", "AUTHENTICATED")
