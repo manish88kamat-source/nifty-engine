@@ -7007,7 +7007,7 @@ def _build_final_day_ahead_v8() -> Dict[str, Any]:
         "macro_regime": vix,
         "day_ahead": {
             "universe_size": len(symbols),
-            "volume_shocker_count": len(shock_symbols),
+            "volume_shocker_count": len(shock_symbols_all),
             "usable_symbols": len(frame),
             "scored_symbols": len(scored),
             "top15_count": len(candidates),
