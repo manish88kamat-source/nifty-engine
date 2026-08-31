@@ -146,6 +146,10 @@ CONFIG = {
     "history_batch_size": 250,
     "history_workers": 6,
     "supabase_timeout_sec": 15,
+    # LIVE quote stability controls. These do not change the raw-data contract.
+    "quote_retry_attempts": 3,
+    "quote_retry_delay_sec": 0.75,
+    "feed_lost_after_failures": 3,
 }
 
 
@@ -360,6 +364,20 @@ class KotakConnector:
         }
         self.logs = []
 
+        # LIVE feed observability / stability state. These fields are telemetry
+        # only; they do not alter instrument mapping or raw payload semantics.
+        self.feed_state = "AUTH_REQUIRED"
+        self.last_successful_fetch: Optional[datetime] = None
+        self.last_raw_event_timestamp = None
+        self.last_quote_count = 0
+        self.consecutive_quote_failures = 0
+        self.total_quote_failures = 0
+        self.total_quote_fetches = 0
+        self.total_successful_fetches = 0
+        self.last_quote_error = ""
+        self.last_failure_time: Optional[datetime] = None
+        self.per_symbol_last_seen: Dict[str, datetime] = {}
+
     def log(self, message: str):
         timestamp = now_ist().strftime("%H:%M:%S")
         self.logs.append(f"[{timestamp}] {message}")
@@ -384,6 +402,9 @@ class KotakConnector:
             raise RuntimeError(f"Login Step 2 Error: {step2.get('error') or step2.get('Error')}")
 
         self.connected = True
+        self.feed_state = "AUTHENTICATED"
+        self.consecutive_quote_failures = 0
+        self.last_quote_error = ""
         self.log("Kotak authentication successful.")
         return True
 
@@ -733,28 +754,97 @@ class KotakConnector:
         return True
 
     def fetch_raw_quotes(self) -> List[Dict[str, Any]]:
+        """Fetch LIVE raw quotes with bounded in-session retries.
+
+        This deliberately does NOT auto-login or ask for a new TOTP. A transient
+        quote/API/network failure is retried against the existing authenticated
+        Kotak session. Only a genuine authentication/session failure requires the
+        existing manual Connect flow.
+        """
         if not self.connected or not self.client:
+            self.feed_state = "AUTH_REQUIRED"
             return []
-        
+
         tokens_to_poll = [
             {"instrument_token": self.spot_token, "exchange_segment": "nse_cm"},
         ]
         if self.future_token:
             tokens_to_poll.append({"instrument_token": str(self.future_token), "exchange_segment": "nse_fo"})
-        
+
         for sym, tok in self.heavy_tokens.items():
             tokens_to_poll.append({"instrument_token": str(tok), "exchange_segment": "nse_cm"})
-        
+
         for tok in self.pcr_tokens:
             tokens_to_poll.append({"instrument_token": str(tok), "exchange_segment": "nse_fo"})
 
-        try:
-            response = self.client.quotes(instrument_tokens=tokens_to_poll, quote_type="all")
-            return extract_records(response)
-        except Exception as exc:
-            self.log(f"Quote fetch error: {exc}")
-            return []
+        attempts = max(1, int(CONFIG.get("quote_retry_attempts", 3)))
+        retry_delay = max(0.0, float(CONFIG.get("quote_retry_delay_sec", 0.75)))
+        self.total_quote_fetches += 1
+        last_error = ""
 
+        for attempt in range(1, attempts + 1):
+            try:
+                response = self.client.quotes(
+                    instrument_tokens=tokens_to_poll, quote_type="all"
+                )
+                records = extract_records(response)
+                if records:
+                    now = now_ist()
+                    self.last_successful_fetch = now
+                    self.last_quote_count = len(records)
+                    self.consecutive_quote_failures = 0
+                    self.last_quote_error = ""
+                    self.total_successful_fetches += 1
+                    self.feed_state = "LIVE"
+
+                    # Track last locally-received time per symbol. This answers
+                    # exactly which raw instrument stopped arriving.
+                    for record in records:
+                        if not isinstance(record, dict):
+                            continue
+                        symbol = str(
+                            record.get(
+                                "display_symbol",
+                                record.get(
+                                    "pTrdSymbol",
+                                    record.get("tradingSymbol", record.get("symbol", "UNKNOWN")),
+                                ),
+                            )
+                        ).strip()
+                        if symbol and symbol != "UNKNOWN":
+                            self.per_symbol_last_seen[symbol] = now
+
+                        for key in (
+                            "event_timestamp", "exchange_timestamp", "timestamp",
+                            "ltt", "last_trade_time",
+                        ):
+                            value = record.get(key)
+                            if value:
+                                self.last_raw_event_timestamp = str(value)
+                                break
+                    return records
+
+                last_error = f"Empty quote response (attempt {attempt}/{attempts})"
+            except Exception as exc:
+                last_error = str(exc)
+                if attempt == 1:
+                    self.log(f"Quote fetch error; retrying in-session: {exc}")
+                else:
+                    self.log(f"Quote retry {attempt}/{attempts} failed: {exc}")
+
+            if attempt < attempts:
+                time.sleep(retry_delay)
+
+        # Important: do NOT mark authentication disconnected merely because the
+        # quote endpoint had transient failures. Preserve the valid session and
+        # let the next poll try again.
+        self.consecutive_quote_failures += 1
+        self.total_quote_failures += 1
+        self.last_quote_error = last_error[:500]
+        self.last_failure_time = now_ist()
+        lost_after = max(1, int(CONFIG.get("feed_lost_after_failures", 3)))
+        self.feed_state = "FEED LOST" if self.consecutive_quote_failures >= lost_after else "DEGRADED"
+        return []
 
 class YahooConnector:
     """Historical/raw Yahoo producer. No indicators, scores, resampling, or engine calculations."""
@@ -1536,7 +1626,22 @@ def main():
         return
 
     st.set_page_config(page_title="Institutional Raw Data Producer Bus", layout="wide")
-    st.title("📡 Institutional Raw Data Producer Bus")
+    st.markdown(
+        """<style>
+        [data-testid="stSidebar"] {display: none;}
+        [data-testid="collapsedControl"] {display: none;}
+        .block-container {padding-top: 1.2rem; padding-left: 1rem; padding-right: 1rem; max-width: 1200px;}
+        @media (max-width: 700px) {
+            .block-container {padding: 0.7rem 0.7rem 1rem 0.7rem;}
+            h1 {font-size: 1.75rem !important;}
+            h2 {font-size: 1.35rem !important;}
+            h3 {font-size: 1.1rem !important;}
+        }
+        </style>""",
+        unsafe_allow_html=True,
+    )
+    st.title("ðŸ“¡ Institutional Raw Data Producer Bus")
+    st.caption("Kotak Neo LIVE RAW â†’ Supabase RAW BUS | Stability + full feed observability")
 
     if "kotak" not in st.session_state:
         st.session_state.kotak = KotakConnector()
@@ -1547,12 +1652,24 @@ def main():
 
     kotak: KotakConnector = st.session_state.kotak
 
-    with st.sidebar:
-        st.header("🔑 Authentication")
+    for key, default in {
+        "last_supabase_write": None,
+        "last_supabase_attempt": None,
+        "last_published_count": 0,
+        "poll_cycle": 0,
+        "last_poll_started": None,
+        "last_poll_completed": None,
+        "last_pipeline_error": "",
+    }.items():
+        if key not in st.session_state:
+            st.session_state[key] = default
+
+    with st.expander("âš™ï¸ CONTROL CENTER", expanded=False):
+        st.header("ðŸ”‘ Authentication")
         totp_input = st.text_input("Live TOTP Code", type="password")
 
         st.markdown("---")
-        st.header("🗄️ Supabase RAW BUS")
+        st.header("ðŸ—„ï¸ Supabase RAW BUS")
         supabase_url_input = st.text_input(
             "Supabase URL",
             value=st.session_state.get("supabase_url_input", env_or_secret("SUPABASE_URL", "")),
@@ -1580,7 +1697,7 @@ def main():
                 st.error(health.get("error", "Supabase connection failed."))
 
         st.markdown("---")
-        st.header("📡 Live Raw Producer")
+        st.header("ðŸ“¡ Live Raw Producer")
         c1, c2 = st.columns(2)
         with c1:
             if st.button("Connect Kotak"):
@@ -1608,7 +1725,7 @@ def main():
                 st.rerun()
 
         if st.button(
-            "Test Live Raw → Supabase",
+            "Test Live Raw â†’ Supabase",
             disabled=not can_start,
         ):
             try:
@@ -1644,8 +1761,8 @@ def main():
             st.json(st.session_state["last_live_test"])
 
         st.markdown("---")
-        st.header("📚 Historical Raw Producer")
-        st.caption("yfinance → Supabase only. Requested windows are preserved; only actual returned source history is published.")
+        st.header("ðŸ“š Historical Raw Producer")
+        st.caption("yfinance â†’ Supabase only. Requested windows are preserved; only actual returned source history is published.")
         if st.button("Test yfinance Data Source"):
             with st.spinner("Probing yfinance source coverage..."):
                 yf_health = YahooConnector.health_probe()
@@ -1653,7 +1770,7 @@ def main():
         if st.session_state.get("yf_health"):
             st.json(st.session_state["yf_health"])
 
-        if st.button("🔬 Deep-Diagnose Yahoo / yfinance"):
+        if st.button("ðŸ”¬ Deep-Diagnose Yahoo / yfinance"):
             with st.spinner("Running yfinance + direct Yahoo Chart comparison..."):
                 st.session_state["yf_deep_diagnostic"] = YahooConnector.deep_diagnostic()
 
@@ -1664,7 +1781,7 @@ def main():
                 "This compares the yfinance path against Yahoo's direct v8 Chart OHLCV endpoint."
             )
             st.json(st.session_state["yf_deep_diagnostic"])
-        st.caption("Universe metadata is loaded from NSE; historical prices remain yfinance → Supabase only.")
+        st.caption("Universe metadata is loaded from NSE; historical prices remain yfinance â†’ Supabase only.")
 
         if "hist_symbols" not in st.session_state:
             st.session_state.hist_symbols = ""
@@ -1710,11 +1827,11 @@ def main():
                 try:
                     symbols = [x.strip().upper() for x in hist_symbols_text.replace(",", "\n").splitlines() if x.strip()]
                     if not symbols:
-                        with st.spinner("No list supplied — loading current NIFTY-500 list from NSE..."):
+                        with st.spinner("No list supplied â€” loading current NIFTY-500 list from NSE..."):
                             symbols = fetch_nifty500_symbols_from_nse()
                         st.session_state.hist_symbols = "\n".join(symbols)
                         st.info(f"Using {len(symbols)} symbols loaded from NSE.")
-                    with st.spinner(f"Publishing {len(symbols)} symbols × 320 daily bars..."):
+                    with st.spinner(f"Publishing {len(symbols)} symbols Ã— 320 daily bars..."):
                         stats = historical.publish_next_day_universe_history(symbols)
                     st.success(f"Completed: {len(stats)} symbols processed.")
                 except Exception as exc:
@@ -1736,23 +1853,73 @@ def main():
                     except Exception as exc:
                         st.error(f"MTF + VIX publish failed: {exc}")
 
-    col1, col2, col3, col4 = st.columns(4)
-    col1.metric("Kotak", "CONNECTED" if kotak.connected else "DISCONNECTED")
-    col2.metric("Active Future", kotak.future_token or "NOT DISCOVERED")
-    col3.metric("PCR Contracts", len(kotak.pcr_tokens))
-    col4.metric("Supabase", "READY" if supabase.url and supabase.key else "NOT CONFIGURED")
+    # ------------------------------------------------------------------
+    # LIVE MOBILE-FIRST OPERATIONS DASHBOARD
+    # ------------------------------------------------------------------
+    st.markdown("## ðŸ“¡ LIVE PRODUCER MONITOR")
+    state = kotak.feed_state if kotak.connected else "AUTH REQUIRED"
+    state_icon = {
+        "LIVE": "ðŸŸ¢", "AUTHENTICATED": "ðŸŸ¡", "DEGRADED": "ðŸŸ ",
+        "FEED LOST": "ðŸ”´", "AUTH_REQUIRED": "ðŸ”´",
+    }.get(state, "âšª")
+    st.markdown(f"### {state_icon} {state}")
 
-    st.markdown("### Live Raw Bus Health")
-    live_status = "READY" if (kotak.connected and kotak.future_token) else "NOT READY"
+    def fmt_dt(value):
+        return value.strftime("%H:%M:%S IST") if isinstance(value, datetime) else "â€”"
+
+    now = now_ist()
+    feed_age = None
+    if kotak.last_successful_fetch:
+        feed_age = max(0, int((now - kotak.last_successful_fetch).total_seconds()))
+
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Connection / Session", "AUTHENTICATED" if kotak.connected else "NOT CONNECTED")
+    c2.metric("Feed Age", f"{feed_age}s" if feed_age is not None else "â€”")
+    c3.metric("Last Quotes", str(kotak.last_quote_count))
+
+    c4, c5, c6 = st.columns(3)
+    c4.metric("Last Kotak Fetch", fmt_dt(kotak.last_successful_fetch))
+    c5.metric("Last Supabase Write", fmt_dt(st.session_state.get("last_supabase_write")))
+    c6.metric("Reconnects / Auth", "Manual only")
+
+    st.markdown("### ðŸ“Š Pipeline Health")
+    pipeline = {
+        "Kotak source": state,
+        "Last successful Kotak fetch": fmt_dt(kotak.last_successful_fetch),
+        "Last raw event timestamp": str(kotak.last_raw_event_timestamp or "â€”"),
+        "Quotes received last good poll": kotak.last_quote_count,
+        "Consecutive quote failures": kotak.consecutive_quote_failures,
+        "Total quote failures": kotak.total_quote_failures,
+        "Last quote error": kotak.last_quote_error or "â€”",
+        "Poll cycles": st.session_state.get("poll_cycle", 0),
+        "Last Supabase write": fmt_dt(st.session_state.get("last_supabase_write")),
+        "Rows published last poll": st.session_state.get("last_published_count", 0),
+        "Last pipeline error": st.session_state.get("last_pipeline_error") or "â€”",
+    }
+    st.json(pipeline)
+
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("Active Future", kotak.future_token or "NOT DISCOVERED")
+    col2.metric("Future Symbol", kotak.future_symbol or "â€”")
+    col3.metric("PCR Contracts", len(kotak.pcr_tokens))
+    col4.metric("NFO Records", len(kotak.nfo_records))
+
     sup_health = supabase.health()
+    st.markdown("### ðŸ—„ï¸ RAW BUS")
     st.write({
-        "Kotak": "CONNECTED" if kotak.connected else "DISCONNECTED",
-        "Active Future": kotak.future_token or "NOT DISCOVERED",
-        "NFO Master Records": len(kotak.nfo_records),
-        "PCR Contracts": len(kotak.pcr_tokens),
-        "Supabase": "REACHABLE" if sup_health.get("reachable") else "NOT READY",
-        "Live Raw Producer": live_status,
+        "Supabase": "ðŸŸ¢ REACHABLE" if sup_health.get("reachable") else "ðŸ”´ NOT READY",
+        "RAW table": "raw_observations",
+        "Last write": fmt_dt(st.session_state.get("last_supabase_write")),
+        "Rows in last successful poll": st.session_state.get("last_published_count", 0),
     })
+
+    if kotak.per_symbol_last_seen:
+        st.markdown("### ðŸ”Ž Last Seen â€” Individual Raw Instruments")
+        rows = []
+        for symbol, seen in sorted(kotak.per_symbol_last_seen.items(), key=lambda x: x[1], reverse=True):
+            age = max(0, int((now - seen).total_seconds()))
+            rows.append({"Symbol": symbol, "Last Seen": fmt_dt(seen), "Age": f"{age}s"})
+        st.dataframe(rows, use_container_width=True, hide_index=True)
 
     st.markdown("### Required Data Coverage Audit")
     coverage = HistoricalRawProducer.coverage_report()
@@ -1760,8 +1927,8 @@ def main():
 
     st.markdown("### Raw Data Contract")
     st.code(
-        "Kotak Neo → LIVE RAW → Supabase → all 3 engines\n"
-        "yfinance → HISTORICAL RAW → Supabase → all 3 engines\n"
+        "Kotak Neo â†’ LIVE RAW â†’ Supabase â†’ all 3 engines\n"
+        "yfinance â†’ HISTORICAL RAW â†’ Supabase â†’ all 3 engines\n"
         "No features / scores / labels / regime / decisions cross the bus.",
         language="text",
     )
@@ -1772,23 +1939,40 @@ def main():
                 st.text(log)
 
     if st.session_state.producer_running:
-        st.success("🟢 Raw Producer is active. Kotak raw quotes are being published to Supabase `raw_observations`.")
+        st.success("ðŸŸ¢ Raw Producer is active. Kotak raw quotes are being published to Supabase `raw_observations`.")
         status_container = st.empty()
         log_container = st.empty()
-        poll_cycle = 0
+        poll_cycle = int(st.session_state.get("poll_cycle", 0))
+
         while st.session_state.producer_running:
+            poll_cycle += 1
+            st.session_state["poll_cycle"] = poll_cycle
+            st.session_state["last_poll_started"] = now_ist()
             try:
                 raw_quotes = kotak.fetch_raw_quotes()
                 published_count = 0
-                for quote in raw_quotes:
-                    if not isinstance(quote, dict):
-                        continue
-                    token = str(quote.get("exchange_token", quote.get("instrument_token", quote.get("pSymbol", quote.get("pSymbolToken", "UNKNOWN")))))
-                    symbol = str(quote.get("display_symbol", quote.get("pTrdSymbol", quote.get("tradingSymbol", "UNKNOWN"))))
-                    if supabase.publish_observation("kotak_live", symbol, token, quote):
-                        published_count += 1
 
-                # Macro raw data is supplementary market context; it remains raw and uncalculated.
+                if raw_quotes:
+                    for quote in raw_quotes:
+                        if not isinstance(quote, dict):
+                            continue
+                        token = str(
+                            quote.get(
+                                "exchange_token",
+                                quote.get("instrument_token", quote.get("pSymbol", quote.get("pSymbolToken", "UNKNOWN")))
+                            )
+                        )
+                        symbol = str(
+                            quote.get(
+                                "display_symbol",
+                                quote.get("pTrdSymbol", quote.get("tradingSymbol", "UNKNOWN"))
+                            )
+                        )
+                        st.session_state["last_supabase_attempt"] = now_ist()
+                        if supabase.publish_observation("kotak_live", symbol, token, quote):
+                            published_count += 1
+
+                # Macro raw data remains unchanged and supplementary.
                 if poll_cycle % CONFIG["macro_every_n_cycles"] == 0:
                     for ticker, df in YahooConnector.fetch_macro_data().items():
                         if df.empty:
@@ -1800,12 +1984,27 @@ def main():
                             "raw": clean_row, "raw_source": "yfinance"
                         })
 
-                status_container.info(f"Last Poll: {now_ist().strftime('%H:%M:%S')} | Published {published_count} raw quotes | Options mapped: {len(kotak.pcr_tokens)}")
-                poll_cycle += 1
-            except Exception as exc:
-                log_container.error(f"Producer loop exception: {exc}")
-            time.sleep(float(CONFIG["poll_interval_sec"]))
+                if published_count > 0:
+                    st.session_state["last_supabase_write"] = now_ist()
+                st.session_state["last_published_count"] = published_count
+                st.session_state["last_pipeline_error"] = ""
+                st.session_state["last_poll_completed"] = now_ist()
 
+                status_container.info(
+                    f"Poll #{poll_cycle} | {state_icon if kotak.feed_state == 'LIVE' else 'ðŸŸ '} {kotak.feed_state} | "
+                    f"Quotes: {len(raw_quotes)} | Published: {published_count} | "
+                    f"Feed age: {feed_age if feed_age is not None else 'â€”'}s | "
+                    f"Failures: {kotak.consecutive_quote_failures} | Active Future: {kotak.future_token or 'â€”'}"
+                )
+            except Exception as exc:
+                st.session_state["last_pipeline_error"] = str(exc)[:500]
+                st.session_state["last_poll_completed"] = now_ist()
+                log_container.error(f"Producer pipeline exception: {exc}")
+
+            if kotak.logs:
+                log_container.text("\n".join(kotak.logs[-12:]))
+
+            time.sleep(float(CONFIG["poll_interval_sec"]))
 
 
 if __name__ == "__main__":
