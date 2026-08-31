@@ -1,22 +1,17 @@
 #!/usr/bin/env python3
 """
 Persistent Kotak LIVE RAW Producer Worker
-STEP 2 of the producer stabilization architecture.
+STEP 2/3 stabilized worker.
 
-Purpose
--------
-Run Kotak LIVE polling independently of the Streamlit browser session and
-publish raw observations to the existing Supabase RAW BUS.
+The worker is intentionally independent of the Streamlit browser session.
+Manual TOTP is required only when starting/authenticating the worker.
+No automatic TOTP generation or automatic re-login is performed.
 
-Locked boundaries
------------------
-- Manual TOTP authentication only.
-- Existing Kotak discovery / future / PCR mapping is preserved.
-- Existing Supabase raw_observations contract is preserved.
-- No engine / feature / scoring / regime / decision logic.
-- No automatic TOTP or automatic re-login.
-
-The worker writes a small JSON state file for the Streamlit monitor.
+Locked data boundaries:
+- Kotak LIVE raw observations -> Supabase raw_observations
+- Existing NIFTY future/PCR discovery is preserved.
+- Existing supplementary Yahoo macro RAW publication cadence is preserved.
+- No indicators, features, scores, labels, regimes, decisions or engine logic.
 """
 
 from __future__ import annotations
@@ -551,6 +546,443 @@ class KotakConnector:
             self.log(f"Quote fetch error: {exc}")
             return []
 
+class YahooConnector:
+    """Historical/raw Yahoo producer. No indicators, scores, resampling, or engine calculations."""
+
+    # yfinance/Yahoo intraday coverage is source-limited and can vary by ticker.
+    # We therefore never force an oversized intraday window.  The connector
+    # tries the requested window first, then progressively smaller source-safe
+    # windows and keeps ONLY the rows Yahoo actually returns.
+    INTRADAY_FALLBACK_DAYS = {
+        "1h": (180, 120, 90, 60, 30, 14, 7, 3, 1),
+        "60m": (180, 120, 90, 60, 30, 14, 7, 3, 1),
+        "15m": (55, 50, 45, 30, 14, 7, 3, 1),
+        "30m": (60, 45, 30, 14, 7, 3, 1),
+        "5m": (30, 14, 7, 3, 1),
+        "2m": (30, 14, 7, 3, 1),
+        "1m": (7, 3, 1),
+    }
+    last_diagnostics: Dict[str, Any] = {}
+
+    @staticmethod
+    def _clean_downloaded_frame(df: pd.DataFrame) -> pd.DataFrame:
+        """Normalize a real Yahoo response without creating observations."""
+        if df is None or df.empty:
+            return pd.DataFrame()
+
+        if isinstance(df.columns, pd.MultiIndex):
+            if len(set(df.columns.get_level_values(-1))) == 1:
+                df.columns = [c[0] for c in df.columns]
+            else:
+                df.columns = [
+                    c[-1] if isinstance(c, tuple) else c
+                    for c in df.columns
+                ]
+
+        df = df.reset_index()
+        time_col = (
+            "Datetime" if "Datetime" in df.columns
+            else "Date" if "Date" in df.columns
+            else df.columns[0]
+        )
+
+        rename = {time_col: "event_timestamp"}
+        for c in ("Open", "High", "Low", "Close", "Volume"):
+            if c in df.columns:
+                rename[c] = c.lower()
+        df = df.rename(columns=rename)
+
+        keep = [
+            c for c in
+            ["event_timestamp", "open", "high", "low", "close", "volume"]
+            if c in df.columns
+        ]
+        df = df[keep].copy()
+        if "event_timestamp" not in df.columns or "close" not in df.columns:
+            return pd.DataFrame()
+
+        ts = pd.to_datetime(df["event_timestamp"], errors="coerce", utc=True)
+        df["event_timestamp"] = ts.dt.tz_convert(IST)
+        for c in ("open", "high", "low", "close", "volume"):
+            if c in df.columns:
+                df[c] = pd.to_numeric(df[c], errors="coerce")
+
+        return (
+            df.dropna(subset=["event_timestamp", "close"])
+            .drop_duplicates("event_timestamp")
+            .sort_values("event_timestamp")
+            .reset_index(drop=True)
+        )
+
+    @classmethod
+    def _request_days(cls, ticker: str, days: int, interval: str) -> pd.DataFrame:
+        """Request one real source window."""
+        end = now_ist()
+        start = end - pd.Timedelta(days=int(days))
+        kwargs = {
+            "interval": interval,
+            "progress": False,
+            "auto_adjust": False,
+            "threads": False,
+            # now_ist() already returns a timezone-aware Python datetime.
+            # Do not call .to_pydatetime(): that method belongs to pandas
+            # Timestamp/DatetimeIndex objects, not Python datetime objects.
+            "start": start,
+            "end": end,
+        }
+        return cls._clean_downloaded_frame(yf.download(ticker, **kwargs))
+
+    @classmethod
+    def _raw_yahoo_chart_probe(
+        cls,
+        ticker: str,
+        days: int,
+        interval: str,
+    ) -> Dict[str, Any]:
+        """Diagnostic-only direct Yahoo Chart API probe.
+
+        This does NOT publish data and does NOT replace yfinance.  It exists to
+        separate a Yahoo/network failure from a yfinance transport/adapter
+        failure. Yahoo's v8 Chart endpoint is the OHLCV endpoint used by many
+        independent clients and does not require a crumb for chart data.
+        """
+        end = now_ist()
+        start = end - pd.Timedelta(days=int(days))
+        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"
+        params = {
+            "period1": int(start.timestamp()),
+            "period2": int(end.timestamp()),
+            "interval": interval,
+            "events": "history",
+            "includePrePost": "false",
+        }
+        headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/126.0.0.0 Safari/537.36"
+            ),
+            "Accept": "application/json,text/plain,*/*",
+        }
+        started = time.perf_counter()
+        try:
+            response = requests.get(
+                url,
+                params=params,
+                headers=headers,
+                timeout=15,
+            )
+            elapsed_ms = round((time.perf_counter() - started) * 1000, 1)
+            body_preview = response.text[:500]
+            payload = None
+            try:
+                payload = response.json()
+            except Exception:
+                payload = None
+
+            chart = payload.get("chart", {}) if isinstance(payload, dict) else {}
+            api_error = chart.get("error") if isinstance(chart, dict) else None
+            results = chart.get("result") if isinstance(chart, dict) else None
+            result = results[0] if results else None
+            timestamps = (result or {}).get("timestamp") or []
+
+            return {
+                "transport": "direct_yahoo_chart",
+                "url_host": "query1.finance.yahoo.com",
+                "ticker": ticker,
+                "interval": interval,
+                "requested_days": int(days),
+                "http_status": int(response.status_code),
+                "elapsed_ms": elapsed_ms,
+                "rows": int(len(timestamps)),
+                "api_error": api_error,
+                "response_preview": body_preview if response.status_code != 200 else "",
+                "status": (
+                    "DATA"
+                    if response.ok and result and timestamps
+                    else "YAHOO_API_ERROR"
+                    if api_error
+                    else "HTTP_ERROR"
+                    if not response.ok
+                    else "EMPTY_RESULT"
+                ),
+            }
+        except Exception as exc:
+            elapsed_ms = round((time.perf_counter() - started) * 1000, 1)
+            return {
+                "transport": "direct_yahoo_chart",
+                "url_host": "query1.finance.yahoo.com",
+                "ticker": ticker,
+                "interval": interval,
+                "requested_days": int(days),
+                "http_status": None,
+                "elapsed_ms": elapsed_ms,
+                "rows": 0,
+                "api_error": None,
+                "response_preview": "",
+                "status": "TRANSPORT_EXCEPTION",
+                "error_type": type(exc).__name__,
+                "error": str(exc),
+            }
+
+    @classmethod
+    def deep_diagnostic(cls) -> Dict[str, Any]:
+        """Deep, non-publishing source diagnosis.
+
+        Four representative contracts are tested through both yfinance and
+        Yahoo's direct Chart API. The result is diagnostic only; no fallback
+        source is silently introduced into the publisher.
+        """
+        probes = [
+            ("NIFTY daily", "^NSEI", 320, "1d"),
+            ("Representative 1h", "RELIANCE.NS", 180, "1h"),
+            ("Representative 15m", "RELIANCE.NS", 55, "15m"),
+            ("India VIX daily", "^INDIAVIX", 320, "1d"),
+        ]
+        out: Dict[str, Any] = {
+            "diagnostic_only": True,
+            "publishes_data": False,
+            "yfinance_version": getattr(yf, "__version__", "unknown"),
+            "python_version": platform.python_version(),
+            "platform": platform.platform(),
+            "curl_cffi_installed": importlib.util.find_spec("curl_cffi") is not None,
+            "probes": {},
+        }
+
+        try:
+            import curl_cffi  # type: ignore
+            out["curl_cffi_version"] = getattr(curl_cffi, "__version__", "unknown")
+        except Exception:
+            out["curl_cffi_version"] = None
+
+        for label, ticker, days, interval in probes:
+            yf_started = time.perf_counter()
+            try:
+                df = cls._download(ticker, days=days, interval=interval)
+                yf_diag = dict(cls.last_diagnostics)
+                yf_result = {
+                    "status": yf_diag.get("status", "AVAILABLE" if not df.empty else "NO_DATA"),
+                    "rows": int(len(df)),
+                    "actual_returned_days": cls._actual_days(df),
+                    "source_window_used_days": yf_diag.get("source_window_used_days"),
+                    "attempted_windows_days": yf_diag.get("attempted_windows_days", []),
+                    "last_error": yf_diag.get("last_error"),
+                    "error": yf_diag.get("error"),
+                    "elapsed_ms": round((time.perf_counter() - yf_started) * 1000, 1),
+                }
+            except Exception as exc:
+                yf_result = {
+                    "status": "EXCEPTION",
+                    "rows": 0,
+                    "actual_returned_days": 0.0,
+                    "source_window_used_days": None,
+                    "attempted_windows_days": [],
+                    "last_error": None,
+                    "error_type": type(exc).__name__,
+                    "error": str(exc),
+                    "elapsed_ms": round((time.perf_counter() - yf_started) * 1000, 1),
+                }
+
+            direct = cls._raw_yahoo_chart_probe(ticker, days, interval)
+            if yf_result.get("rows", 0) > 0 and direct.get("rows", 0) > 0:
+                diagnosis = "YFINANCE_AND_YAHOO_OK"
+            elif yf_result.get("rows", 0) == 0 and direct.get("rows", 0) > 0:
+                diagnosis = "YAHOO_OK_YFINANCE_PATH_FAIL"
+            elif yf_result.get("rows", 0) == 0 and direct.get("rows", 0) == 0:
+                diagnosis = "BOTH_PATHS_FAIL_OR_WINDOW_UNAVAILABLE"
+            else:
+                diagnosis = "YFINANCE_OK_DIRECT_PATH_EMPTY_OR_REJECTED"
+
+            out["probes"][label] = {
+                "ticker": ticker,
+                "requested_days": days,
+                "interval": interval,
+                "yfinance": yf_result,
+                "direct_yahoo_chart": direct,
+                "diagnosis": diagnosis,
+            }
+
+        return out
+
+    @classmethod
+    def _download(
+        cls,
+        ticker: str,
+        period: Optional[str] = None,
+        days: Optional[int] = None,
+        interval: str = "1d",
+    ) -> pd.DataFrame:
+        """
+        Fetch ONLY real Yahoo/yfinance observations.
+
+        For intraday data, Yahoo may reject a requested window that is longer
+        than the source currently permits for that interval/ticker.  Instead of
+        treating that as NO_DATA, we retry with smaller windows until Yahoo
+        returns real rows.  The returned frame is never padded, resampled,
+        duplicated, or relabelled as the original requested coverage.
+        """
+        requested_days = int(days) if days is not None else None
+        attempts = []
+
+        try:
+            if period:
+                attempts = [("period", period)]
+                df = cls._clean_downloaded_frame(yf.download(
+                    ticker,
+                    period=period,
+                    interval=interval,
+                    progress=False,
+                    auto_adjust=False,
+                    threads=False,
+                ))
+                cls.last_diagnostics = {
+                    "ticker": ticker, "interval": interval,
+                    "requested_days": requested_days, "requested_period": period,
+                    "attempted_windows_days": [],
+                    "actual_returned_days": cls._actual_days(df),
+                    "returned_rows": int(len(df)),
+                    "status": "AVAILABLE" if not df.empty else "NO_DATA",
+                    "coverage_policy": "actual returned rows only",
+                }
+                return df
+
+            if days is None:
+                days = 1
+
+            if interval in cls.INTRADAY_FALLBACK_DAYS:
+                candidates = [int(days)] + [
+                    int(x) for x in cls.INTRADAY_FALLBACK_DAYS[interval]
+                    if int(x) < int(days)
+                ]
+                # De-duplicate while preserving order.
+                windows = list(dict.fromkeys(candidates))
+            else:
+                # Daily/other non-intraday requests can safely use the exact
+                # requested window; if the source has less, Yahoo returns less.
+                windows = [int(days)]
+
+            df = pd.DataFrame()
+            used_days = None
+            last_error = None
+
+            for window_days in windows:
+                attempts.append(window_days)
+                try:
+                    candidate = cls._request_days(ticker, window_days, interval)
+                    if not candidate.empty:
+                        df = candidate
+                        used_days = window_days
+                        break
+                except Exception as exc:
+                    last_error = str(exc)
+                    continue
+
+            actual_days = cls._actual_days(df)
+            status = "AVAILABLE" if not df.empty else "NO_DATA"
+            if used_days is not None and requested_days is not None and used_days < requested_days:
+                status = "AVAILABLE_SHORTER_SOURCE_WINDOW"
+
+            cls.last_diagnostics = {
+                "ticker": ticker,
+                "interval": interval,
+                "requested_days": requested_days,
+                "attempted_windows_days": attempts,
+                "source_window_used_days": used_days,
+                "actual_returned_days": actual_days,
+                "returned_rows": int(len(df)),
+                "status": status,
+                "coverage_policy": "actual returned rows only",
+            }
+            if last_error:
+                cls.last_diagnostics["last_error"] = last_error
+            return df
+
+        except Exception as exc:
+            cls.last_diagnostics = {
+                "ticker": ticker, "interval": interval,
+                "requested_days": requested_days,
+                "attempted_windows_days": attempts,
+                "source_window_used_days": None,
+                "actual_returned_days": 0,
+                "returned_rows": 0,
+                "status": "NO_DATA",
+                "coverage_policy": "actual returned rows only",
+                "error": str(exc),
+            }
+            print(
+                f"Yahoo history error for {ticker} "
+                f"[{interval}, requested_days={days}]: {exc}"
+            )
+            return pd.DataFrame()
+
+    @staticmethod
+    def _actual_days(df: pd.DataFrame) -> float:
+        if df is None or df.empty or "event_timestamp" not in df.columns:
+            return 0.0
+        try:
+            delta = df["event_timestamp"].iloc[-1] - df["event_timestamp"].iloc[0]
+            return round(max(0.0, delta.total_seconds() / 86400.0), 2)
+        except Exception:
+            return 0.0
+
+    @classmethod
+    def health_probe(cls) -> Dict[str, Any]:
+        """Probe real source coverage and report actual returned history."""
+        probes = [
+            ("NIFTY daily", "^NSEI", 320, "1d"),
+            ("Representative 1h", "RELIANCE.NS", 180, "1h"),
+            ("Representative 15m", "RELIANCE.NS", 55, "15m"),
+            ("India VIX daily", "^INDIAVIX", 320, "1d"),
+        ]
+        out: Dict[str, Any] = {}
+        for label, ticker, days, interval in probes:
+            df = cls._download(ticker, days=days, interval=interval)
+            diag = dict(cls.last_diagnostics)
+            out[label] = {
+                "ticker": ticker,
+                "requested_days": days,
+                "interval": interval,
+                "returned_rows": int(len(df)),
+                "actual_returned_days": cls._actual_days(df),
+                "source_window_used_days": diag.get("source_window_used_days"),
+                "attempted_windows_days": diag.get("attempted_windows_days", []),
+                "first_timestamp": str(df.iloc[0]["event_timestamp"]) if not df.empty else None,
+                "last_timestamp": str(df.iloc[-1]["event_timestamp"]) if not df.empty else None,
+                "status": diag.get("status", "AVAILABLE" if not df.empty else "NO_DATA"),
+                "coverage_policy": "actual returned rows only",
+            }
+        return out
+
+    @classmethod
+    def fetch_symbol_history(
+        cls,
+        symbol: str,
+        days: int,
+        interval: str,
+    ) -> pd.DataFrame:
+        ticker = symbol if any(ch in str(symbol) for ch in ("^", "=", ".")) else f"{symbol}.NS"
+        return cls._download(ticker, days=days, interval=interval)
+
+    @classmethod
+    def fetch_macro_data(
+        cls,
+        tickers: Optional[List[str]] = None,
+    ) -> Dict[str, pd.DataFrame]:
+        if tickers is None:
+            tickers = ["GC=F", "SI=F", "DX-Y.NYB", "^GSPC"]
+        return {
+            ticker: cls._download(ticker, days=5, interval="1d")
+            for ticker in tickers
+        }
+
+    @classmethod
+    def fetch_vix(cls) -> pd.DataFrame:
+        return cls._download(
+            "^INDIAVIX",
+            days=CONFIG["next_day_vix_days"],
+            interval="1d",
+        )
+
 class SupabasePublisher:
     """Append-only raw bus publisher. Calculations never happen here."""
     def __init__(self, url_override: str = "", key_override: str = ""):
@@ -624,25 +1056,18 @@ class SupabasePublisher:
     def publish_observation(self, source: str, symbol: str, token: str, raw_payload: dict) -> bool:
         return self.publish_observations_batch(source, symbol, token, [raw_payload]) == 1
 
-# ---------------------------------------------------------------------------
-# Persistent-worker configuration/state
-# ---------------------------------------------------------------------------
-
 WORKER_STATE_FILE = os.getenv(
     "RAW_PRODUCER_STATE_FILE",
     "/tmp/raw_data_producer_state.json",
 )
-
 WORKER_POLL_SEC = float(os.getenv("RAW_PRODUCER_POLL_SEC", "3.0"))
 QUOTE_RETRY_ATTEMPTS = int(os.getenv("RAW_PRODUCER_QUOTE_RETRIES", "3"))
 QUOTE_RETRY_DELAY_SEC = float(os.getenv("RAW_PRODUCER_RETRY_DELAY_SEC", "0.75"))
-FAILURES_BEFORE_DEGRADED = int(os.getenv("RAW_PRODUCER_FAILURE_THRESHOLD", "3"))
-
+FAILURES_BEFORE_FEED_LOST = int(os.getenv("RAW_PRODUCER_FAILURE_THRESHOLD", "3"))
 _STOP = False
 
 
 def _safe_json_write(payload: dict) -> None:
-    """Atomically publish worker state for the dashboard."""
     path = WORKER_STATE_FILE
     tmp = f"{path}.tmp"
     try:
@@ -650,19 +1075,14 @@ def _safe_json_write(payload: dict) -> None:
             json.dump(payload, fh, ensure_ascii=False, default=str)
         os.replace(tmp, path)
     except Exception:
-        # Monitoring must never kill the producer.
         pass
-
-
-def _utc_or_ist_now() -> str:
-    return now_ist().isoformat()
 
 
 def _state(**updates):
     state = {
         "worker": "kotak_live",
         "pid": os.getpid(),
-        "updated_at": _utc_or_ist_now(),
+        "updated_at": now_ist().isoformat(),
     }
     try:
         if os.path.exists(WORKER_STATE_FILE):
@@ -702,19 +1122,13 @@ def _extract_quote_identity(quote: dict):
 
 
 def run_worker(totp: str = "") -> int:
-    """
-    Manual-auth worker entrypoint.
-
-    Authentication is intentionally performed once at worker start.
-    No automatic re-login/TOTP generation is attempted after session failure.
-    """
     global _STOP
     _STOP = False
 
     kotak = KotakConnector()
     supabase = SupabasePublisher()
 
-    state = _state(
+    _state(
         status="STARTING",
         connection="DISCONNECTED",
         auth_required=False,
@@ -723,7 +1137,6 @@ def run_worker(totp: str = "") -> int:
         total_published=0,
         consecutive_failures=0,
         total_failures=0,
-        reconnects=0,
         last_error="",
         last_kotak_fetch=None,
         last_supabase_write=None,
@@ -737,28 +1150,13 @@ def run_worker(totp: str = "") -> int:
     try:
         if not supabase.url or not supabase.key:
             raise RuntimeError("Supabase URL/Key missing.")
+        if not totp.strip():
+            raise RuntimeError("Manual TOTP required.")
 
-        if not totp:
-            raise RuntimeError(
-                "Manual TOTP required. Start the worker with a current TOTP."
-            )
+        _state(status="AUTHENTICATING", connection="AUTHENTICATING")
+        kotak.login(totp_override=totp.strip())
 
-        _state(
-            status="AUTHENTICATING",
-            connection="AUTHENTICATING",
-            auth_required=False,
-            last_error="",
-        )
-
-        kotak.login(totp_override=totp)
-
-        _state(
-            status="DISCOVERING",
-            connection="AUTHENTICATED",
-            auth_required=False,
-        )
-
-        # Preserve the existing discovery implementation exactly.
+        _state(status="DISCOVERING", connection="AUTHENTICATED")
         kotak.discover_instruments()
 
         _state(
@@ -774,15 +1172,12 @@ def run_worker(totp: str = "") -> int:
 
         while not _STOP:
             poll_started = time.monotonic()
-            poll_no = int(state.get("poll_count", 0)) + 1
-
+            poll_no = int(_read_worker_state().get("poll_count", 0)) + 1
             raw_quotes = []
             fetch_error = ""
 
-            # Quote-level retry: transient errors do NOT cause logout/re-login.
+            # Transient quote failure is retried without re-login.
             for attempt in range(1, max(1, QUOTE_RETRY_ATTEMPTS) + 1):
-                if _STOP:
-                    break
                 try:
                     raw_quotes = kotak.fetch_raw_quotes()
                     if raw_quotes:
@@ -800,29 +1195,52 @@ def run_worker(totp: str = "") -> int:
                     )
                     time.sleep(QUOTE_RETRY_DELAY_SEC)
 
-            fetch_time = _utc_or_ist_now()
+            fetch_time = now_ist().isoformat()
 
             if not raw_quotes:
-                consecutive = int(state.get("consecutive_failures", 0)) + 1
-                total_failures = int(state.get("total_failures", 0)) + 1
-                state = _state(
+                previous = _read_worker_state()
+                consecutive = int(previous.get("consecutive_failures", 0)) + 1
+                total_failures = int(previous.get("total_failures", 0)) + 1
+                last_good = previous.get("last_kotak_fetch")
+                feed_age = None
+                if last_good:
+                    try:
+                        feed_age = round(
+                            max(
+                                0.0,
+                                (
+                                    datetime.fromisoformat(fetch_time)
+                                    - datetime.fromisoformat(last_good)
+                                ).total_seconds(),
+                            ),
+                            1,
+                        )
+                    except Exception:
+                        feed_age = None
+
+                _state(
                     status=(
                         "FEED_LOST"
-                        if consecutive >= FAILURES_BEFORE_DEGRADED
+                        if consecutive >= FAILURES_BEFORE_FEED_LOST
                         else "DEGRADED"
                     ),
                     connection="AUTHENTICATED",
                     poll_count=poll_no,
                     consecutive_failures=consecutive,
                     total_failures=total_failures,
-                    last_kotak_fetch=state.get("last_kotak_fetch"),
                     last_error=fetch_error,
                     retry_attempt=0,
+                    feed_age_sec=feed_age,
+                    last_cycle_duration_sec=round(
+                        time.monotonic() - poll_started, 3
+                    ),
                 )
             else:
+                previous = _read_worker_state()
                 published = 0
                 last_symbol = None
                 last_token = None
+
                 for quote in raw_quotes:
                     if not isinstance(quote, dict):
                         continue
@@ -836,26 +1254,81 @@ def run_worker(totp: str = "") -> int:
                     except Exception as exc:
                         fetch_error = f"Supabase publish error: {exc}"
 
-                write_time = _utc_or_ist_now() if published else state.get(
-                    "last_supabase_write"
+                last_write = (
+                    now_ist().isoformat()
+                    if published
+                    else previous.get("last_supabase_write")
                 )
 
-                state = _state(
+                # Preserve the original producer's supplementary raw macro feed.
+                macro_published = 0
+                macro_error = ""
+                macro_every = max(
+                    1, int(CONFIG.get("macro_every_n_cycles", 10))
+                )
+                if ((poll_no - 1) % macro_every) == 0:
+                    try:
+                        for ticker, df in YahooConnector.fetch_macro_data().items():
+                            if df.empty:
+                                continue
+                            latest_row = df.iloc[-1].to_dict()
+                            clean_row = {
+                                k: (
+                                    None
+                                    if pd.isna(v)
+                                    else v.item()
+                                    if hasattr(v, "item")
+                                    else v
+                                )
+                                for k, v in latest_row.items()
+                            }
+                            if supabase.publish_observation(
+                                "yahoo_macro",
+                                ticker,
+                                ticker,
+                                {
+                                    "dataset": "macro_daily",
+                                    "timeframe": "1d",
+                                    "event_timestamp": str(
+                                        df.iloc[-1]["event_timestamp"]
+                                    ),
+                                    "raw": clean_row,
+                                    "raw_source": "yfinance",
+                                },
+                            ):
+                                macro_published += 1
+                    except Exception as exc:
+                        macro_error = str(exc)
+
+                if macro_published:
+                    last_write = now_ist().isoformat()
+
+                _state(
                     status="LIVE" if published else "DEGRADED",
                     connection="AUTHENTICATED",
                     poll_count=poll_no,
-                    total_quotes=int(state.get("total_quotes", 0)) + len(raw_quotes),
-                    total_published=int(state.get("total_published", 0)) + published,
+                    total_quotes=int(previous.get("total_quotes", 0))
+                    + len(raw_quotes),
+                    total_published=int(previous.get("total_published", 0))
+                    + published
+                    + macro_published,
                     consecutive_failures=0 if published else int(
-                        state.get("consecutive_failures", 0)
+                        previous.get("consecutive_failures", 0)
                     ) + 1,
                     last_kotak_fetch=fetch_time,
-                    last_supabase_write=write_time,
+                    last_supabase_write=last_write,
                     last_raw_event=fetch_time,
-                    last_error="" if published else fetch_error,
+                    feed_age_sec=0,
+                    last_cycle_duration_sec=round(
+                        time.monotonic() - poll_started, 3
+                    ),
+                    last_error=(
+                        macro_error or fetch_error
+                    ),
                     retry_attempt=0,
                     last_quote_count=len(raw_quotes),
                     last_published_count=published,
+                    last_macro_published_count=macro_published,
                     last_quote_symbol=last_symbol,
                     last_quote_token=last_token,
                     active_future=kotak.future_token,
@@ -865,15 +1338,12 @@ def run_worker(totp: str = "") -> int:
                 )
 
             elapsed = time.monotonic() - poll_started
-            remaining = max(0.0, WORKER_POLL_SEC - elapsed)
-            if remaining:
-                time.sleep(remaining)
+            time.sleep(max(0.0, WORKER_POLL_SEC - elapsed))
 
         _state(status="STOPPED", connection="AUTHENTICATED")
         return 0
 
     except Exception as exc:
-        # Authentication/session failure is surfaced as manual intervention.
         _state(
             status="AUTH_REQUIRED",
             connection="DISCONNECTED",
@@ -881,6 +1351,15 @@ def run_worker(totp: str = "") -> int:
             last_error=str(exc),
         )
         return 2
+
+
+def _read_worker_state() -> Dict[str, Any]:
+    try:
+        with open(WORKER_STATE_FILE, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
 
 
 if __name__ == "__main__":
