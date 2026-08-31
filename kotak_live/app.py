@@ -22,6 +22,9 @@ import io
 import hmac
 import hashlib
 import struct
+import sys
+import signal
+import subprocess
 
 from datetime import datetime, timezone, date
 from pathlib import Path
@@ -134,16 +137,6 @@ CONFIG = {
     ).strip(),
 
     "poll_interval_sec": 3.0,
-    # LIVE feed recovery: transient quote failures are retried first.
-    # If the authenticated session is no longer usable, the stored TOTP
-    # secret is used for automatic session recovery; manual TOTP remains
-    # the fallback when automatic recovery is unavailable or fails.
-    "auto_reconnect_enabled": True,
-    "quote_retry_count": 2,
-    "quote_retry_delay_sec": 1.0,
-    "reconnect_after_failures": 3,
-    "max_auto_reconnect_attempts": 3,
-    "reconnect_cooldown_sec": 15.0,
 
     # Kept as configuration/documentation only.
     # Historical/macro ingestion is NOT executed by this file.
@@ -889,106 +882,12 @@ class KotakConnector:
             )
 
         self.connected = True
-        self.connection_state = "AUTHENTICATED"
-        self.last_error = ""
 
         self.log(
             "Kotak authentication successful."
         )
 
         return True
-
-
-    # -----------------------------------------------------------------------
-    # LIVE SESSION RECOVERY
-    # -----------------------------------------------------------------------
-
-    def _looks_like_auth_error(self, message: str) -> bool:
-        text = str(message or "").lower()
-        auth_terms = (
-            "unauthor",
-            "authentication",
-            "auth required",
-            "session expired",
-            "invalid session",
-            "session token",
-            "login required",
-            "access token",
-            "token expired",
-            "not logged",
-            "forbidden",
-            "401",
-            "403",
-        )
-        return any(term in text for term in auth_terms)
-
-
-    def recover_session(self, reason: str = "quote feed failure") -> bool:
-        """
-        Recover a broken LIVE Kotak session without asking the user for a
-        new TOTP input. First, respect a cooldown; then authenticate from
-        the configured KOTAK_TOTP secret and rediscover the active contracts.
-
-        This is deliberately separate from the manual Connect Kotak button.
-        If the stored TOTP secret is unavailable or automatic recovery fails,
-        the connector enters AUTH REQUIRED and the UI remains manual.
-        """
-        if not CONFIG.get("auto_reconnect_enabled", True):
-            self.connection_state = "AUTH REQUIRED"
-            return False
-
-        now_mono = time.monotonic()
-        cooldown = float(CONFIG.get("reconnect_cooldown_sec", 15.0))
-        if now_mono - self._last_reconnect_monotonic < cooldown:
-            return False
-
-        if self.auto_reconnect_attempts >= int(CONFIG.get("max_auto_reconnect_attempts", 3)):
-            self.connection_state = "AUTH REQUIRED"
-            self.log("Automatic recovery limit reached; manual TOTP required.")
-            return False
-
-        if not self.totp_secret.strip():
-            self.connection_state = "AUTH REQUIRED"
-            self.last_error = "KOTAK_TOTP secret is not configured for automatic recovery."
-            self.log(self.last_error)
-            return False
-
-        self._last_reconnect_monotonic = now_mono
-        self.auto_reconnect_attempts += 1
-        self.connection_state = "RECONNECTING"
-        self.last_recovery_reason = str(reason)[:300]
-        self.log(
-            "Automatic Kotak session recovery attempt "
-            f"{self.auto_reconnect_attempts}: {self.last_recovery_reason}"
-        )
-
-        try:
-            # Re-login from the already configured TOTP secret. No manual
-            # code entry is requested during this recovery path.
-            self.login()
-            self.discover_instruments()
-
-            self.total_auto_reconnects += 1
-            self.last_reconnect_at = now_ist()
-            self.auto_reconnect_attempts = 0
-            self.consecutive_quote_failures = 0
-            self.last_error = ""
-            self.connection_state = "AUTHENTICATED"
-            self.log(
-                "Automatic Kotak session recovery successful; "
-                "LIVE polling resumed."
-            )
-            return True
-
-        except Exception as exc:
-            self.connected = False
-            self.connection_state = "AUTH REQUIRED" if self._looks_like_auth_error(str(exc)) else "RECONNECT FAILED"
-            self.last_error = str(exc)[:500]
-            self.log(
-                "Automatic Kotak session recovery failed: "
-                f"{exc}"
-            )
-            return False
 
 
     # -----------------------------------------------------------------------
@@ -1919,104 +1818,95 @@ class KotakConnector:
             not self.connected
             or not self.client
         ):
-            self.connection_state = "AUTH REQUIRED" if self.last_error else "NOT CONNECTED"
             return []
 
+
         tokens_to_poll = [
+
             {
                 "instrument_token":
                     self.spot_token,
+
                 "exchange_segment":
                     "nse_cm",
             },
+
         ]
 
+
         if self.future_token:
+
             tokens_to_poll.append(
+
                 {
                     "instrument_token":
-                        str(self.future_token),
+                        str(
+                            self.future_token
+                        ),
+
                     "exchange_segment":
                         "nse_fo",
                 }
+
             )
+
 
         for (
             sym,
             tok
         ) in self.heavy_tokens.items():
+
             tokens_to_poll.append(
+
                 {
                     "instrument_token":
                         str(tok),
+
                     "exchange_segment":
                         "nse_cm",
                 }
+
             )
 
+
         for tok in self.pcr_tokens:
+
             tokens_to_poll.append(
+
                 {
                     "instrument_token":
                         str(tok),
+
                     "exchange_segment":
                         "nse_fo",
                 }
+
             )
 
-        retry_count = max(1, int(CONFIG.get("quote_retry_count", 2)))
-        retry_delay = max(0.0, float(CONFIG.get("quote_retry_delay_sec", 1.0)))
-        last_exc: Optional[Exception] = None
 
-        for attempt in range(retry_count):
-            try:
-                response = self.client.quotes(
-                    instrument_tokens=tokens_to_poll,
-                    quote_type="all"
-                )
-                records = extract_records(response)
+        try:
 
-                if records:
-                    self.connection_state = "AUTHENTICATED"
-                    self.consecutive_quote_failures = 0
-                    self.last_successful_fetch_at = now_ist()
-                    self.last_quote_count = len(records)
-                    self.last_error = ""
-                    return records
+            response = self.client.quotes(
 
-                last_exc = RuntimeError("Kotak quotes returned no records.")
+                instrument_tokens=
+                    tokens_to_poll,
 
-            except Exception as exc:
-                last_exc = exc
+                quote_type="all"
 
-            if attempt < retry_count - 1:
-                time.sleep(retry_delay)
-
-        self.consecutive_quote_failures += 1
-        self.last_error = str(last_exc or "Unknown quote fetch failure")[:500]
-        auth_error = self._looks_like_auth_error(self.last_error)
-        self.connection_state = "AUTH REQUIRED" if auth_error else "FEED LOST"
-        self.log(
-            "Quote fetch failure "
-            f"(consecutive={self.consecutive_quote_failures}): "
-            f"{self.last_error}"
-        )
-
-        recovery_threshold = int(CONFIG.get("reconnect_after_failures", 3))
-        if (
-            CONFIG.get("auto_reconnect_enabled", True)
-            and (auth_error or self.consecutive_quote_failures >= recovery_threshold)
-        ):
-            self.recover_session(
-                reason=(
-                    "Kotak authentication/session error"
-                    if auth_error
-                    else f"{self.consecutive_quote_failures} consecutive quote failures"
-                )
             )
 
-        return []
+            return extract_records(
+                response
+            )
 
+
+        except Exception as exc:
+
+            self.log(
+                f"Quote fetch error: {exc}"
+            )
+
+            return []
 
 
 # ===========================================================================
@@ -2340,6 +2230,288 @@ class SupabasePublisher:
 
 
 # ===========================================================================
+# ===========================================================================
+# PERSISTENT KOTAK WORKER + MONITOR BRIDGE
+# ===========================================================================
+
+WORKER_STATE_PATH = os.path.join(
+    os.getenv("KOTAK_WORKER_STATE_DIR", "/tmp"),
+    "kotak_live_worker_state.json",
+)
+
+
+def _worker_now() -> str:
+    return now_ist().strftime("%Y-%m-%d %H:%M:%S IST")
+
+
+def _worker_write_state(**updates):
+    state = {}
+    try:
+        if os.path.exists(WORKER_STATE_PATH):
+            with open(WORKER_STATE_PATH, "r", encoding="utf-8") as fh:
+                loaded = json.load(fh)
+                if isinstance(loaded, dict):
+                    state.update(loaded)
+    except Exception:
+        pass
+    state.update(updates)
+    state["updated_at"] = _worker_now()
+    tmp_path = WORKER_STATE_PATH + ".tmp"
+    try:
+        with open(tmp_path, "w", encoding="utf-8") as fh:
+            json.dump(state, fh, ensure_ascii=True, indent=2)
+        os.replace(tmp_path, WORKER_STATE_PATH)
+    except Exception:
+        try:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+        except Exception:
+            pass
+
+
+def _worker_read_state() -> dict:
+    try:
+        with open(WORKER_STATE_PATH, "r", encoding="utf-8") as fh:
+            value = json.load(fh)
+        return value if isinstance(value, dict) else {}
+    except Exception:
+        return {}
+
+
+def _worker_alive(pid) -> bool:
+    try:
+        pid = int(pid)
+        if pid <= 0:
+            return False
+        os.kill(pid, 0)
+        return True
+    except Exception:
+        return False
+
+
+def _worker_publish_quotes(publisher, quotes) -> int:
+    published = 0
+    for quote in quotes:
+        if not isinstance(quote, dict):
+            continue
+        token = str(quote.get("exchange_token", quote.get("instrument_token", quote.get("pSymbol", quote.get("pSymbolToken", "UNKNOWN")))))
+        symbol = str(quote.get("display_symbol", quote.get("pTrdSymbol", quote.get("tradingSymbol", "UNKNOWN"))))
+        if publisher.publish_observation("kotak_live", symbol, token, quote):
+            published += 1
+    return published
+
+
+def _worker_login_and_discover(kotak, reason: str):
+    _worker_write_state(
+        status="RECONNECTING",
+        connection="RECONNECTING",
+        recovery_reason=reason,
+        recovery_started_at=_worker_now(),
+    )
+    kotak.client = None
+    kotak.connected = False
+    kotak.login()
+    kotak.discover_instruments()
+
+
+def run_kotak_worker() -> None:
+    """Persistent worker executed by this same app.py with --kotak-worker."""
+    pid = os.getpid()
+    poll_interval = float(CONFIG.get("poll_interval_sec", 3.0))
+    consecutive_failures = 0
+    total_failures = 0
+    recovery_attempts = 0
+    successful_recoveries = 0
+    last_error = ""
+    last_kotak_fetch = ""
+    last_supabase_write = ""
+    last_recovery = ""
+    last_quotes = 0
+    last_published = 0
+    auth_count = 0
+
+    _worker_write_state(
+        status="STARTING", connection="STARTING", pid=pid,
+        consecutive_failures=0, total_failures=0,
+        recovery_attempts=0, successful_recoveries=0,
+        last_error="", last_kotak_fetch="", last_supabase_write="",
+        last_quotes=0, last_published=0, active_future="",
+        future_symbol="", future_expiry="", pcr_contracts=0,
+        nfo_records=0, auto_reauth=False,
+    )
+
+    kotak = KotakConnector()
+    publisher = SupabasePublisher()
+    totp_secret = str(os.getenv("KOTAK_TOTP", "")).strip()
+    auto_reauth = bool(totp_secret and not (totp_secret.isdigit() and len(totp_secret) == 6))
+
+    try:
+        if not publisher.url or not publisher.key:
+            raise RuntimeError("Supabase configuration is missing.")
+
+        _worker_write_state(status="AUTHENTICATING", connection="AUTHENTICATING", auto_reauth=auto_reauth)
+        kotak.login()
+        auth_count += 1
+        _worker_write_state(status="DISCOVERING", connection="AUTHENTICATED", auth_count=auth_count)
+        kotak.discover_instruments()
+        _worker_write_state(
+            status="LIVE", connection="AUTHENTICATED",
+            active_future=str(kotak.future_token or ""),
+            future_symbol=str(kotak.future_symbol or ""),
+            future_expiry=(kotak.future_expiry.isoformat() if kotak.future_expiry else ""),
+            pcr_contracts=len(kotak.pcr_tokens), nfo_records=len(kotak.nfo_records),
+            auth_count=auth_count, auto_reauth=auto_reauth,
+        )
+
+        while True:
+            cycle_started = time.time()
+            try:
+                raw_quotes = kotak.fetch_raw_quotes()
+                last_kotak_fetch = _worker_now()
+                last_quotes = len(raw_quotes)
+                if not raw_quotes:
+                    raise RuntimeError("Kotak returned no raw quotes.")
+                last_published = _worker_publish_quotes(publisher, raw_quotes)
+                if last_published > 0:
+                    last_supabase_write = _worker_now()
+                consecutive_failures = 0
+                last_error = ""
+                _worker_write_state(
+                    status="LIVE", connection="AUTHENTICATED", feed_age_sec=0,
+                    last_kotak_fetch=last_kotak_fetch, last_supabase_write=last_supabase_write,
+                    last_quotes=last_quotes, last_published=last_published,
+                    consecutive_failures=0, total_failures=total_failures,
+                    recovery_attempts=recovery_attempts, successful_recoveries=successful_recoveries,
+                    last_recovery=last_recovery, last_error="",
+                    active_future=str(kotak.future_token or ""),
+                    future_symbol=str(kotak.future_symbol or ""),
+                    future_expiry=(kotak.future_expiry.isoformat() if kotak.future_expiry else ""),
+                    pcr_contracts=len(kotak.pcr_tokens), nfo_records=len(kotak.nfo_records),
+                    auth_count=auth_count, auto_reauth=auto_reauth,
+                )
+            except Exception as exc:
+                consecutive_failures += 1
+                total_failures += 1
+                last_error = str(exc)
+                _worker_write_state(
+                    status=("FEED_LOST" if consecutive_failures < 3 else "RECONNECTING"),
+                    connection=("AUTHENTICATED" if kotak.connected else "DISCONNECTED"),
+                    last_quotes=last_quotes, last_published=last_published,
+                    consecutive_failures=consecutive_failures, total_failures=total_failures,
+                    recovery_attempts=recovery_attempts, successful_recoveries=successful_recoveries,
+                    last_error=last_error, last_kotak_fetch=last_kotak_fetch,
+                    last_supabase_write=last_supabase_write,
+                    active_future=str(kotak.future_token or ""),
+                    future_symbol=str(kotak.future_symbol or ""),
+                    pcr_contracts=len(kotak.pcr_tokens), nfo_records=len(kotak.nfo_records),
+                    auto_reauth=auto_reauth,
+                )
+                if consecutive_failures >= 3:
+                    recovery_attempts += 1
+                    if not auto_reauth:
+                        _worker_write_state(
+                            status="AUTH_REQUIRED", connection="DISCONNECTED",
+                            recovery_attempts=recovery_attempts,
+                            last_error=("Automatic recovery requires a configured KOTAK_TOTP secret; "
+                                         "a 6-digit TOTP is startup-only."),
+                            auto_reauth=False,
+                        )
+                        time.sleep(10.0)
+                    else:
+                        try:
+                            _worker_login_and_discover(kotak, f"{consecutive_failures} consecutive feed failures")
+                            auth_count += 1
+                            successful_recoveries += 1
+                            consecutive_failures = 0
+                            last_recovery = _worker_now()
+                            last_error = ""
+                            _worker_write_state(
+                                status="LIVE", connection="AUTHENTICATED",
+                                recovery_attempts=recovery_attempts, successful_recoveries=successful_recoveries,
+                                last_recovery=last_recovery, last_error="", auth_count=auth_count,
+                                active_future=str(kotak.future_token or ""),
+                                future_symbol=str(kotak.future_symbol or ""),
+                                future_expiry=(kotak.future_expiry.isoformat() if kotak.future_expiry else ""),
+                                pcr_contracts=len(kotak.pcr_tokens), nfo_records=len(kotak.nfo_records),
+                                auto_reauth=True,
+                            )
+                        except Exception as recover_exc:
+                            kotak.connected = False
+                            kotak.client = None
+                            last_error = str(recover_exc)
+                            _worker_write_state(
+                                status="AUTH_REQUIRED", connection="DISCONNECTED",
+                                recovery_attempts=recovery_attempts, successful_recoveries=successful_recoveries,
+                                last_recovery=last_recovery, last_error=last_error, auth_count=auth_count,
+                                auto_reauth=auto_reauth,
+                            )
+                            time.sleep(min(30.0, 5.0 * recovery_attempts))
+            elapsed = time.time() - cycle_started
+            time.sleep(max(0.25, poll_interval - elapsed))
+    except Exception as exc:
+        _worker_write_state(
+            status="AUTH_REQUIRED", connection="DISCONNECTED", pid=pid,
+            last_error=str(exc), auth_count=auth_count, auto_reauth=auto_reauth,
+        )
+
+
+def _prepare_worker_environment(kotak, supabase_url: str, supabase_key: str):
+    env = os.environ.copy()
+    for name in ("KOTAK_CONSUMER_KEY", "KOTAK_MOBILE", "KOTAK_UCC", "KOTAK_MPIN"):
+        value = env_or_secret(name, "")
+        if value:
+            env[name] = str(value)
+    configured_totp = env_or_secret("KOTAK_TOTP", "")
+    if configured_totp:
+        env["KOTAK_TOTP"] = str(configured_totp)
+    elif getattr(kotak, "totp_secret", ""):
+        env["KOTAK_TOTP"] = str(kotak.totp_secret)
+    if supabase_url:
+        env["SUPABASE_URL"] = str(supabase_url)
+    if supabase_key:
+        env["SUPABASE_KEY"] = str(supabase_key)
+    return env
+
+
+def _start_kotak_worker(kotak, supabase_url: str, supabase_key: str):
+    existing_pid = _worker_read_state().get("pid")
+    if _worker_alive(existing_pid):
+        return int(existing_pid), "already_running"
+    env = _prepare_worker_environment(kotak, supabase_url, supabase_key)
+    process = subprocess.Popen(
+        [sys.executable, os.path.abspath(__file__), "--kotak-worker"],
+        env=env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL, start_new_session=True,
+    )
+    return process.pid, "started"
+
+
+def _stop_kotak_worker() -> bool:
+    pid = _worker_read_state().get("pid")
+    if not _worker_alive(pid):
+        _worker_write_state(status="STOPPED", connection="DISCONNECTED", pid=None)
+        return False
+    try:
+        os.kill(int(pid), signal.SIGTERM)
+    except Exception:
+        try:
+            os.kill(int(pid), signal.SIGKILL)
+        except Exception:
+            pass
+    _worker_write_state(status="STOPPED", connection="DISCONNECTED", pid=None)
+    return True
+
+
+def _worker_monitor_view():
+    state = _worker_read_state()
+    pid = state.get("pid")
+    if pid and not _worker_alive(pid):
+        state["status"] = "STOPPED"
+        state["connection"] = "DISCONNECTED"
+        state["pid"] = None
+    return state
+
+
 # MAIN STREAMLIT APP
 # ===========================================================================
 
@@ -2366,7 +2538,7 @@ def main():
 
 
     st.title(
-        "Institutional Raw Data Producer Bus"
+        " Institutional Raw Data Producer Bus"
     )
 
 
@@ -2382,15 +2554,9 @@ def main():
         st.session_state.producer_running = False
 
 
-    if "producer_metrics" not in st.session_state:
+    if "worker_running" not in st.session_state:
 
-        st.session_state.producer_metrics = {
-            "last_kotak_fetch": None,
-            "last_supabase_write": None,
-            "last_quote_count": 0,
-            "last_published_count": 0,
-            "last_error": "",
-        }
+        st.session_state.worker_running = False
 
 
     kotak: KotakConnector = (
@@ -2405,7 +2571,7 @@ def main():
         # -------------------------------------------------------------------
 
         st.header(
-            "Authentication"
+            " Authentication"
         )
 
 
@@ -2433,7 +2599,7 @@ def main():
         # -------------------------------------------------------------------
 
         st.header(
-            "Supabase RAW BUS"
+            " Supabase RAW BUS"
         )
 
 
@@ -2492,7 +2658,7 @@ def main():
 
         if st.button(
 
-            "Confirm / Apply Configuration",
+            "[OK] Confirm / Apply Configuration",
 
             type=
                 "primary",
@@ -2535,7 +2701,7 @@ def main():
 
             st.caption(
 
-                "Configuration active - "
+                "OK Configuration active * "
                 f"{st.session_state.get('config_confirmed_at', '')}"
 
             )
@@ -2558,7 +2724,7 @@ def main():
 
         if st.button(
 
-            "Test Supabase RAW BUS",
+            " Test Supabase RAW BUS",
 
             disabled=
                 not config_confirmed,
@@ -2602,7 +2768,7 @@ def main():
         # -------------------------------------------------------------------
 
         st.header(
-            "Live Raw Producer"
+            " Live Raw Producer"
         )
 
 
@@ -2613,7 +2779,7 @@ def main():
 
             if st.button(
 
-                "Connect Kotak",
+                " Connect Kotak",
 
                 disabled=
                     not config_confirmed,
@@ -2659,7 +2825,7 @@ def main():
 
             if st.button(
 
-                "Discover Instruments",
+                " Discover Instruments",
 
                 disabled=
                     not (
@@ -2688,51 +2854,42 @@ def main():
 
 
         # -------------------------------------------------------------------
-        # START/STOP
+        # START/STOP PERSISTENT WORKER
         # -------------------------------------------------------------------
 
         can_start = bool(
-
             config_confirmed
-
             and kotak.connected
-
             and kotak.future_token
-
             and supabase.url
-
             and supabase.key
-
         )
 
+        worker_state = _worker_monitor_view()
+        worker_pid = worker_state.get("pid")
+        worker_is_alive = _worker_alive(worker_pid)
 
-        if not st.session_state.producer_running:
-
+        if not worker_is_alive:
             if st.button(
-
-                "Start Raw Producer Loop",
-
-                type=
-                    "primary",
-
-                disabled=
-                    not can_start
-
+                "Start Persistent Raw Worker",
+                type="primary",
+                disabled=not can_start,
             ):
-
-                st.session_state.producer_running = True
-
-                st.rerun()
-
-
+                try:
+                    pid, mode = _start_kotak_worker(
+                        kotak, supabase.url, supabase.key
+                    )
+                    st.session_state.worker_running = True
+                    st.session_state.producer_running = True
+                    st.success(f"Worker {mode}. PID={pid}.")
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"Worker start failed: {exc}")
         else:
-
-            if st.button(
-                "Stop Producer Loop"
-            ):
-
+            if st.button("Stop Persistent Raw Worker"):
+                _stop_kotak_worker()
+                st.session_state.worker_running = False
                 st.session_state.producer_running = False
-
                 st.rerun()
 
 
@@ -2840,22 +2997,9 @@ def main():
 
 
                 st.session_state[
-                    "producer_metrics"
-                ]["last_kotak_fetch"] = kotak.last_successful_fetch_at
-                st.session_state[
-                    "producer_metrics"
-                ]["last_quote_count"] = len(raw_quotes)
-                if published:
-                    st.session_state[
-                        "producer_metrics"
-                    ]["last_supabase_write"] = now_ist()
-                    st.session_state[
-                        "producer_metrics"
-                    ]["last_published_count"] = published
-
-                st.session_state[
                     "last_live_test"
                 ] = {
+
                     "kotak_quotes_received":
                         len(raw_quotes),
 
@@ -2916,7 +3060,7 @@ def main():
         # -------------------------------------------------------------------
 
         st.header(
-            "Historical Raw Producer"
+            " Historical Raw Producer"
         )
 
 
@@ -2930,86 +3074,145 @@ def main():
 
 
     # =========================================================================
-    # MAIN OPERATIONAL MONITOR
+    # MAIN METRICS
     # =========================================================================
 
-    st.markdown("### LIVE Producer Monitor")
+    col1, col2, col3, col4 = st.columns(4)
 
-    metrics = st.session_state.get("producer_metrics", {})
-    sup_health = supabase.health()
 
-    last_fetch = kotak.last_successful_fetch_at
-    last_write = metrics.get("last_supabase_write")
+    col1.metric(
 
-    def _fmt_monitor_dt(value: Any) -> str:
-        if value is None:
-            return "-"
-        if isinstance(value, datetime):
-            return value.astimezone(IST).strftime("%H:%M:%S IST")
-        return str(value)
+        "Kotak",
 
-    feed_age = "-"
-    if last_fetch is not None:
-        feed_age = f"{max(0, int((now_ist() - last_fetch).total_seconds()))}s"
+        (
+            "CONNECTED"
+            if kotak.connected
+            else "DISCONNECTED"
+        )
 
-    status_value = kotak.connection_state
-    if status_value == "AUTHENTICATED" and kotak.future_token:
-        status_value = "AUTHENTICATED"
+    )
 
-    m1, m2 = st.columns(2)
-    m1.metric("Connection / Session", status_value)
-    m2.metric("Feed Age", feed_age)
 
-    m3, m4 = st.columns(2)
-    m3.metric("Last Quotes", str(kotak.last_quote_count))
-    m4.metric("Last Kotak Fetch", _fmt_monitor_dt(last_fetch))
+    col2.metric(
 
-    m5, m6 = st.columns(2)
-    m5.metric("Last Supabase Write", _fmt_monitor_dt(last_write))
-    m6.metric("Auto Recoveries", str(kotak.total_auto_reconnects))
+        "Active Future",
 
-    st.write({
-        "Kotak": status_value,
-        "Active Future": kotak.future_token or "NOT DISCOVERED",
-        "Future Expiry": (
-            kotak.future_expiry.isoformat()
-            if kotak.future_expiry else "UNKNOWN"
-        ),
-        "PCR Contracts": len(kotak.pcr_tokens),
-        "Consecutive Quote Failures": kotak.consecutive_quote_failures,
-        "Automatic Recovery Attempts": kotak.auto_reconnect_attempts,
-        "Last Recovery": _fmt_monitor_dt(kotak.last_reconnect_at),
-        "Last Recovery Reason": kotak.last_recovery_reason or "-",
-        "Last Error": kotak.last_error or "-",
-        "Supabase": (
-            "REACHABLE"
-            if sup_health.get("reachable")
-            else "NOT READY"
-        ),
-    })
+        kotak.future_token
+        or "NOT DISCOVERED"
 
-    # ==========================================================================
+    )
+
+
+    col3.metric(
+
+        "PCR Contracts",
+
+        len(
+            kotak.pcr_tokens
+        )
+
+    )
+
+
+    col4.metric(
+
+        "Supabase",
+
+        (
+
+            "READY"
+
+            if (
+                supabase.url
+                and supabase.key
+            )
+
+            else
+                "NOT CONFIGURED"
+
+        )
+
+    )
+
+
+    # =========================================================================
     # LIVE RAW BUS HEALTH
-    # ==========================================================================
+    # =========================================================================
 
-    st.markdown("### Live Raw Bus Health")
+    st.markdown(
+        "### Live Raw Bus Health"
+    )
+
 
     live_status = (
+
         "READY"
+
         if (
             kotak.connected
             and kotak.future_token
-            and supabase.url
-            and supabase.key
         )
-        else "NOT READY"
+
+        else
+            "NOT READY"
+
     )
 
+
+    sup_health = (
+        supabase.health()
+    )
+
+
     st.write({
-        "Live Raw Producer": live_status,
-        "Raw Contract": "Kotak LIVE -> Supabase raw_observations",
-        "Data Policy": "Raw observations only; no features, scores, labels, regime, or decisions.",
+
+        "Kotak": (
+
+            "CONNECTED"
+
+            if kotak.connected
+
+            else
+                "DISCONNECTED"
+
+        ),
+
+        "Active Future": (
+
+            kotak.future_token
+
+            or "NOT DISCOVERED"
+
+        ),
+
+        "NFO Master Records":
+            len(
+                kotak.nfo_records
+            ),
+
+        "PCR Contracts":
+            len(
+                kotak.pcr_tokens
+            ),
+
+        "Supabase": (
+
+            "REACHABLE"
+
+            if sup_health.get(
+                "reachable"
+            )
+
+            else
+                "NOT READY"
+
+        ),
+
+        "Live Raw Producer":
+            live_status,
+
     })
+
 
     # =========================================================================
     # DATA COVERAGE AUDIT
@@ -3060,177 +3263,63 @@ def main():
 
 
     # =========================================================================
-    # LIVE PRODUCER LOOP
+    # LIVE PRODUCER MONITOR
     # =========================================================================
 
-    if st.session_state.producer_running:
+    worker_state = _worker_monitor_view()
+    worker_status = str(worker_state.get("status", "STOPPED"))
+    worker_connection = str(worker_state.get("connection", "DISCONNECTED"))
 
+    if worker_status == "LIVE":
         st.success(
-
-            "Raw Producer is active. "
-            "Kotak raw quotes are being published "
-            "to Supabase `raw_observations`."
-
+            "[LIVE] Persistent Kotak worker is active. "
+            "Raw quotes are being published to Supabase `raw_observations`."
         )
-
-
-        status_container = st.empty()
-
-        log_container = st.empty()
-
-        poll_cycle = 0
-
-
-        while st.session_state.producer_running:
-
-            try:
-
-                raw_quotes = (
-                    kotak.fetch_raw_quotes()
-                )
-
-
-                published_count = 0
-
-
-                for quote in raw_quotes:
-
-                    if not isinstance(
-                        quote,
-                        dict
-                    ):
-
-                        continue
-
-
-                    token = str(
-
-                        quote.get(
-
-                            "exchange_token",
-
-                            quote.get(
-
-                                "instrument_token",
-
-                                quote.get(
-
-                                    "pSymbol",
-
-                                    quote.get(
-
-                                        "pSymbolToken",
-
-                                        "UNKNOWN"
-
-                                    )
-
-                                )
-
-                            )
-
-                        )
-
-                    )
-
-
-                    symbol = str(
-
-                        quote.get(
-
-                            "display_symbol",
-
-                            quote.get(
-
-                                "pTrdSymbol",
-
-                                quote.get(
-
-                                    "tradingSymbol",
-
-                                    "UNKNOWN"
-
-                                )
-
-                            )
-
-                        )
-
-                    )
-
-
-                    if supabase.publish_observation(
-
-                        "kotak_live",
-
-                        symbol,
-
-                        token,
-
-                        quote
-
-                    ):
-
-                        published_count += 1
-
-
-                # ----------------------------------------------------------------
-                # IMPORTANT:
-                #
-                # Historical/yfinance/Macro ingestion has deliberately been
-                # removed from this LIVE producer.
-                #
-                # This prevents undefined references such as:
-                #
-                #   HistoricalRawProducer
-                #   YahooConnector
-                #   pd
-                #
-                # from breaking the Kotak LIVE application.
-                #
-                # Historical data remains a separate raw-data concern and
-                # should be handled by the dedicated historical pipeline.
-                # ----------------------------------------------------------------
-
-
-                st.session_state["producer_metrics"]["last_kotak_fetch"] = kotak.last_successful_fetch_at
-                st.session_state["producer_metrics"]["last_quote_count"] = len(raw_quotes)
-                st.session_state["producer_metrics"]["last_published_count"] = published_count
-                if published_count:
-                    st.session_state["producer_metrics"]["last_supabase_write"] = now_ist()
-                st.session_state["producer_metrics"]["last_error"] = kotak.last_error or ""
-
-                status_container.info(
-                    f"Last Poll: {now_ist().strftime('%H:%M:%S')} | "
-                    f"Published {published_count} raw quotes | "
-                    f"Options mapped: {len(kotak.pcr_tokens)} | "
-                    f"State: {kotak.connection_state}"
-                )
-
-
-                poll_cycle += 1
-
-
-            except Exception as exc:
-
-                kotak.last_error = str(exc)[:500]
-                kotak.connection_state = "FEED LOST"
-                st.session_state["producer_metrics"]["last_error"] = kotak.last_error
-                log_container.error(
-                    "Producer loop exception: "
-                    f"{exc}"
-                )
-
-
-            time.sleep(
-
-                float(
-                    CONFIG[
-                        "poll_interval_sec"
-                    ]
-                )
-
-            )
+    elif worker_status == "RECONNECTING":
+        st.warning("RECONNECTING: worker is recovering the Kotak session.")
+    elif worker_status == "FEED_LOST":
+        st.warning("FEED LOST: waiting for automatic recovery.")
+    elif worker_status == "AUTH_REQUIRED":
+        st.error("AUTH REQUIRED: automatic recovery could not restore the session.")
+    elif worker_status in {"STARTING", "AUTHENTICATING", "DISCOVERING"}:
+        st.info("Worker is starting.")
+    else:
+        st.info("Persistent worker is not running.")
+
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Worker", worker_status)
+    m2.metric("Connection", worker_connection)
+    m3.metric("Last Quotes", worker_state.get("last_quotes", 0))
+    m4.metric(
+        "Feed Age",
+        (f"{worker_state.get('feed_age_sec')}s"
+         if worker_state.get("feed_age_sec") is not None else "-"),
+    )
+
+    st.write({
+        "Last Kotak Fetch": worker_state.get("last_kotak_fetch", "-"),
+        "Last Supabase Write": worker_state.get("last_supabase_write", "-"),
+        "Consecutive Failures": worker_state.get("consecutive_failures", 0),
+        "Total Failures": worker_state.get("total_failures", 0),
+        "Recovery Attempts": worker_state.get("recovery_attempts", 0),
+        "Successful Recoveries": worker_state.get("successful_recoveries", 0),
+        "Last Recovery": worker_state.get("last_recovery", "-"),
+        "Active Future": worker_state.get("active_future", "-"),
+        "Future Symbol": worker_state.get("future_symbol", "-"),
+        "Future Expiry": worker_state.get("future_expiry", "-"),
+        "PCR Contracts": worker_state.get("pcr_contracts", 0),
+        "NFO Records": worker_state.get("nfo_records", 0),
+        "Worker PID": worker_state.get("pid", "-"),
+        "Auto Re-auth": ("ENABLED" if worker_state.get("auto_reauth", False) else "DISABLED"),
+        "Last Error": worker_state.get("last_error", "-"),
+    })
+
+    if worker_state.get("updated_at"):
+        st.caption("Worker state updated: " + str(worker_state["updated_at"]))
+
+    if worker_status in {"STARTING", "AUTHENTICATING", "DISCOVERING", "LIVE", "FEED_LOST", "RECONNECTING"}:
+        time.sleep(2.0)
+        st.rerun()
 
 
 # ===========================================================================
@@ -3238,4 +3327,7 @@ def main():
 # ===========================================================================
 
 if __name__ == "__main__":
-    main()
+    if "--kotak-worker" in sys.argv:
+        run_kotak_worker()
+    else:
+        main()
