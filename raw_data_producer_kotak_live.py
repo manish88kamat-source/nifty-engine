@@ -51,6 +51,13 @@ CONFIG = {
     "poll_interval_sec": 3.0,
     "supabase_timeout_sec": 15,
     "live_batch_size": 250,
+    # Connection-resilience controls. These do not alter market/data logic.
+    "quote_failure_threshold": 2,
+    "reconnect_initial_delay_sec": 2.0,
+    "reconnect_max_delay_sec": 30.0,
+    "reconnect_max_attempts": 5,
+    "feed_stale_after_sec": 20.0,
+    "reconnect_cooldown_sec": 5.0,
 }
 
 def now_ist() -> datetime:
@@ -270,6 +277,19 @@ class KotakConnector:
         }
         self.logs = []
 
+        # LIVE connection/feed health state. These fields are operational only;
+        # they do not participate in instrument mapping or market calculations.
+        self.last_quote_success_at: Optional[datetime] = None
+        self.last_quote_error_at: Optional[datetime] = None
+        self.last_supabase_write_at: Optional[datetime] = None
+        self.connection_started_at: Optional[datetime] = None
+        self.last_quote_count = 0
+        self.consecutive_quote_failures = 0
+        self.reconnect_count = 0
+        self.reconnect_in_progress = False
+        self.last_reconnect_at: Optional[datetime] = None
+        self.last_connection_error = ""
+
     def log(self, message: str):
         timestamp = now_ist().strftime("%H:%M:%S")
         self.logs.append(f"[{timestamp}] {message}")
@@ -294,8 +314,112 @@ class KotakConnector:
             raise RuntimeError(f"Login Step 2 Error: {step2.get('error') or step2.get('Error')}")
 
         self.connected = True
+        self.connection_started_at = now_ist()
+        self.consecutive_quote_failures = 0
+        self.last_connection_error = ""
         self.log("Kotak authentication successful.")
         return True
+
+    def _mark_quote_success(self, count: int) -> None:
+        """Record a healthy live quote response."""
+        self.last_quote_success_at = now_ist()
+        self.last_quote_count = int(count)
+        self.consecutive_quote_failures = 0
+        self.last_connection_error = ""
+        self.connected = True
+
+    def _mark_quote_failure(self, error: Any) -> None:
+        """Record a quote failure without changing any market/instrument state."""
+        self.last_quote_error_at = now_ist()
+        self.consecutive_quote_failures += 1
+        self.last_connection_error = str(error)
+
+    def feed_age_sec(self) -> Optional[float]:
+        """Age of the last successful Kotak quote response."""
+        if self.last_quote_success_at is None:
+            return None
+        return max(0.0, (now_ist() - self.last_quote_success_at).total_seconds())
+
+    def connection_age_sec(self) -> Optional[float]:
+        """Age of the current authenticated Kotak session."""
+        if self.connection_started_at is None:
+            return None
+        return max(0.0, (now_ist() - self.connection_started_at).total_seconds())
+
+    def mark_supabase_write(self, count: int) -> None:
+        """Record latest successful RAW BUS write; operational UI only."""
+        if int(count) > 0:
+            self.last_supabase_write_at = now_ist()
+
+    def is_live_healthy(self) -> bool:
+        """Authenticated + recent successful quote response."""
+        age = self.feed_age_sec()
+        return bool(self.connected and age is not None and age <= float(CONFIG["feed_stale_after_sec"]))
+
+    def reconnect_and_restore(self) -> bool:
+        """
+        Recover a broken Kotak session and restore the already-locked
+        instrument selection. No strategy, feature, mapping, or data-contract
+        logic is changed here.
+        """
+        if self.reconnect_in_progress:
+            return False
+
+        now = now_ist()
+        if self.last_reconnect_at is not None:
+            elapsed = (now - self.last_reconnect_at).total_seconds()
+            if elapsed < float(CONFIG["reconnect_cooldown_sec"]):
+                return False
+
+        self.reconnect_in_progress = True
+        self.last_reconnect_at = now
+        self.connected = False
+
+        try:
+            self.log(
+                f"LIVE connection lost/stale. Starting automatic recovery "
+                f"(attempts={CONFIG['reconnect_max_attempts']})."
+            )
+
+            delay = float(CONFIG["reconnect_initial_delay_sec"])
+            max_delay = float(CONFIG["reconnect_max_delay_sec"])
+            max_attempts = max(1, int(CONFIG["reconnect_max_attempts"]))
+
+            for attempt in range(1, max_attempts + 1):
+                try:
+                    self.log(f"Reconnect attempt {attempt}/{max_attempts}...")
+
+                    # Drop the old client object before creating a fresh
+                    # authenticated session. This avoids reusing a dead session.
+                    self.client = None
+                    self.login()
+
+                    # Re-run the existing discovery contract after login so an
+                    # expired/changed contract cannot leave stale subscriptions.
+                    self.discover_instruments()
+
+                    # Validate the newly restored session immediately.
+                    quotes = self.fetch_raw_quotes(allow_reconnect=False)
+                    if quotes:
+                        self.reconnect_count += 1
+                        self.log(
+                            f"Automatic recovery successful. Quotes restored: {len(quotes)}."
+                        )
+                        return True
+
+                    raise RuntimeError("Re-authenticated session returned no live quotes.")
+                except Exception as exc:
+                    self.connected = False
+                    self.last_connection_error = str(exc)
+                    self.log(f"Reconnect attempt {attempt} failed: {exc}")
+                    if attempt < max_attempts:
+                        time.sleep(delay)
+                        delay = min(max_delay, delay * 2.0)
+
+            self.log("Automatic recovery exhausted; Kotak remains disconnected.")
+            return False
+        finally:
+            self.reconnect_in_progress = False
 
     def load_nfo_scrip_master(self) -> List[Dict[str, Any]]:
         if not self.connected:
@@ -642,10 +766,19 @@ class KotakConnector:
         self.log(f"Discovery complete: Future={self.future_token}, Options mapped={len(self.pcr_tokens)}")
         return True
 
-    def fetch_raw_quotes(self) -> List[Dict[str, Any]]:
+    def fetch_raw_quotes(self, allow_reconnect: bool = True) -> List[Dict[str, Any]]:
+        """
+        Fetch the same locked raw quote set, with connection-health recovery.
+
+        The token list and quote payload remain exactly the same. The only
+        addition is operational recovery when the authenticated Kotak session
+        stops responding.
+        """
         if not self.connected or not self.client:
+            if allow_reconnect and not self.reconnect_in_progress:
+                self.reconnect_and_restore()
             return []
-        
+
         tokens_to_poll = [
             {"instrument_token": self.spot_token, "exchange_segment": "nse_cm"},
         ]
@@ -660,9 +793,42 @@ class KotakConnector:
 
         try:
             response = self.client.quotes(instrument_tokens=tokens_to_poll, quote_type="all")
-            return extract_records(response)
+            records = extract_records(response)
+
+            if records:
+                self._mark_quote_success(len(records))
+                return records
+
+            # An authenticated client returning no records is treated as a
+            # possible dead/stale session after the configured failure count.
+            self._mark_quote_failure("Kotak returned no quote records.")
+            self.log(
+                f"Quote fetch returned no records "
+                f"(failure {self.consecutive_quote_failures}/"
+                f"{CONFIG['quote_failure_threshold']})."
+            )
+
+            if (
+                allow_reconnect
+                and self.consecutive_quote_failures >= int(CONFIG["quote_failure_threshold"])
+                and not self.reconnect_in_progress
+            ):
+                self.reconnect_and_restore()
+            return []
         except Exception as exc:
-            self.log(f"Quote fetch error: {exc}")
+            self._mark_quote_failure(exc)
+            self.log(
+                f"Quote fetch error: {exc} "
+                f"(failure {self.consecutive_quote_failures}/"
+                f"{CONFIG['quote_failure_threshold']})."
+            )
+
+            if (
+                allow_reconnect
+                and self.consecutive_quote_failures >= int(CONFIG["quote_failure_threshold"])
+                and not self.reconnect_in_progress
+            ):
+                self.reconnect_and_restore()
             return []
 class SupabasePublisher:
     """Append-only raw bus publisher. Calculations never happen here."""
@@ -737,13 +903,89 @@ class SupabasePublisher:
     def publish_observation(self, source: str, symbol: str, token: str, raw_payload: dict) -> bool:
         return self.publish_observations_batch(source, symbol, token, [raw_payload]) == 1
 
+def _fmt_ist(value: Optional[datetime]) -> str:
+    """Compact IST timestamp for the mobile dashboard."""
+    return value.strftime("%H:%M:%S") if value else "—"
+
+
+def _fmt_age(seconds: Optional[float]) -> str:
+    """Human-readable duration for the mobile dashboard."""
+    if seconds is None:
+        return "—"
+    total = max(0, int(seconds))
+    h, rem = divmod(total, 3600)
+    m, sec = divmod(rem, 60)
+    return f"{h:02d}:{m:02d}:{sec:02d}"
+
+
+def _render_mobile_dashboard(kotak, supabase, sup_health: Optional[dict] = None) -> None:
+    """Responsive operations dashboard. Contains no market/strategy logic."""
+    feed_age = kotak.feed_age_sec()
+    connection_age = kotak.connection_age_sec()
+    if kotak.is_live_healthy():
+        status, icon = "CONNECTED", "🟢"
+    elif kotak.reconnect_in_progress:
+        status, icon = "RECONNECTING", "🟡"
+    elif kotak.connected and feed_age is not None:
+        status, icon = "STALE FEED", "🟠"
+    else:
+        status, icon = "DISCONNECTED", "🔴"
+
+    sup_ready = bool(supabase.url and supabase.key)
+    sup_reachable = bool((sup_health or {}).get("reachable"))
+    sup_label = "READY" if sup_reachable else ("CONFIGURED" if sup_ready else "NOT CONFIGURED")
+    sup_icon = "🟢" if sup_reachable else ("🟡" if sup_ready else "🔴")
+    sup_detail = "REACHABLE" if sup_reachable else (str((sup_health or {}).get("error", "Not checked"))[:70] if sup_ready else "Configure Supabase")
+    error_text = (kotak.last_connection_error or "None").replace("<", "&lt;").replace(">", "&gt;")[:90]
+
+    st.markdown("""
+<style>
+.rawbus-wrap{max-width:760px;margin:0 auto;padding:0 2px 14px}
+.rawbus-hero{border:1px solid rgba(128,128,128,.25);border-radius:20px;padding:20px 18px 18px;margin:6px 0 12px;text-align:center;box-shadow:0 3px 16px rgba(0,0,0,.07)}
+.rawbus-title{font-size:clamp(25px,7vw,42px);font-weight:800;line-height:1.05}
+.rawbus-subtitle{font-size:clamp(14px,4vw,18px);opacity:.72;margin-top:6px}
+.rawbus-status{margin-top:17px;font-size:clamp(20px,6vw,31px);font-weight:850;letter-spacing:.02em}
+.rawbus-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin:10px 0}
+.rawbus-card{border:1px solid rgba(128,128,128,.23);border-radius:16px;padding:14px 15px;min-height:72px}
+.rawbus-label{font-size:12px;text-transform:uppercase;letter-spacing:.07em;opacity:.62;font-weight:700}
+.rawbus-value{font-size:20px;font-weight:800;margin-top:5px;overflow-wrap:anywhere}
+.rawbus-small{font-size:13px;opacity:.70;margin-top:3px;overflow-wrap:anywhere}
+.rawbus-section{font-size:17px;font-weight:800;margin:15px 2px 8px}
+@media(max-width:560px){.rawbus-grid{grid-template-columns:1fr}.rawbus-card{min-height:64px}.rawbus-wrap{padding-left:0;padding-right:0}}
+</style>
+""", unsafe_allow_html=True)
+    html = f'''<div class="rawbus-wrap">
+  <div class="rawbus-hero">
+    <div class="rawbus-title">📡 NIFTY RAW BUS</div>
+    <div class="rawbus-subtitle">KOTAK NEO LIVE · RAW DATA PRODUCER</div>
+    <div class="rawbus-status">{icon} LIVE {status}</div>
+  </div>
+  <div class="rawbus-section">LIVE CONNECTION</div>
+  <div class="rawbus-grid">
+    <div class="rawbus-card"><div class="rawbus-label">Connection Age</div><div class="rawbus-value">{_fmt_age(connection_age)}</div></div>
+    <div class="rawbus-card"><div class="rawbus-label">Feed Age</div><div class="rawbus-value">{_fmt_age(feed_age)}</div></div>
+    <div class="rawbus-card"><div class="rawbus-label">Last Successful Quote</div><div class="rawbus-value">{_fmt_ist(kotak.last_quote_success_at)}</div><div class="rawbus-small">Quotes: {kotak.last_quote_count}</div></div>
+    <div class="rawbus-card"><div class="rawbus-label">Last Supabase Write</div><div class="rawbus-value">{_fmt_ist(kotak.last_supabase_write_at)}</div><div class="rawbus-small">RAW BUS: {sup_label}</div></div>
+    <div class="rawbus-card"><div class="rawbus-label">Automatic Reconnects</div><div class="rawbus-value">{kotak.reconnect_count}</div><div class="rawbus-small">Failures: {kotak.consecutive_quote_failures}</div></div>
+    <div class="rawbus-card"><div class="rawbus-label">Supabase</div><div class="rawbus-value">{sup_icon} {sup_label}</div><div class="rawbus-small">{sup_detail}</div></div>
+  </div>
+  <div class="rawbus-section">ACTIVE CONTRACTS</div>
+  <div class="rawbus-grid">
+    <div class="rawbus-card"><div class="rawbus-label">Active Future</div><div class="rawbus-value">{kotak.future_symbol or "NOT DISCOVERED"}</div><div class="rawbus-small">Token: {kotak.future_token or "—"}</div></div>
+    <div class="rawbus-card"><div class="rawbus-label">PCR Contracts</div><div class="rawbus-value">{len(kotak.pcr_tokens)}</div><div class="rawbus-small">Nearest-expiry mapping</div></div>
+    <div class="rawbus-card"><div class="rawbus-label">NFO Master Records</div><div class="rawbus-value">{len(kotak.nfo_records)}</div></div>
+    <div class="rawbus-card"><div class="rawbus-label">Last Error</div><div class="rawbus-value">{error_text}</div></div>
+  </div>
+</div>'''
+    st.markdown(html, unsafe_allow_html=True)
+
 
 def main():
     if st is None:
         print("Streamlit not available.")
         return
 
-    st.set_page_config(page_title="Kotak LIVE Raw Data Producer", layout="wide")
+    st.set_page_config(page_title="NIFTY Raw Bus LIVE", layout="wide", initial_sidebar_state="collapsed")
     st.title("📡 NIFTY Raw Bus — Kotak Neo LIVE")
     st.caption("Kotak Neo LIVE raw observations → Supabase only. yfinance is intentionally absent from this environment.")
 
@@ -828,6 +1070,7 @@ def main():
                     ))
                     if supabase.publish_observation("kotak_live", symbol, token, quote):
                         published += 1
+                kotak.mark_supabase_write(published)
                 st.session_state["last_live_test"] = {
                     "kotak_quotes_received": len(raw_quotes),
                     "supabase_rows_published": published,
@@ -841,24 +1084,10 @@ def main():
         if st.session_state.get("last_live_test"):
             st.json(st.session_state["last_live_test"])
 
-    col1, col2, col3, col4 = st.columns(4)
-    col1.metric("Kotak", "CONNECTED" if kotak.connected else "DISCONNECTED")
-    col2.metric("Active Future", kotak.future_token or "NOT DISCOVERED")
-    col3.metric("PCR Contracts", len(kotak.pcr_tokens))
-    col4.metric("Supabase", "READY" if supabase.url and supabase.key else "NOT CONFIGURED")
-
-    st.markdown("### Live Raw Bus Health")
     sup_health = supabase.health()
-    st.write({
-        "Kotak": "CONNECTED" if kotak.connected else "DISCONNECTED",
-        "Active Future": kotak.future_token or "NOT DISCOVERED",
-        "Active Future Symbol": kotak.future_symbol or "NOT DISCOVERED",
-        "Active Future Expiry": kotak.future_expiry.isoformat() if kotak.future_expiry else None,
-        "NFO Master Records": len(kotak.nfo_records),
-        "PCR Contracts": len(kotak.pcr_tokens),
-        "Supabase": "REACHABLE" if sup_health.get("reachable") else "NOT READY",
-        "Live Raw Producer": "READY" if (kotak.connected and kotak.future_token) else "NOT READY",
-    })
+    dashboard_placeholder = st.empty()
+    with dashboard_placeholder.container():
+        _render_mobile_dashboard(kotak, supabase, sup_health)
 
     st.markdown("### Raw Data Contract")
     st.code(
@@ -894,15 +1123,37 @@ def main():
                     if supabase.publish_observation("kotak_live", symbol, token, quote):
                         published_count += 1
 
+                kotak.mark_supabase_write(published_count)
+                current_feed_age = kotak.feed_age_sec()
+                current_status = (
+                    "CONNECTED" if kotak.is_live_healthy()
+                    else "RECONNECTING" if kotak.reconnect_in_progress
+                    else "STALE FEED" if kotak.connected
+                    else "DISCONNECTED"
+                )
+                with dashboard_placeholder.container():
+                    _render_mobile_dashboard(kotak, supabase, supabase.health())
+
                 status_container.info(
                     f"Last Poll: {now_ist().strftime('%H:%M:%S')} | "
+                    f"Kotak: {current_status} | "
                     f"Received {len(raw_quotes)} raw quotes | "
                     f"Published {published_count} | "
+                    f"Feed Age: {current_feed_age:.1f}s | "
+                    f"Reconnects: {kotak.reconnect_count} | "
                     f"Active Future: {kotak.future_token} | "
                     f"Options mapped: {len(kotak.pcr_tokens)}"
                 )
             except Exception as exc:
+                kotak._mark_quote_failure(exc)
                 log_container.error(f"Producer loop exception: {exc}")
+                if (
+                    kotak.consecutive_quote_failures >= int(CONFIG["quote_failure_threshold"])
+                    and not kotak.reconnect_in_progress
+                ):
+                    kotak.reconnect_and_restore()
+                with dashboard_placeholder.container():
+                    _render_mobile_dashboard(kotak, supabase, supabase.health())
             time.sleep(float(CONFIG["poll_interval_sec"]))
 
 
