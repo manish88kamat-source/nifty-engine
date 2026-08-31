@@ -5627,7 +5627,7 @@ def main():
     is_logged_in = adapter.connected
 
     with st.sidebar:
-        st.subheader("[LIVE] Gateway Controls â€” Supabase RAW BUS")
+        st.subheader("[LIVE] Gateway Controls Ã¢â‚¬â€ Supabase RAW BUS")
         
         if is_logged_in:
             conn_txt = getattr(adapter, "conn_state", "AUTHENTICATED")
@@ -5686,6 +5686,10 @@ def main():
                 st.error(str(exc))
 
     if is_streaming and adapter:
+        # The Streamlit browser session is only an observability/UI layer.
+        # Keep the server-side RAW BUS watchdog alive even if the browser tab
+        # is backgrounded/throttled and Streamlit reconnects later.
+        adapter.start_bar_watchdog()
         adapter.fetch_market_snapshot()
 
     spot_val, fut_val, fut_oi, ticks_count = "-", "-", "-", 0
