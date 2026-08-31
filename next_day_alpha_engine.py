@@ -133,13 +133,14 @@ from functools import wraps
 from logging.handlers import RotatingFileHandler
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from zoneinfo import ZoneInfo
 
 import numpy as np
 import pandas as pd
+import requests
 
 try:
     from neo_api_client import NeoAPI
@@ -237,7 +238,7 @@ LOG_FILE = ROOT / "next_day_alpha.log"
 LOG_MAX_BYTES = max(1_000_000, int(os.getenv("NEXT_DAY_LOG_MAX_BYTES", str(5 * 1024 * 1024))))
 LOG_BACKUP_COUNT = max(1, int(os.getenv("NEXT_DAY_LOG_BACKUP_COUNT", "5")))
 NEXT_DAY_REQUIRE_KOTAK = os.getenv("NEXT_DAY_REQUIRE_KOTAK", "0") == "1"
-DAY_AHEAD_RUN_MINUTE = 31
+DAY_AHEAD_RUN_MINUTE = 35
 DAY_AHEAD_SNAPSHOT_START_MINUTE = 15
 DAY_AHEAD_SNAPSHOT_END_MINUTE = 30
 
@@ -5730,7 +5731,7 @@ def run_streamlit_dashboard() -> None:
 
     st.set_page_config(page_title="Next-Day Stock Alpha Engine", layout="wide")
     st.title("NEXT-DAY STOCK ALPHA ENGINE")
-    st.caption("Standalone â€¢ Raw-data sharing only â€¢ Kotak Neo live â€¢ Trusted catalyst layer")
+    st.caption("Standalone Ã¢â‚¬Â¢ Raw-data sharing only Ã¢â‚¬Â¢ Kotak Neo live Ã¢â‚¬Â¢ Trusted catalyst layer")
 
     result = load_latest()
     day = result.get("day_ahead", {})
@@ -5749,7 +5750,7 @@ def run_streamlit_dashboard() -> None:
     else:
         st.warning("NO QUALIFIED CANDIDATE")
 
-    st.subheader("09:15â€“09:20 CONFIRMATION")
+    st.subheader("09:15Ã¢â‚¬â€œ09:20 CONFIRMATION")
     confirmations = morning.get("confirmations", [])
     if confirmations:
         st.dataframe(pd.DataFrame(confirmations), use_container_width=True, hide_index=True)
@@ -5758,7 +5759,7 @@ def run_streamlit_dashboard() -> None:
         st.success("FINAL TRADE CANDIDATES")
         st.dataframe(pd.DataFrame(final), use_container_width=True, hide_index=True)
     else:
-        st.info("NO TRADE â€” engine never forces two trades.")
+        st.info("NO TRADE Ã¢â‚¬â€ engine never forces two trades.")
 
     st.caption("A score is a quality score, not a guaranteed win probability. Historical calibration is required before any probability claim.")
 
@@ -6311,7 +6312,7 @@ def supabase_raw_contract_status() -> Dict[str, Any]:
     }
 
 # ============================================================================
-# FINAL SUPABASE RAW BUS BINDINGS â€” LOCKED
+# FINAL SUPABASE RAW BUS BINDINGS Ã¢â‚¬â€ LOCKED
 # ============================================================================
 # One-way architecture:
 #   Kotak LIVE producer -> Supabase raw_observations
@@ -6475,6 +6476,57 @@ def _supabase_fetch_intraday_compat(symbol: str) -> pd.DataFrame:
 
 
 def _supabase_market_gap_compat(ticker: str = NIFTY_TICKER) -> float:
+    """Return the live NIFTY opening gap from the shared RAW BUS.
+
+    Morning confirmation runs before the next Yahoo daily candle is available,
+    so using the historical daily frame's latest row here can produce a stale
+    or previous-session opening value. The dedicated Kotak producer already
+    publishes the raw ``Nifty 50`` quote to Supabase; consume that raw quote
+    and use the historical NIFTY daily series only for the previous close.
+
+    No indicator, score, regime, or signal calculation is changed.
+    """
+    if ticker == NIFTY_TICKER:
+        try:
+            live_rows = _raw_bus_read(
+                source="kotak_live",
+                symbol="NIFTY 50",
+                since=datetime.now(IST).replace(
+                    hour=MARKET_OPEN_HOUR,
+                    minute=MARKET_OPEN_MINUTE,
+                    second=0,
+                    microsecond=0,
+                ),
+                limit=5000,
+            )
+            if live_rows:
+                latest = live_rows[-1]
+                raw = _bus_raw(latest)
+                previous_close = _bus_number(
+                    raw,
+                    "close",
+                    "previousClose",
+                    "pdc",
+                )
+                open_price = _bus_number(
+                    raw,
+                    "open",
+                    "openingPrice",
+                    "o",
+                )
+                if (
+                    np.isfinite(previous_close)
+                    and previous_close != 0
+                    and np.isfinite(open_price)
+                ):
+                    return float(
+                        (open_price / previous_close - 1.0) * 100.0
+                    )
+        except Exception as exc:
+            LOGGER.warning("RAW BUS NIFTY opening-gap read failed: %s", exc)
+
+    # Safe historical fallback. This is useful outside the opening window and
+    # preserves the existing compatibility contract without fabricating data.
     frame = _supabase_history("NIFTY_SPOT", 5, "1d", "nifty_spot_daily")
     if frame is None or len(frame) < 2:
         return np.nan
