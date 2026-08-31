@@ -28,8 +28,12 @@ from zoneinfo import ZoneInfo
 
 import numpy as np
 import pandas as pd
-import pyarrow as pa
-import pyarrow.parquet as pq
+try:
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+except ImportError:
+    pa = None
+    pq = None
 import requests
 
 try:
@@ -118,6 +122,31 @@ CONFIG = {
     "option_stop_atr_mult": 0.80,
     "option_min_target_pct": 0.10,
     "option_min_stop_pct": 0.06,
+    # Paper-desk execution controls.  These are execution/journal controls only;
+    # they do not alter the NIFTY feature/label mathematics.
+    "paper_min_lots": 2,
+    "paper_partial_lots": 1,
+    "paper_reentry_cooldown_bars": 1,
+    "paper_expiry_entry_cutoff": "14:45",
+    "paper_expiry_force_exit": "15:20",
+    "paper_smc_min_score": 5,
+    "paper_evidence_drop_exit": 10.0,
+    "paper_target_extension_4": 1.30,
+    "paper_target_extension_5": 1.55,
+    "paper_runner_trail_r": 0.55,
+    # Weekly adaptive-learning layer.  It is paper-desk/execution policy only;
+    # Core Feature/Label/Decision mathematics remain immutable.
+    "weekly_learning_enabled": True,
+    "weekly_learning_min_trades": 8,
+    "weekly_learning_holdout_fraction": 0.35,
+    "weekly_learning_min_improvement_pts": 0.01,
+    "weekly_learning_profile_file": "weekly_learning_profile.json",
+    "weekly_learning_journal_file": "paper_learning_journal.jsonl",
+    "weekly_learning_strategy_file": "weekly_strategy_discovery.json",
+    "weekly_learning_min_pattern_trades": 4,
+    "weekly_learning_min_pattern_win_rate": 0.55,
+    "weekly_learning_min_pattern_pf": 1.15,
+    "weekly_learning_max_path_points": 80,
     "dq_weights": {
         "missing_future": 0.25,
         "missing_spot": 0.20,
@@ -1001,7 +1030,10 @@ class FeatureEngine:
             self.volume_history.append(volume)
         self.vwap_pv += typical * max(volume, 0.0)
         self.vwap_vol += max(volume, 0.0)
-        fut_vwap = self.vwap_pv / self.vwap_vol if self.vwap_vol > 0 else typical
+        # A price/typical-price fallback is NOT a VWAP.  Preserve the existing
+        # volume-weighted formula and leave VWAP unavailable until usable volume
+        # exists (including when the Supabase session could not be reconstructed).
+        fut_vwap = self.vwap_pv / self.vwap_vol if self.vwap_vol > 0 else np.nan
 
         if prev:
             pc = prev[-1].fut_c
@@ -2027,13 +2059,261 @@ class DatasetManager:
         data = df.copy()
         if "timestamp" in data.columns:
             data["date"] = pd.to_datetime(data["timestamp"]).dt.date.astype(str)
-        table = pa.Table.from_pandas(data, preserve_index=False)
-        pq.write_to_dataset(
-            table, root_path=str(self.base / name),
-            partition_cols=["date"] if "date" in data.columns else None,
-            existing_data_behavior="overwrite_or_ignore",
+        # Parquet remains the primary production format.  The fallback is only
+        # for minimal verification/runtime environments where pyarrow is absent;
+        # it must never block the engine from calculating and displaying data.
+        if pa is not None and pq is not None:
+            table = pa.Table.from_pandas(data, preserve_index=False)
+            pq.write_to_dataset(
+                table, root_path=str(self.base / name),
+                partition_cols=["date"] if "date" in data.columns else None,
+                existing_data_behavior="overwrite_or_ignore",
+            )
+        else:
+            fallback_dir = self.base / "_fallback_csv" / name
+            fallback_dir.mkdir(parents=True, exist_ok=True)
+            stamp = now_ist().strftime("%Y%m%d_%H%M%S_%f")
+            data.to_csv(fallback_dir / f"{stamp}.csv", index=False)
+
+
+
+class WeeklyAdaptiveLearningEngine:
+    """P&L-gated weekly learning for the paper desk.
+
+    This layer NEVER changes FeatureEngine, LabelEngine, DecisionEngine or their
+    mathematics.  It learns only an execution-policy threshold from completed
+    paper trades, using a chronological holdout.  A candidate is promoted only
+    when its holdout P&L and risk quality beat the baseline; otherwise the
+    previous policy remains active.
+    """
+
+    def __init__(self, dataset_manager: DatasetManager):
+        self.dataset_manager = dataset_manager
+        base = dataset_manager.base
+        self.journal_path = base / CONFIG["weekly_learning_journal_file"]
+        self.profile_path = base / CONFIG["weekly_learning_profile_file"]
+        self.profile = {
+            "version": 1,
+            "active_min_smc_score": int(CONFIG["paper_smc_min_score"]),
+            "last_evaluated_week": "",
+            "status": "BASELINE",
+            "baseline_holdout_pnl": 0.0,
+            "candidate_holdout_pnl": 0.0,
+            "trades": 0,
+            "reason": "No weekly learning cycle completed yet.",
+        }
+        self._load_profile()
+
+    def _load_profile(self):
+        try:
+            if self.profile_path.exists():
+                data = json.loads(self.profile_path.read_text(encoding="utf-8"))
+                if isinstance(data, dict):
+                    self.profile.update(data)
+        except Exception:
+            pass
+
+    def _save_profile(self):
+        tmp = self.profile_path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(self.profile, indent=2, default=str), encoding="utf-8")
+        tmp.replace(self.profile_path)
+
+    def record_trade(self, rec: Dict[str, Any]):
+        if not CONFIG.get("weekly_learning_enabled", True):
+            return
+        clean = {
+            "timestamp": str(rec.get("exit_time") or rec.get("timestamp") or ""),
+            "entry_time": str(rec.get("entry_time") or ""),
+            "direction": int(safe_int(rec.get("direction"), 0)),
+            "pnl_pts": float(safe_float(rec.get("pnl_pts"), 0.0)),
+            "lots": int(safe_int(rec.get("lots"), 2)),
+            "smc_entry_score": int(safe_int(rec.get("smc_entry_score"), 0)),
+            "expiry_day": int(safe_int(rec.get("expiry_day"), 0)),
+            "peak_pnl_pts": float(safe_float(rec.get("peak_pnl_pts"), 0.0)),
+            "exit_reason": str(rec.get("exit_reason") or ""),
+            "regime": str(rec.get("regime") or ""),
+            "smc_entry_audit": str(rec.get("smc_entry_audit") or ""),
+            "feature_path": rec.get("feature_path") or [],
+            "event_path": rec.get("event_path") or [],
+            "target_extensions": int(safe_int(rec.get("target_extensions"), 0)),
+            "partial_booked": bool(rec.get("partial_booked", False)),
+        }
+        try:
+            self.journal_path.parent.mkdir(parents=True, exist_ok=True)
+            with self.journal_path.open("a", encoding="utf-8") as f:
+                f.write(json.dumps(clean, separators=(",", ":"), default=str) + "\n")
+        except Exception:
+            pass
+
+    def _read_trades(self) -> List[Dict[str, Any]]:
+        out = []
+        try:
+            if not self.journal_path.exists():
+                return out
+            for line in self.journal_path.read_text(encoding="utf-8").splitlines():
+                if not line.strip():
+                    continue
+                try:
+                    x = json.loads(line)
+                    pnl = safe_float(x.get("pnl_pts"), np.nan)
+                    score = safe_int(x.get("smc_entry_score"), 0)
+                    ts = str(x.get("timestamp") or "")
+                    if is_valid_number(pnl) and score > 0 and ts:
+                        x["pnl_pts"] = float(pnl)
+                        x["smc_entry_score"] = int(score)
+                        out.append(x)
+                except Exception:
+                    continue
+        except Exception:
+            pass
+        return out
+
+    @staticmethod
+    def _profit_factor(trades):
+        gains = sum(max(float(x["pnl_pts"]), 0.0) for x in trades)
+        losses = sum(max(-float(x["pnl_pts"]), 0.0) for x in trades)
+        if losses <= 1e-12:
+            return float("inf") if gains > 0 else 0.0
+        return gains / losses
+
+    def _strategy_discovery(self, trades: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Discover recurring *temporal* setups from complete trade trajectories.
+
+        A setup is an ordered event subsequence plus entry-context family. Raw
+        feature paths are retained so future versions can learn numeric ratios
+        and velocities without rewriting the core engine. No hindsight event is
+        allowed to affect the original entry; all post-entry events are labelled
+        as trajectory evidence only.
+        """
+        buckets={}
+        for tr in trades:
+            events=[]; seen=set()
+            for e in tr.get("event_path") or []:
+                e=str(e)
+                if e not in seen:
+                    events.append(e); seen.add(e)
+            # Preserve order but cap combinatorial explosion: contiguous/causal
+            # 3-event motifs are the first strategy-DNA unit.
+            motifs=set(tuple(events[i:i+3]) for i in range(max(0,len(events)-2)))
+            for motif in motifs:
+                if len(motif)<3: continue
+                buckets.setdefault(motif,[]).append(tr)
+        discovered=[]
+        for motif, arr in buckets.items():
+            if len(arr)<int(CONFIG.get("weekly_learning_min_pattern_trades",4)): continue
+            pnls=[float(safe_float(x.get("pnl_pts"),0)) for x in arr]
+            wins=sum(1 for p in pnls if p>0); n=len(pnls)
+            gains=sum(max(p,0) for p in pnls); losses=sum(max(-p,0) for p in pnls)
+            pf=(gains/losses) if losses>0 else (float("inf") if gains>0 else 0.0)
+            wr=wins/n if n else 0.0
+            avg=sum(pnls)/n if n else 0.0
+            if wr < float(CONFIG.get("weekly_learning_min_pattern_win_rate",.55)) or pf < float(CONFIG.get("weekly_learning_min_pattern_pf",1.15)): continue
+            discovered.append({"pattern":list(motif),"trades":n,"win_rate":round(wr,4),"profit_factor":round(pf,4) if np.isfinite(pf) else "INF","avg_pnl_pts":round(avg,4),"total_pnl_pts":round(sum(pnls),4)})
+        discovered.sort(key=lambda x:(x["total_pnl_pts"],x["win_rate"],x["profit_factor"] if isinstance(x["profit_factor"],float) else 1e9),reverse=True)
+        return discovered[:25]
+
+    def _save_strategy_discovery(self, discovered, iso_week):
+        path=self.dataset_manager.base / CONFIG["weekly_learning_strategy_file"]
+        payload={"version":1,"week":iso_week,"generated_at":str(now_ist()),"strategies":discovered}
+        try:
+            path.write_text(json.dumps(payload,indent=2,default=str),encoding="utf-8")
+        except Exception:
+            pass
+
+    def effective_min_score(self) -> int:
+        base = int(CONFIG["paper_smc_min_score"])
+        learned = int(safe_int(self.profile.get("active_min_smc_score"), base))
+        return max(base, min(7, learned))
+
+    def run_weekly_cycle(self, force=False, as_of: Optional[datetime]=None) -> Dict[str, Any]:
+        trades = self._read_trades()
+        if len(trades) < int(CONFIG["weekly_learning_min_trades"]):
+            self.profile["status"] = "INSUFFICIENT_DATA"
+            self.profile["trades"] = len(trades)
+            self.profile["reason"] = f"Need {CONFIG['weekly_learning_min_trades']} completed trades."
+            self._save_profile()
+            return dict(self.profile)
+
+        as_of = as_of or now_ist()
+        iso_week = to_ist(as_of).strftime("%G-W%V")
+        if not force and self.profile.get("last_evaluated_week") == iso_week:
+            return dict(self.profile)
+
+        # First discover complete temporal Strategy-DNAs from the whole journal.
+        # This is descriptive learning; promotion below still uses chronological
+        # unseen holdout P&L and never changes core feature mathematics.
+        discovered = self._strategy_discovery(trades)
+        self._save_strategy_discovery(discovered, iso_week)
+
+        # Chronological split: never train on future trades.
+        trades = sorted(trades, key=lambda x: str(x.get("timestamp", "")))
+        cut = max(1, min(len(trades)-1, int(round(len(trades) * (1.0 - float(CONFIG["weekly_learning_holdout_fraction"]))))))
+        train, holdout = trades[:cut], trades[cut:]
+        if len(holdout) < 3:
+            self.profile["status"] = "INSUFFICIENT_HOLDOUT"
+            self.profile["reason"] = "Not enough chronological holdout trades."
+            self._save_profile()
+            return dict(self.profile)
+
+        # Learn a conservative execution gate from training data.  Thresholds
+        # are evaluated as shadow filters; no future P&L is used.
+        candidates = []
+        for threshold in range(int(CONFIG["paper_smc_min_score"]), 8):
+            selected = [x for x in train if int(x["smc_entry_score"]) >= threshold]
+            if len(selected) < max(3, int(len(train) * 0.20)):
+                continue
+            pnl = sum(float(x["pnl_pts"]) for x in selected)
+            pf = self._profit_factor(selected)
+            avg = pnl / len(selected)
+            candidates.append((avg, pf, pnl, threshold, len(selected)))
+        if not candidates:
+            self.profile["status"] = "NO_VALID_CANDIDATE"
+            self.profile["last_evaluated_week"] = iso_week
+            self.profile["reason"] = "No threshold had sufficient training observations."
+            self._save_profile()
+            return dict(self.profile)
+
+        candidates.sort(key=lambda z: (z[0], z[1], z[2]), reverse=True)
+        _, _, _, candidate_threshold, _ = candidates[0]
+
+        baseline_hold = holdout
+        candidate_hold = [x for x in holdout if int(x["smc_entry_score"]) >= candidate_threshold]
+        baseline_pnl = sum(float(x["pnl_pts"]) for x in baseline_hold)
+        candidate_pnl = sum(float(x["pnl_pts"]) for x in candidate_hold)
+        baseline_pf = self._profit_factor(baseline_hold)
+        candidate_pf = self._profit_factor(candidate_hold) if candidate_hold else 0.0
+
+        improvement = candidate_pnl - baseline_pnl
+        promote = (
+            candidate_threshold > int(CONFIG["paper_smc_min_score"])
+            and len(candidate_hold) >= 2
+            and improvement >= float(CONFIG["weekly_learning_min_improvement_pts"])
+            and candidate_pf >= baseline_pf
         )
 
+        if promote:
+            self.profile["active_min_smc_score"] = int(candidate_threshold)
+            self.profile["status"] = "PROMOTED"
+            reason = f"Holdout P&L +{improvement:.2f} pts; PF {baseline_pf:.2f}->{candidate_pf:.2f}."
+        else:
+            self.profile["active_min_smc_score"] = int(CONFIG["paper_smc_min_score"])
+            self.profile["status"] = "REJECTED"
+            reason = (
+                f"Candidate score {candidate_threshold} rejected; holdout P&L "
+                f"{baseline_pnl:.2f}->{candidate_pnl:.2f}, PF {baseline_pf:.2f}->{candidate_pf:.2f}."
+            )
+
+        self.profile.update({
+            "last_evaluated_week": iso_week,
+            "baseline_holdout_pnl": round(baseline_pnl, 4),
+            "candidate_holdout_pnl": round(candidate_pnl, 4),
+            "trades": len(trades),
+            "candidate_min_smc_score": int(candidate_threshold),
+            "discovered_strategies": len(discovered),
+            "reason": reason,
+        })
+        self._save_profile()
+        return dict(self.profile)
 
 @dataclass
 class PaperPosition:
@@ -2046,6 +2326,10 @@ class PaperPosition:
     effective_delta: float
     size: float
     regime: str
+    lots: int = 2
+    remaining_lots: int = 2
+    booked_lots: int = 0
+    initial_risk_pts: float = 0.0
     bars_held: int = 0
     status: str = "OPEN"
     exit_time: Optional[datetime] = None
@@ -2055,9 +2339,26 @@ class PaperPosition:
     exit_reason: str = ""
     peak_pnl_pts: float = 0.0
     locked_floor_pts: float = 0.0
+    partial_booked: bool = False
+    target_extensions: int = 0
+    smc_entry_score: int = 0
+    smc_entry_audit: str = ""
+    trade_realized_pnl_pts: float = 0.0
+    # Immutable causal trade-memory: every completed 3-min bar carries the full
+    # numeric feature state available at that moment.  It is for learning only;
+    # it never feeds backward into Core Feature/Label/Decision mathematics.
+    feature_path: List[Dict[str, Any]] = field(default_factory=list)
+    event_path: List[str] = field(default_factory=list)
 
 
 class PaperTradingDesk:
+    """Single-position, causal option paper desk.
+
+    This layer is intentionally isolated from FeatureEngine/LabelEngine/DecisionEngine
+    mathematics.  It enforces realistic execution state: one position at a time,
+    no same-candle re-entry, minimum two lots, partial booking, evidence-driven
+    target extension and evidence/structure-driven exits.
+    """
     def __init__(self, dataset_manager: DatasetManager):
         self.dataset_manager = dataset_manager
         self.active_position: Optional[PaperPosition] = None
@@ -2067,6 +2368,25 @@ class PaperTradingDesk:
         self.unrealized_pnl_pts: float = 0.0
         self.current_trade_date: Optional[date] = None
         self.risk_locked: bool = False
+        self.last_entry_bar_key: Optional[str] = None
+        self.last_exit_bar_key: Optional[str] = None
+        self.entry_block_until: Optional[datetime] = None
+        self.last_partial_bar_key: Optional[str] = None
+        self.learning_engine = WeeklyAdaptiveLearningEngine(dataset_manager)
+
+    @staticmethod
+    def _bar_key(dt: datetime) -> str:
+        x = to_ist(dt)
+        minute = (x.minute // CONFIG["bar_minutes"]) * CONFIG["bar_minutes"]
+        return x.replace(minute=minute, second=0, microsecond=0).isoformat()
+
+    @staticmethod
+    def _parse_hhmm(value: str):
+        try:
+            h, m = [int(x) for x in str(value).split(":")[:2]]
+            return h, m
+        except Exception:
+            return 15, 0
 
     def check_and_reset_new_day(self, current_dt: datetime):
         today = to_ist(current_dt).date()
@@ -2080,6 +2400,10 @@ class PaperTradingDesk:
             self.unrealized_pnl_pts = 0.0
             self.current_trade_date = today
             self.risk_locked = False
+            self.last_entry_bar_key = None
+            self.last_exit_bar_key = None
+            self.entry_block_until = None
+            self.last_partial_bar_key = None
 
     def check_total_risk_limit(self) -> bool:
         total_pnl = self.realized_pnl_pts + self.unrealized_pnl_pts
@@ -2089,108 +2413,443 @@ class PaperTradingDesk:
             return True
         return False
 
-    def stage_signal(self, decision: TradeDecision, atr: float, next_bar_time: datetime):
+    @staticmethod
+    def _learning_snapshot(feats: Dict[str, Any], candle: Candle3Min, direction: int, option_price: Optional[float]=None) -> Dict[str, Any]:
+        """Capture the complete observable state at one causal 3-min bar.
+
+        Every numeric feature exposed by the engine is retained, rather than
+        selecting a hand-picked subset. This lets the weekly learner discover
+        interactions between SMC, structure, S/R, VWAP, momentum, volatility,
+        options, flow and regime without changing the core signal mathematics.
+        """
+        snap = {
+            "timestamp": str(candle.timestamp),
+            "fut_o": safe_float(candle.fut_o, np.nan), "fut_h": safe_float(candle.fut_h, np.nan),
+            "fut_l": safe_float(candle.fut_l, np.nan), "fut_c": safe_float(candle.fut_c, np.nan),
+            "fut_volume": safe_float(candle.fut_volume, np.nan),
+            "direction": int(direction),
+        }
+        for k, v in (feats or {}).items():
+            if isinstance(v, (int, float, np.integer, np.floating)) and not isinstance(v, bool):
+                fv = safe_float(v, np.nan)
+                if is_valid_number(fv):
+                    snap[str(k)] = float(fv)
+        if option_price is not None and is_valid_number(option_price):
+            snap["paper_option_price"] = float(option_price)
+        return snap
+
+    @staticmethod
+    def _learning_events(prev: Optional[Dict[str, Any]], cur: Dict[str, Any], direction: int) -> List[str]:
+        """Causal event detector used only to describe the trade trajectory."""
+        ev=[]; side=1 if direction==1 else -1
+        def n(k,d=0.0): return safe_float(cur.get(k), d)
+        if side==1:
+            if n("demand_reclaim")>0 or n("demand_liquidity_sweep")>0: ev.append("DEMAND_EVENT")
+            if n("supply_rejection")>0 or n("supply_liquidity_sweep")>0: ev.append("SUPPLY_EVENT")
+            if n("bos_signal")>0: ev.append("BULLISH_BOS")
+            if n("choch_signal")>0: ev.append("BULLISH_CHOCH")
+            if n("nearest_resistance_price", np.nan)==n("nearest_resistance_price", np.nan):
+                price=n("spot_c", n("fut_c", np.nan)); res=n("nearest_resistance_price", np.nan)
+                if is_valid_number(price) and is_valid_number(res) and price>=res: ev.append("RESISTANCE_BREAK_OR_CROSS")
+            if n("nearest_support_price", np.nan)==n("nearest_support_price", np.nan):
+                price=n("spot_c", n("fut_c", np.nan)); sup=n("nearest_support_price", np.nan)
+                if is_valid_number(price) and is_valid_number(sup) and price<=sup: ev.append("SUPPORT_LOSS")
+        else:
+            if n("supply_rejection")>0 or n("supply_liquidity_sweep")>0: ev.append("SUPPLY_EVENT")
+            if n("demand_reclaim")>0 or n("demand_liquidity_sweep")>0: ev.append("DEMAND_EVENT")
+            if n("bos_signal")<0: ev.append("BEARISH_BOS")
+            if n("choch_signal")<0: ev.append("BEARISH_CHOCH")
+            price=n("spot_c", n("fut_c", np.nan)); sup=n("nearest_support_price", np.nan); res=n("nearest_resistance_price", np.nan)
+            if is_valid_number(price) and is_valid_number(sup) and price<=sup: ev.append("SUPPORT_BREAK_OR_CROSS")
+            if is_valid_number(price) and is_valid_number(res) and price>=res: ev.append("RESISTANCE_LOSS")
+        # Momentum/volatility transitions are deliberately event-like, while the
+        # raw numeric values remain in feature_path for ratio/velocity learning.
+        mom_keys=["rsi_14","macd_hist","spot_rsi_14","spot_macd_hist","stretch_slope_3","spread_slope_3"]
+        mom=[]
+        for k in mom_keys:
+            v=n(k,np.nan)
+            if is_valid_number(v): mom.append(v)
+        if prev:
+            rising=falling=0
+            for k in mom_keys:
+                a=safe_float(prev.get(k),np.nan); b=n(k,np.nan)
+                if is_valid_number(a) and is_valid_number(b):
+                    rising += int(b>a); falling += int(b<a)
+            if rising>=2: ev.append("MOMENTUM_EXPANSION")
+            elif falling>=2: ev.append("MOMENTUM_DECAY")
+        adx=n("adx_14",np.nan); atr=n("atr_14_prev",np.nan);
+        if is_valid_number(adx) and adx>=25: ev.append("TREND_STRENGTH")
+        if is_valid_number(atr) and is_valid_number(n("fut_c",np.nan)) and atr/max(abs(n("fut_c",1)),1e-9)>=0.002: ev.append("HIGH_RELATIVE_VOLATILITY")
+        return ev
+
+    def _append_trade_snapshot(self, feats: Dict[str, Any], candle: Candle3Min, direction: int, option_price: Optional[float]=None):
+        pos=self.active_position
+        if pos is None: return
+        snap=self._learning_snapshot(feats or {}, candle, direction, option_price)
+        if pos.feature_path:
+            prev=pos.feature_path[-1]
+            for k,v in list(snap.items()):
+                if k in ("timestamp","direction") or not is_valid_number(v): continue
+                pv=safe_float(prev.get(k),np.nan)
+                if is_valid_number(pv):
+                    snap[f"delta__{k}"]=float(v-pv)
+                    snap[f"ratio__{k}"]=float(v/pv) if abs(pv)>1e-9 else np.nan
+        pos.feature_path.append(snap)
+        prev=pos.feature_path[-2] if len(pos.feature_path)>1 else None
+        pos.event_path.extend(self._learning_events(prev,snap,direction))
+        # Keep the journal bounded without losing the beginning/end of the path.
+        cap=int(CONFIG.get("weekly_learning_max_path_points",80))
+        if len(pos.feature_path)>cap:
+            pos.feature_path=pos.feature_path[:2]+pos.feature_path[-(cap-2):]
+        if len(pos.event_path)>cap*4:
+            pos.event_path=pos.event_path[-cap*4:]
+
+    def _smc_audit(self, decision: TradeDecision, feats: Dict[str, Any], direction: int):
+        """Evaluate all requested SMC/context families without changing core signals."""
+        side = 1 if direction == 1 else -1
+        reasons = []
+        passed = 0
+
+        demand_reclaim = safe_int(feats.get("demand_reclaim"), 0)
+        demand_sweep = safe_int(feats.get("demand_liquidity_sweep"), 0)
+        supply_reject = safe_int(feats.get("supply_rejection"), 0)
+        supply_sweep = safe_int(feats.get("supply_liquidity_sweep"), 0)
+        bos = safe_float(feats.get("bos_signal"), 0)
+        choch = safe_float(feats.get("choch_signal"), 0)
+        vpoc = safe_float(feats.get("vp_poc"), np.nan)
+        price = safe_float(feats.get("spot_c"), safe_float(feats.get("fut_c"), np.nan))
+        sup = safe_float(feats.get("nearest_support_price"), np.nan)
+        res = safe_float(feats.get("nearest_resistance_price"), np.nan)
+        ce = safe_float(feats.get("ce_evidence_score"), 50.0)
+        pe = safe_float(feats.get("pe_evidence_score"), 50.0)
+        option_slope = safe_float(feats.get("ce_option_slope3" if side == 1 else "pe_option_slope3"), 0)
+        option_rsi = safe_float(feats.get("ce_option_rsi" if side == 1 else "pe_option_rsi"), 50)
+        evidence = ce if side == 1 else pe
+
+        # Demand/supply location
+        location_ok = (demand_reclaim and demand_sweep) if side == 1 else (supply_reject and supply_sweep)
+        if location_ok:
+            passed += 1; reasons.append("DEMAND/ SUPPLY CONFIRMED")
+        else:
+            reasons.append("DEMAND/ SUPPLY NOT FULLY CONFIRMED")
+
+        # BOS / CHOCH
+        structure_ok = (bos > 0 or choch > 0) if side == 1 else (bos < 0 or choch < 0)
+        if structure_ok:
+            passed += 1; reasons.append("BOS/CHOCH ALIGNED")
+        else:
+            reasons.append("BOS/CHOCH NOT ALIGNED")
+
+        # Support / resistance room.  Use the engine's causal levels first, then
+        # the already-computed demand/supply, VPOC/VA, OR and session levels.
+        # This is an execution gate only; no core feature calculation is changed.
+        support_candidates = [sup, safe_float(feats.get("demand_zone_high"), np.nan),
+                              safe_float(feats.get("demand_zone_low"), np.nan),
+                              safe_float(feats.get("vp_val"), np.nan), safe_float(feats.get("vp_poc"), np.nan),
+                              safe_float(feats.get("or_low"), np.nan), safe_float(feats.get("session_low_reasoning"), np.nan),
+                              safe_float(feats.get("prev_low"), np.nan), safe_float(feats.get("fut_vwap"), np.nan)]
+        resistance_candidates = [res, safe_float(feats.get("supply_zone_low"), np.nan),
+                                 safe_float(feats.get("supply_zone_high"), np.nan),
+                                 safe_float(feats.get("vp_vah"), np.nan), safe_float(feats.get("vp_poc"), np.nan),
+                                 safe_float(feats.get("or_high"), np.nan), safe_float(feats.get("session_high_reasoning"), np.nan),
+                                 safe_float(feats.get("prev_high"), np.nan), safe_float(feats.get("fut_vwap"), np.nan)]
+        supports = [x for x in support_candidates if is_valid_number(x) and is_valid_number(price) and x < price]
+        resistances = [x for x in resistance_candidates if is_valid_number(x) and is_valid_number(price) and x > price]
+        effective_support = max(supports) if supports else np.nan
+        effective_resistance = min(resistances) if resistances else np.nan
+        sr_ok = is_valid_number(effective_support) and is_valid_number(effective_resistance)
+        if is_valid_number(effective_support): sup = effective_support
+        if is_valid_number(effective_resistance): res = effective_resistance
+        if sr_ok:
+            passed += 1; reasons.append("S/R ROOM AVAILABLE")
+        else:
+            reasons.append("S/R ROOM WEAK/UNAVAILABLE")
+
+        # VPOC / volume profile location
+        vp_ok = is_valid_number(vpoc) and is_valid_number(price) and ((price >= vpoc) if side == 1 else (price <= vpoc))
+        if vp_ok:
+            passed += 1; reasons.append("VPOC ALIGNED")
+        else:
+            reasons.append("VPOC NOT ALIGNED")
+
+        # Option momentum
+        mom_ok = option_slope > 0 if side == 1 else option_slope < 0
+        if mom_ok and ((option_rsi >= 50) if side == 1 else (option_rsi <= 50)):
+            passed += 1; reasons.append("OPTION MOMENTUM ALIGNED")
+        else:
+            reasons.append("OPTION MOMENTUM WEAK")
+
+        # Evidence
+        ev_ok = evidence >= 55.0 and ((ce > pe) if side == 1 else (pe > ce))
+        if ev_ok:
+            passed += 1; reasons.append("EVIDENCE ALIGNED")
+        else:
+            reasons.append("EVIDENCE NOT STRONG ENOUGH")
+
+        # For an expiry-day paper trade we demand one additional confluence point.
+        expiry_day = bool(safe_int(feats.get("expiry_day_flag"), 0))
+        learned_base = self.learning_engine.effective_min_score()
+        required = min(7, learned_base + (1 if expiry_day else 0))
+        ok = passed >= required and decision.action in ("CE", "PE")
+        return ok, passed, required, "; ".join(reasons), expiry_day
+
+    def stage_signal(self, decision: TradeDecision, atr: float, next_bar_time: datetime, feats: Optional[Dict[str, Any]] = None):
+        self.check_and_reset_new_day(next_bar_time)
         if getattr(self, "risk_locked", False) or self.check_total_risk_limit():
             return
-        if decision.action in ("CE", "PE") and self.active_position is None and self.pending_order is None:
-            direction = 1 if decision.action == "CE" else -1
-            self.pending_order = {
-                "target_fill_time": next_bar_time,
-                "direction": direction,
-                "option_target": decision.option_target_pts,
-                "option_stop": decision.option_stop_pts,
-                "effective_delta": decision.effective_delta,
-                "size": decision.size_factor,
-                "regime": decision.regime,
-                "option_entry_estimate": decision.option_entry_estimate,
-                "option_strike": decision.option_strike,
-            }
+        if decision.action not in ("CE", "PE"):
+            return
+        # Hard execution invariant: never stack positions or orders.
+        if self.active_position is not None or self.pending_order is not None:
+            return
+        # Hard execution invariant: never re-enter on the same candle or during cooldown.
+        bar_key = self._bar_key(next_bar_time)
+        if bar_key == self.last_exit_bar_key or bar_key == self.last_entry_bar_key:
+            return
+        if self.entry_block_until is not None and to_ist(next_bar_time) < to_ist(self.entry_block_until):
+            return
+
+        feats = feats or {}
+        direction = 1 if decision.action == "CE" else -1
+        smc_ok, smc_score, smc_required, smc_audit, expiry_day = self._smc_audit(decision, feats, direction)
+        if not smc_ok:
+            return
+
+        # Expiry-day special execution: actual active expiry is authoritative; no
+        # hard-coded weekday is used because holiday-adjusted expiries can move.
+        if expiry_day:
+            h, m = self._parse_hhmm(CONFIG["paper_expiry_entry_cutoff"])
+            t = to_ist(next_bar_time)
+            if (t.hour, t.minute) >= (h, m):
+                return
+
+        self.pending_order = {
+            "target_fill_time": next_bar_time,
+            "direction": direction,
+            "option_target": max(0.0, safe_float(decision.option_target_pts, 0.0)),
+            "option_stop": max(0.01, safe_float(decision.option_stop_pts, 0.01)),
+            "effective_delta": safe_float(decision.effective_delta, CONFIG["base_delta"]),
+            "size": float(CONFIG["paper_min_lots"]),
+            "lots": int(CONFIG["paper_min_lots"]),
+            "regime": decision.regime,
+            "option_entry_estimate": decision.option_entry_estimate,
+            "option_strike": decision.option_strike,
+            "smc_entry_score": smc_score,
+            "smc_required": smc_required,
+            "smc_entry_audit": smc_audit,
+            "expiry_day": expiry_day,
+            "entry_feature_snapshot": {k:v for k,v in feats.items() if isinstance(v,(int,float,np.integer,np.floating)) and not isinstance(v,bool) and is_valid_number(safe_float(v,np.nan))},
+        }
 
     def on_bar_open_fill(self, candle: Candle3Min, atr: float, option_quotes: Optional[Dict[str,float]]=None):
         self.check_and_reset_new_day(candle.timestamp)
-        if self.pending_order and to_ist(candle.timestamp) >= to_ist(self.pending_order["target_fill_time"]):
-            if self.check_total_risk_limit():
-                self.pending_order = None
-                return
-
-            order = self.pending_order
-            direction = order["direction"]
-            
-            vol_factor = max(0.5, min(2.0, (atr / 15.0))) if is_valid_number(atr) and atr > 0 else 1.0
-            slippage = CONFIG["base_slippage_pts"] * vol_factor * direction
-            fill_price = candle.fut_o + slippage
-
-            option_quotes=option_quotes or {};side_key="CE" if direction==1 else "PE"
-            observed=safe_float(option_quotes.get(side_key),np.nan);staged=safe_float(order.get("option_entry_estimate"),np.nan)
-            option_entry=observed if is_valid_number(observed) and observed>0 else staged
-            if not is_valid_number(option_entry) or option_entry<=0:
-                self.pending_order=None;return
-            self.active_position = PaperPosition(
-                entry_time=candle.timestamp,
-                direction=direction,
-                entry_future_price=round(fill_price, 2),
-                entry_option_price=round(option_entry,2),
-                option_target=order["option_target"],
-                option_stop=order["option_stop"],
-                effective_delta=order["effective_delta"],
-                size=order["size"],
-                regime=order["regime"],
-                peak_pnl_pts=0.0, locked_floor_pts=0.0,
-            )
+        if not self.pending_order:
+            return
+        order = self.pending_order
+        bar_key = self._bar_key(candle.timestamp)
+        if bar_key == self.last_exit_bar_key or bar_key == self.last_entry_bar_key:
+            return
+        if to_ist(candle.timestamp) < to_ist(order["target_fill_time"]):
+            return
+        if self.check_total_risk_limit():
             self.pending_order = None
+            return
+
+        direction = order["direction"]
+        vol_factor = max(0.5, min(2.0, (atr / 15.0))) if is_valid_number(atr) and atr > 0 else 1.0
+        slippage = CONFIG["base_slippage_pts"] * vol_factor * direction
+        fill_price = candle.fut_o + slippage
+        option_quotes = option_quotes or {}
+        side_key = "CE" if direction == 1 else "PE"
+        observed = safe_float(option_quotes.get(side_key), np.nan)
+        staged = safe_float(order.get("option_entry_estimate"), np.nan)
+        option_entry = observed if is_valid_number(observed) and observed > 0 else staged
+        if not is_valid_number(option_entry) or option_entry <= 0:
+            self.pending_order = None
+            return
+
+        lots = max(2, int(order.get("lots", CONFIG["paper_min_lots"])))
+        risk = max(0.01, safe_float(order.get("option_stop"), 0.01))
+        self.active_position = PaperPosition(
+            entry_time=candle.timestamp,
+            direction=direction,
+            entry_future_price=round(fill_price, 2),
+            entry_option_price=round(option_entry, 2),
+            option_target=max(risk, safe_float(order.get("option_target"), risk)),
+            option_stop=risk,
+            effective_delta=safe_float(order.get("effective_delta"), CONFIG["base_delta"]),
+            size=float(lots),
+            regime=order["regime"],
+            lots=lots,
+            remaining_lots=lots,
+            booked_lots=0,
+            initial_risk_pts=risk,
+            smc_entry_score=int(order.get("smc_entry_score", 0)),
+            smc_entry_audit=str(order.get("smc_entry_audit", "")),
+            peak_pnl_pts=0.0,
+            locked_floor_pts=0.0,
+        )
+        # Entry-time state is the anchor. It contains every observable numeric
+        # parameter available at the actual fill, including RSI/MACD/ST, SMC,
+        # S/R, VPOC, VWAP, volatility, options and flow fields.
+        self._append_trade_snapshot(order.get("entry_feature_snapshot", {}) or {}, candle, direction, option_entry)
+        self.last_entry_bar_key = bar_key
+        self.pending_order = None
+
+    def _evidence_snapshot(self, feats: Dict[str, Any], direction: int):
+        ce = safe_float(feats.get("v10_ce_evidence", feats.get("ce_evidence_score", 50)), 50)
+        pe = safe_float(feats.get("v10_pe_evidence", feats.get("pe_evidence_score", 50)), 50)
+        side_ev = ce if direction == 1 else pe
+        opp_ev = pe if direction == 1 else ce
+        alignment = 0
+        try:
+            bs = json.loads(feats.get("basket_scores_json", "{}"))
+            alignment = sum(1 for x in bs.values() if x * direction >= 0.25)
+        except Exception:
+            alignment = 0
+        return side_ev, opp_ev, alignment
+
+    def _partial_book(self, pos: PaperPosition, candle: Candle3Min, option_price: float, reason: str):
+        if pos.partial_booked or pos.remaining_lots <= CONFIG["paper_partial_lots"]:
+            return 0.0
+        lots = int(CONFIG["paper_partial_lots"])
+        gain_per_lot = option_price - pos.entry_option_price if pos.direction == 1 else pos.entry_option_price - option_price
+        booked = gain_per_lot * lots
+        pos.remaining_lots -= lots
+        pos.booked_lots += lots
+        pos.partial_booked = True
+        pos.locked_floor_pts = max(pos.locked_floor_pts, 0.05 * pos.initial_risk_pts)
+        self.realized_pnl_pts = round(self.realized_pnl_pts + booked, 2)
+        pos.trade_realized_pnl_pts = round(pos.trade_realized_pnl_pts + booked, 2)
+        self.last_partial_bar_key = self._bar_key(candle.timestamp)
+        pos.exit_reason = f"PARTIAL {lots} LOT @ {option_price:.2f}: {reason}"
+        return booked
 
     def on_bar_update_and_exit_eval(self, candle: Candle3Min, decision: Optional[TradeDecision]=None, feats: Optional[Dict[str,Any]]=None, is_session_end: bool=False, option_quotes: Optional[Dict[str,float]]=None):
         if self.active_position is None:
-            self.unrealized_pnl_pts=0.0; self.check_total_risk_limit(); return
-        pos=self.active_position; pos.bars_held+=1
-        if pos.direction==1:
-            high_move=candle.fut_h-pos.entry_future_price; low_move=pos.entry_future_price-candle.fut_l; close_move=candle.fut_c-pos.entry_future_price
+            self.unrealized_pnl_pts = 0.0
+            self.check_total_risk_limit()
+            return
+        feats = feats or {}
+        pos = self.active_position
+        pos.bars_held += 1
+        if pos.direction == 1:
+            high_move = candle.fut_h - pos.entry_future_price
+            low_move = pos.entry_future_price - candle.fut_l
+            close_move = candle.fut_c - pos.entry_future_price
         else:
-            high_move=pos.entry_future_price-candle.fut_l; low_move=candle.fut_h-pos.entry_future_price; close_move=pos.entry_future_price-candle.fut_c
-        option_quotes=option_quotes or {};side_key="CE" if pos.direction==1 else "PE"
-        live_option=safe_float(option_quotes.get(side_key),np.nan)
-        if is_valid_number(live_option) and live_option>0 and is_valid_number(pos.entry_option_price):
-            option_close=live_option-pos.entry_option_price;option_high=option_close;option_low=option_close
+            high_move = pos.entry_future_price - candle.fut_l
+            low_move = candle.fut_h - pos.entry_future_price
+            close_move = pos.entry_future_price - candle.fut_c
+
+        option_quotes = option_quotes or {}
+        side_key = "CE" if pos.direction == 1 else "PE"
+        live_option = safe_float(option_quotes.get(side_key), np.nan)
+        if is_valid_number(live_option) and live_option > 0 and is_valid_number(pos.entry_option_price):
+            option_close = live_option - pos.entry_option_price if pos.direction == 1 else pos.entry_option_price - live_option
+            option_high = option_close
+            option_low = option_close
+            current_option_price = live_option
         else:
-            option_high=high_move*pos.effective_delta;option_low=-(low_move*pos.effective_delta);option_close=close_move*pos.effective_delta
-        self.unrealized_pnl_pts=round(option_close*pos.size,2)
-        pos.peak_pnl_pts=max(pos.peak_pnl_pts,self.unrealized_pnl_pts)
-        hit_stop=option_low<=-pos.option_stop
+            option_high = high_move * pos.effective_delta
+            option_low = -(low_move * pos.effective_delta)
+            option_close = close_move * pos.effective_delta
+            current_option_price = pos.entry_option_price + option_close if pos.direction == 1 else pos.entry_option_price - option_close
+
+        self._append_trade_snapshot(feats, candle, pos.direction, current_option_price)
+        self.unrealized_pnl_pts = round(option_close * pos.remaining_lots, 2)
+        pos.peak_pnl_pts = max(pos.peak_pnl_pts, self.unrealized_pnl_pts + self.realized_pnl_pts)
+        risk = max(pos.initial_risk_pts, 0.01)
+        hit_stop = option_low <= -pos.option_stop
+        just_partial = False
+        side_ev, opp_ev, alignment = self._evidence_snapshot(feats, pos.direction)
+        evidence_drop = (side_ev < (55.0 - CONFIG["paper_evidence_drop_exit"]))
+        structure_break = (safe_float(feats.get("bos_signal"), 0) < 0 if pos.direction == 1 else safe_float(feats.get("bos_signal"), 0) > 0)
+        choch_against = (safe_float(feats.get("choch_signal"), 0) < 0 if pos.direction == 1 else safe_float(feats.get("choch_signal"), 0) > 0)
+        momentum_key = "ce_option_slope3" if pos.direction == 1 else "pe_option_slope3"
+        option_slope = safe_float(feats.get(momentum_key), 0)
+        momentum_against = option_slope < 0 if pos.direction == 1 else option_slope > 0
+
+        # First objective: book exactly one of two lots after 1R when the move has
+        # actually paid risk.  This removes the old all-in/all-out behaviour.
+        if not pos.partial_booked and option_close >= risk and is_valid_number(current_option_price):
+            self._partial_book(pos, candle, current_option_price, "1R achieved")
+            just_partial = True
+            pos.option_stop = max(pos.option_stop, pos.initial_risk_pts * 0.10)
+            pos.option_target = max(pos.option_target, pos.initial_risk_pts * 1.30)
+
+        # Dynamic target: evidence + basket alignment extend the runner; weakening
+        # evidence does not keep the target artificially far away.
+        if alignment >= 5 and side_ev >= 65 and side_ev >= opp_ev + 10:
+            pos.option_target = max(pos.option_target, risk * CONFIG["paper_target_extension_5"])
+            pos.target_extensions = max(pos.target_extensions, 2)
+        elif alignment >= 4 and side_ev >= 60 and side_ev >= opp_ev + 8:
+            pos.option_target = max(pos.option_target, risk * CONFIG["paper_target_extension_4"])
+            pos.target_extensions = max(pos.target_extensions, 1)
+
+        # Runner trailing floor: once the trade has earned >=1R, protect a portion
+        # of the achieved move while still allowing trend continuation.
+        if pos.partial_booked and pos.peak_pnl_pts > 0:
+            trail = pos.peak_pnl_pts - risk * CONFIG["paper_runner_trail_r"]
+            pos.locked_floor_pts = max(pos.locked_floor_pts, trail)
+
         self.check_total_risk_limit()
-        timeout=pos.bars_held >= (CONFIG["time_barrier_min"]//CONFIG["bar_minutes"])
-        exit_reason=None; exit_pnl=option_close
-        # Dynamic ride: target is no longer a mandatory exit when momentum remains aligned.
-        if is_session_end: exit_reason="SESSION END AUTO-EXIT"
-        elif self.risk_locked: exit_reason="KILL-SWITCH MAX LOSS BREACH"
-        elif hit_stop: exit_reason="STOP LOSS HIT"
+        expiry_day = bool(safe_int(feats.get("expiry_day_flag"), 0))
+        fh, fm = self._parse_hhmm(CONFIG["paper_expiry_force_exit"])
+        expiry_force = expiry_day and (to_ist(candle.timestamp).hour, to_ist(candle.timestamp).minute) >= (fh, fm)
+        timeout = pos.bars_held >= (CONFIG["time_barrier_min"] // CONFIG["bar_minutes"])
+
+        exit_reason = None
+        exit_pnl = option_close
+        if is_session_end or expiry_force:
+            exit_reason = "EXPIRY/SESSION END AUTO-EXIT" if expiry_day else "SESSION END AUTO-EXIT"
+        elif self.risk_locked:
+            exit_reason = "KILL-SWITCH MAX LOSS BREACH"
+        elif hit_stop:
+            exit_reason = "STOP LOSS HIT"
+        elif pos.partial_booked and not just_partial and pos.remaining_lots > 0 and (option_close <= pos.locked_floor_pts):
+            exit_reason = "RUNNER TRAIL FLOOR HIT"
+        elif structure_break and choch_against:
+            exit_reason = "SMC STRUCTURE INVALIDATION (BOS+CHOCH AGAINST)"
+        elif evidence_drop and momentum_against:
+            exit_reason = "EVIDENCE + MOMENTUM LOSS"
         elif decision is not None:
-            current_side="CE" if pos.direction==1 else "PE"
-            try: bs=json.loads((feats or {}).get("basket_scores_json","{}"))
-            except Exception: bs={}
-            aligned=sum(1 for x in bs.values() if x*(1 if pos.direction==1 else -1)>=0.25)
-            opposite=sum(1 for x in bs.values() if x*(1 if pos.direction==1 else -1)<=-0.25)
-            # Reversal only when the opposite side independently qualifies at >=3/7.
-            opp_side="PE" if current_side=="CE" else "CE"
-            opp_aligned=sum(1 for x in bs.values() if x*(-1 if pos.direction==1 else 1)>=0.25)
-            if opp_aligned>=4 and opposite>=3:
-                exit_reason=f"INDEPENDENT OPPOSITE REVERSAL ({opp_side} {opp_aligned}/7)"
-            elif aligned<=1: exit_reason="MOMENTUM COLLAPSE (ALIGNMENT <=1)"
-            elif aligned==2: exit_reason="MOMENTUM DECAY / PROFIT LOCK (ALIGNMENT 2/7)"
-            elif aligned>=3:
-                # Extend target virtually by removing fixed target exit. Stronger alignment keeps riding.
-                if aligned>=5: pos.option_target=max(pos.option_target, pos.option_target*1.55); pos.exit_reason="RIDE EXTENDED 5/7"
-                elif aligned==4: pos.option_target=max(pos.option_target, pos.option_target*1.30); pos.exit_reason="RIDE EXTENDED 4/7"
-                if timeout: exit_reason="TIME BARRIER EXIT"
-            if exit_reason is None and timeout: exit_reason="TIME BARRIER EXIT"
-        elif timeout: exit_reason="TIME BARRIER EXIT"
+            # Independent opposite confirmation is stronger than mere weakening.
+            if opp_ev >= 62 and opp_ev >= side_ev + 10 and alignment <= 2:
+                exit_reason = "INDEPENDENT OPPOSITE EVIDENCE"
+            elif timeout:
+                exit_reason = "TIME BARRIER EXIT"
+        elif timeout:
+            exit_reason = "TIME BARRIER EXIT"
+
         if exit_reason:
-            if exit_reason.startswith("STOP"): exit_pnl=-pos.option_stop
-            pos.exit_time=candle.timestamp; pos.exit_future_price=round(candle.fut_c,2); pos.exit_option_price=round(max(5.0,pos.entry_option_price+exit_pnl),2)
-            penalty=min(1.40,CONFIG.get("option_exit_spread_penalty",0.65)*max(1.0,abs(exit_pnl)/10.0))
-            pos.pnl_pts=round((exit_pnl-penalty)*pos.size,2); pos.status="CLOSED"; pos.exit_reason=exit_reason+f" (Spread Penalty: -{penalty:.2f}pt)"
-            self.realized_pnl_pts=round(self.realized_pnl_pts+pos.pnl_pts,2); self.closed_trades.append(pos)
-            rec=asdict(pos); rec["timestamp"]=pos.exit_time; self.dataset_manager.write_parquet(pd.DataFrame([rec]),name="paper_trades_log")
-            self.active_position=None; self.unrealized_pnl_pts=0.0
+            if exit_reason.startswith("STOP"):
+                exit_pnl = -pos.option_stop
+            elif pos.partial_booked and exit_reason == "RUNNER TRAIL FLOOR HIT":
+                exit_pnl = max(option_close, pos.locked_floor_pts)
+            remaining = max(0, int(pos.remaining_lots))
+            if remaining > 0:
+                realized_remaining = exit_pnl * remaining
+                self.realized_pnl_pts = round(self.realized_pnl_pts + realized_remaining, 2)
+                pos.trade_realized_pnl_pts = round(pos.trade_realized_pnl_pts + realized_remaining, 2)
+            pos.pnl_pts = round(pos.trade_realized_pnl_pts, 2)
+            pos.exit_time = candle.timestamp
+            pos.exit_future_price = round(candle.fut_c, 2)
+            pos.exit_option_price = round(current_option_price, 2) if is_valid_number(current_option_price) else None
+            pos.status = "CLOSED"
+            pos.exit_reason = exit_reason
+            pos.remaining_lots = 0
+            rec = asdict(pos)
+            rec["timestamp"] = pos.exit_time
+            self.closed_trades.append(pos)
+            self.dataset_manager.write_parquet(pd.DataFrame([rec]), name="paper_trades_log")
+            self.learning_engine.record_trade(rec)
+            self.last_exit_bar_key = self._bar_key(candle.timestamp)
+            # Block at least the next execution bar.  This is the hard fix for
+            # multiple entry/exit churn on one candle.
+            self.entry_block_until = to_ist(candle.timestamp) + timedelta(minutes=CONFIG["bar_minutes"] * CONFIG["paper_reentry_cooldown_bars"])
+            self.active_position = None
+            self.unrealized_pnl_pts = 0.0
 
 
 # =========================================================
@@ -2863,12 +3522,14 @@ class KotakNeoAdapter:
 
             _, spot_prices = _prices(self.spot_token) if self.spot_token else ([], [])
             if not spot_prices:
-                last = extract_tick_price(self.latest.get("Nifty 50", {}))
+                # LIVE: canonical NIFTY 50 RAW BUS quote.
+                # CLOSED: canonical Yahoo NIFTY close from Supabase RAW BUS.
+                # Never substitute NIFTY FUT as Spot/ATM reference.
+                last = self._authoritative_spot_price()
                 if is_valid_number(last) and last > 1000:
                     spot_o = spot_h = spot_l = spot_c = float(last)
                 else:
-                    # No authoritative Spot -> no valid 3-minute market bar.
-                    # Do not substitute a futures price or a magic number.
+                    # No authoritative Spot/close -> do not manufacture a bar.
                     return
             else:
                 spot_o, spot_h, spot_l, spot_c = (
@@ -3010,7 +3671,14 @@ class KotakNeoAdapter:
             
             if not is_session_end:
                 next_t = bar_time + timedelta(minutes=CONFIG["bar_minutes"])
-                self.paper_desk.stage_signal(decision, atr_v, next_t)
+                self.paper_desk.stage_signal(decision, atr_v, next_t, feats=feats)
+            else:
+                # Weekly learner is policy-only and P&L-gated.  Running it at
+                # session close never alters the core quant calculations.
+                try:
+                    self.paper_desk.learning_engine.run_weekly_cycle(as_of=bar_time)
+                except Exception:
+                    pass
 
             feats["decision_action"] = decision.action
             feats["decision_regime"] = decision.regime
@@ -3218,6 +3886,75 @@ def run_unit_tests() -> bool:
     vf={"data_quality_score":1.0,"demand_liquidity_sweep":1,"demand_reclaim":1,"supply_liquidity_sweep":0,"supply_rejection":0,"spot_rsi_14":55,"spot_macd_hist":1,"spot_slope_3":1,"spot_bos_signal":1,"ce_option_ltp":100,"ce_option_rsi":58,"ce_option_slope3":1,"ce_option_vwap":98,"ce_option_atr3":2,"ce_option_support":96,"ce_option_resistance":110,"ce_option_delta":0.52,"ce_option_strike":24000,"pe_option_ltp":70,"pe_option_rsi":42,"pe_option_slope3":-1,"pe_option_vwap":72,"pe_option_atr3":2,"pe_option_support":68,"pe_option_resistance":78,"pe_option_delta":-0.48,"pe_option_strike":24000,"fut_c":24310,"fut_vwap":24300}
     vd,_=_v11_apply(DecisionEngine(),vf,TradeDecision())
     assert vd.action in ("CE","PE","SKIP")
+
+    # --- Locked VWAP invariant: volume-weighted FUT VWAP, never price fallback.
+    fe = FeatureEngine()
+    t0 = now_ist().replace(hour=9, minute=15, second=0, microsecond=0)
+    for i,(px,vol) in enumerate(((100.0,10.0),(102.0,20.0),(104.0,30.0))):
+        cc = Candle3Min(t0 + timedelta(minutes=3*i), px,px+1,px-1,px, px,px+1,px-1,px, vol,500)
+        last_vwap = fe.compute(cc, [])['fut_vwap']
+    assert abs(last_vwap - ((100*10+102*20+104*30)/60.0)) < 1e-9
+    fe_zero = FeatureEngine()
+    zero_bar = Candle3Min(t0,200,201,199,200,200,201,199,200,0,500)
+    assert not is_valid_number(fe_zero.compute(zero_bar, [])['fut_vwap'])
+
+    # --- Closed-session Spot -> ATM invariant through Supabase/Yahoo RAW BUS.
+    sb = SupabaseRawBusAdapter.__new__(SupabaseRawBusAdapter)
+    sb.spot_token = "Nifty 50"
+    sb.latest = {}
+    sb.lock = threading.Lock()
+    sb._authoritative_spot_close = np.nan
+    sb._is_market_open_now = lambda: False
+    sb._query = lambda params: [{"raw":{"dataset":"nifty_spot_daily","timeframe":"1d","close":24175.65}}]
+    assert abs(sb._authoritative_spot_price()-24175.65) < 1e-9
+    assert sb._spot_atm_strike(sb._authoritative_spot_price(),50.0) == 24200.0
+
+    # --- Paper desk invariants: 2-lot minimum, one position, partial booking,
+    # and no same-candle re-entry.
+    paper = PaperTradingDesk(DatasetManager(str(Path("/tmp/nifty_engine_paper_test"))))
+    pt = now_ist().replace(hour=10, minute=0, second=0, microsecond=0)
+    paper_feats = {
+        "expiry_day_flag":0,"demand_liquidity_sweep":1,"demand_reclaim":1,
+        "supply_liquidity_sweep":0,"supply_rejection":0,"bos_signal":1,"choch_signal":1,
+        "vp_poc":99,"spot_c":101,"nearest_support_price":99,"nearest_resistance_price":110,
+        "ce_evidence_score":72,"pe_evidence_score":30,"ce_option_slope3":1,"pe_option_slope3":-1,
+        "ce_option_rsi":60,"pe_option_rsi":40,
+        "basket_scores_json":json.dumps({"trend":.6,"momentum":.6,"location":.5,"structure":.4,"flow":.3})}
+    pdec = TradeDecision(action="CE",regime="TREND",option_target_pts=2.0,option_stop_pts=1.0,
+                         effective_delta=.52,option_entry_estimate=100.0,option_strike=24200)
+    paper.stage_signal(pdec,10.0,pt+timedelta(minutes=3),feats=paper_feats)
+    assert paper.pending_order is not None and paper.pending_order["lots"] >= 2
+    pc = Candle3Min(pt+timedelta(minutes=3),101,103,100,102,101,103,100,102,1000,500)
+    paper.on_bar_open_fill(pc,10.0,{"CE":100.0})
+    assert paper.active_position is not None and paper.active_position.lots >= 2
+    paper.on_bar_update_and_exit_eval(pc,decision=pdec,feats=paper_feats,option_quotes={"CE":101.0})
+    assert paper.active_position is not None and paper.active_position.partial_booked and paper.active_position.remaining_lots == 1
+    weak = dict(paper_feats); weak.update({"ce_evidence_score":40,"pe_evidence_score":65,"ce_option_slope3":-1,"bos_signal":-1,"choch_signal":-1})
+    pc2 = Candle3Min(pt+timedelta(minutes=6),102,102,100,100,102,102,100,100,1000,500)
+    paper.on_bar_update_and_exit_eval(pc2,decision=pdec,feats=weak,option_quotes={"CE":100.5})
+    assert paper.active_position is None and paper.last_exit_bar_key == paper._bar_key(pc2.timestamp)
+    paper.stage_signal(pdec,10.0,pc2.timestamp,feats=paper_feats)
+    assert paper.pending_order is None
+
+    # --- Trade-memory learning invariant: entry-to-exit path captures every
+    # numeric feature available on each causal bar plus delta/ratio evolution.
+    lp = PaperTradingDesk(DatasetManager(str(Path('/tmp/nifty_engine_learning_path_test'))))
+    lp.stage_signal(pdec,10.0,pt+timedelta(minutes=3),feats=paper_feats)
+    lp.on_bar_open_fill(pc,10.0,{'CE':100.0})
+    evolving=dict(paper_feats); evolving.update({'rsi_14':58.0,'macd_hist':1.5,'atr_14_prev':11.0,'st_direction':1})
+    lp.on_bar_update_and_exit_eval(pc2,decision=pdec,feats=evolving,option_quotes={'CE':100.5},is_session_end=True)
+    assert lp.closed_trades and len(lp.closed_trades[-1].feature_path) >= 2
+    assert any(k.startswith('delta__') for k in lp.closed_trades[-1].feature_path[-1])
+    assert any(k.startswith('ratio__') for k in lp.closed_trades[-1].feature_path[-1])
+
+    # --- Strategy-DNA discovery invariant: recurring ordered event sequences are
+    # identified from completed trades and summarized by outcome/P&L.
+    wl = WeeklyAdaptiveLearningEngine(DatasetManager(str(Path('/tmp/nifty_engine_strategy_test'))))
+    sample=[]
+    for i in range(4):
+        sample.append({'timestamp':f'2026-08-{20+i}T10:00:00+05:30','pnl_pts':2.0+i,'event_path':['DEMAND_EVENT','MOMENTUM_EXPANSION','BULLISH_BOS','BULLISH_CHOCH'],'feature_path':[]})
+    discovered=wl._strategy_discovery(sample)
+    assert discovered and discovered[0]['trades'] >= 4 and discovered[0]['total_pnl_pts'] > 0
     return True
 
 
@@ -3241,6 +3978,9 @@ class SupabaseRawBusAdapter(KotakNeoAdapter):
         self._raw_cursor_iso = None
         self._bus_consumed = 0
         self._historical_loaded = False
+        self._session_vwap_seeded = False
+        self._last_seeded_vwap_date = None
+        self._authoritative_spot_close = np.nan
         self.spot_token = ""
         self.future_token = ""
         self.future_symbol = ""
@@ -3357,6 +4097,168 @@ class SupabaseRawBusAdapter(KotakNeoAdapter):
         except Exception as exc:
             self.last_error = f"Historical RAW BUS warmup unavailable: {exc}"
 
+    def _is_market_open_now(self):
+        now = now_ist()
+        if now.weekday() >= 5:
+            return False
+        start = now.replace(hour=9, minute=15, second=0, microsecond=0)
+        end = now.replace(hour=15, minute=30, second=0, microsecond=0)
+        return start <= now < end
+
+    def _latest_yahoo_spot_close(self):
+        """Return the latest authoritative NIFTY Spot close from Yahoo RAW BUS."""
+        try:
+            rows = self._query({
+                "select": "id,source,symbol,instrument_token,observation_timestamp,raw",
+                "source": "eq.yahoo_historical",
+                "symbol": "eq.NIFTY_SPOT",
+                "order": "observation_timestamp.desc,id.desc",
+                "limit": "10",
+            })
+            for row in rows:
+                payload = self._raw_payload(row)
+                close = safe_float(payload.get("close"))
+                if is_valid_number(close) and close > 1000:
+                    self._authoritative_spot_close = float(close)
+                    return float(close)
+        except Exception as exc:
+            self.last_error = f"Yahoo Spot close lookup error: {exc}"
+        return np.nan
+
+    def _authoritative_spot_price(self) -> float:
+        """
+        Canonical Spot policy:
+        LIVE session -> exact NIFTY 50 RAW BUS quote.
+        CLOSED session -> latest Yahoo NIFTY close from RAW BUS.
+        Never use NIFTY FUT as a Spot/ATM substitute.
+        """
+        with self.lock:
+            raw = self.latest.get(str(self.spot_token), {}) if self.spot_token else {}
+            live = extract_tick_price(raw)
+        if self._is_market_open_now() and is_valid_number(live) and live > 1000:
+            return float(live)
+        close = self._latest_yahoo_spot_close()
+        if is_valid_number(close) and close > 1000:
+            return float(close)
+        if is_valid_number(live) and live > 1000:
+            return float(live)
+        return np.nan
+
+    def _hydrate_selected_contracts(self):
+        """Fetch the latest RAW BUS observation for the already selected contracts."""
+        tokens = []
+        if self.spot_token:
+            tokens.append(str(self.spot_token))
+        if self.future_token:
+            tokens.append(str(self.future_token))
+        tokens.extend(str(x) for x in self.pcr_tokens)
+        tokens.extend(str(x) for x in self.heavy_tokens.values())
+        tokens = list(dict.fromkeys(x for x in tokens if x))
+        if not tokens:
+            return 0
+        try:
+            # Supabase/PostgREST text IN filter.  Tokens from Kotak are normally numeric;
+            # quoting keeps the filter safe for any text token as well.
+            quoted = ",".join('"' + str(t).replace('"', '\\"') + '"' for t in tokens)
+            rows = self._query({
+                "select": "id,source,symbol,instrument_token,observation_timestamp,raw",
+                "source": "eq.kotak_live",
+                "instrument_token": f"in.({quoted})",
+                "order": "observation_timestamp.desc,id.desc",
+                "limit": str(max(100, len(tokens) * 3)),
+            })
+            # Keep the newest row per token.
+            newest = {}
+            for row in rows:
+                tok = self._live_token(row)
+                if tok and tok not in newest:
+                    newest[tok] = row
+            with self.lock:
+                for tok, row in newest.items():
+                    payload = self._raw_payload(row)
+                    item = dict(payload)
+                    item["instrument_token"] = tok
+                    item["display_symbol"] = self._live_symbol(row)
+                    item["_supabase_id"] = row.get("id")
+                    item["_parsed_ts"] = self._live_event_time(row) or now_ist()
+                    oi = self._extract_oi(item)
+                    if is_valid_number(oi):
+                        item["oi"] = oi; item["open_interest"] = oi; item["open_int"] = oi
+                    self.latest[tok] = item
+                    sym = self._live_symbol(row)
+                    if sym in ("NIFTY 50", "NIFTY50") and tok == self.spot_token:
+                        self.latest["Nifty 50"] = item
+            return len(newest)
+        except Exception as exc:
+            self.last_error = f"Selected-contract hydration error: {exc}"
+            return 0
+
+    def _seed_session_future_vwap(self):
+        """
+        Reconstruct today's FUT session VWAP from Supabase RAW BUS observations.
+        This seeds only FeatureEngine's existing cumulative PV/volume state;
+        the VWAP mathematics itself is unchanged.  If volume is unavailable,
+        VWAP remains unavailable rather than falling back to price.
+        """
+        if not self.future_symbol:
+            return False
+        today = now_ist().date()
+        if self._session_vwap_seeded and self._last_seeded_vwap_date == today:
+            return True
+        try:
+            start = now_ist().replace(hour=9, minute=15, second=0, microsecond=0)
+            rows = self._query({
+                "select": "id,source,symbol,instrument_token,observation_timestamp,raw",
+                "source": "eq.kotak_live",
+                "symbol": f"eq.{self.future_symbol}",
+                "observation_timestamp": f"gte.{start.isoformat()}",
+                "order": "observation_timestamp.asc,id.asc",
+                "limit": "20000",
+            })
+            pv = 0.0
+            total_vol = 0.0
+            prev_cum = None
+            latest_cum = None
+            for row in rows:
+                payload = self._raw_payload(row)
+                c = extract_tick_price(payload)
+                h = safe_float(payload.get("h") or payload.get("high"))
+                l = safe_float(payload.get("l") or payload.get("low"))
+                if not is_valid_number(c):
+                    continue
+                if not is_valid_number(h): h = c
+                if not is_valid_number(l): l = c
+                cum = safe_float(payload.get("v") or payload.get("vol") or payload.get("volume") or payload.get("last_volume"))
+                if not is_valid_number(cum) or cum < 0:
+                    continue
+                if prev_cum is None:
+                    delta = 0.0
+                else:
+                    delta = cum - prev_cum
+                    if delta < 0:
+                        delta = cum
+                prev_cum = cum
+                latest_cum = cum
+                if delta > 0:
+                    typical = (h + l + c) / 3.0
+                    pv += typical * delta
+                    total_vol += delta
+            if total_vol <= 0:
+                self._session_vwap_seeded = False
+                self.discovery_log.append("WARNING FUT VWAP unavailable: no usable session volume in RAW BUS")
+                return False
+            self.feature_engine.vwap_pv = float(pv)
+            self.feature_engine.vwap_vol = float(total_vol)
+            self._last_cum_volume = latest_cum
+            self._session_vwap_seeded = True
+            self._last_seeded_vwap_date = today
+            self.discovery_log.append(f"OK FUT Session VWAP reconstructed from RAW BUS: {pv/total_vol:.2f}")
+            return True
+        except Exception as exc:
+            self.last_error = f"FUT VWAP reconstruction error: {exc}"
+            self._session_vwap_seeded = False
+            return False
+
     def login(self, live_totp_override=""):
         self._ensure_bus()
         self.connected = True
@@ -3403,11 +4305,19 @@ class SupabaseRawBusAdapter(KotakNeoAdapter):
     def discover_nifty_instruments(self, auto_pcr=True):
         if not self.connected:
             raise RuntimeError("Supabase raw bus not connected.")
-        rows = self._latest_live_rows()
+        # Discovery uses a larger NIFTY-only snapshot so the exact Spot/FUT/option
+        # identities are not lost merely because the global latest-row window is full.
+        rows = self._query({
+            "select": "id,source,symbol,instrument_token,observation_timestamp,raw",
+            "source": "eq.kotak_live",
+            "symbol": "ilike.NIFTY*",
+            "order": "observation_timestamp.desc,id.desc",
+            "limit": "10000",
+        })
         self.discovery_log.clear()
         self.token_to_symbol = {}
 
-        # Exact NIFTY index row is the ONLY Spot identity.
+        # Exact NIFTY index row is the ONLY live Spot identity.
         self.spot_token = ""
         for row in rows:
             sym = self._live_symbol(row)
@@ -3437,14 +4347,27 @@ class SupabaseRawBusAdapter(KotakNeoAdapter):
             self.heavy_tokens.setdefault(sym, tok)
         self.discovery_log.append(f"OK Heavyweight mappings: {len(self.heavy_tokens)}")
 
+        # Hydrate the exact Spot/FUT/option/heavyweight observations before
+        # computing the ATM strike.  This avoids a global-row-window race.
+        self._hydrate_selected_contracts()
         if auto_pcr:
-            self.discover_pcr_chain()
+            self.discover_pcr_chain(center_strike=self._authoritative_spot_price())
+            self._hydrate_selected_contracts()
+        self._seed_session_future_vwap()
         return True
 
     def discover_pcr_chain(self, center_strike=None):
         try:
-            rows = self._latest_live_rows(limit=max(1000, int(os.getenv("NIFTY_SUPABASE_POLL_BATCH", "500"))*2))
+            rows = self._query({
+                "select": "id,source,symbol,instrument_token,observation_timestamp,raw",
+                "source": "eq.kotak_live",
+                "symbol": "ilike.NIFTY*",
+                "order": "observation_timestamp.desc,id.desc",
+                "limit": "10000",
+            })
             spot = safe_float(center_strike, np.nan) if center_strike is not None else np.nan
+            if not is_valid_number(spot) or spot <= 0:
+                spot = self._authoritative_spot_price()
             if not is_valid_number(spot) or spot <= 0:
                 for row in rows:
                     if self._live_symbol(row) in ("NIFTY 50", "NIFTY50"):
@@ -3488,7 +4411,8 @@ class SupabaseRawBusAdapter(KotakNeoAdapter):
             self.active_pcr_expiry = active_exp
             self.pcr_atm_strike = float(atm)
             self.pcr_error = ""
-            self.discovery_log.append(f"OK Options from RAW BUS: ATM={atm:.0f} | Expiry={active_exp.date()} | Contracts={len(self.pcr_tokens)}")
+            self.discovery_log.append(f"OK Options from RAW BUS: Spot={spot:.2f} | ATM={atm:.0f} | Expiry={active_exp.date()} | Contracts={len(self.pcr_tokens)}")
+            self._hydrate_selected_contracts()
             return len(self.pcr_tokens)
         except Exception as exc:
             self.pcr_error = f"RAW BUS PCR discovery error: {exc}"
@@ -3502,8 +4426,10 @@ class SupabaseRawBusAdapter(KotakNeoAdapter):
         if not self.connected:
             return
         try:
-            rows = self._query_live_rows()
+            rows = self._latest_live_rows(limit=max(1000, int(os.getenv("NIFTY_SUPABASE_POLL_BATCH", "500")))) if self._raw_cursor is None else self._query_live_rows()
             if not rows:
+                # Keep current contract state alive even when the raw bus has no new tick.
+                self._hydrate_selected_contracts()
                 return
             with self.lock:
                 for row in rows:
@@ -3538,6 +4464,9 @@ class SupabaseRawBusAdapter(KotakNeoAdapter):
                 self._raw_cursor_iso = str(rows[-1].get("observation_timestamp"))
                 self._raw_cursor = rows[-1].get("id")
                 self.last_error = ""
+            # Latest selected-contract snapshots are queried independently of the
+            # global cursor so CE/PE values cannot disappear due to batch limits.
+            self._hydrate_selected_contracts()
         except Exception as exc:
             self.last_error = f"Supabase RAW BUS poll error: {exc}"
 
@@ -4822,7 +5751,7 @@ def main():
             col_p4.markdown(f"**Status:** <span style='color:red; font-weight:bold;'>KILL-SWITCH LOCKED (Max Daily Loss Reached)</span>", unsafe_allow_html=True)
         elif active_pos:
             dir_str = "CE (LONG)" if active_pos.direction == 1 else "PE (SHORT)"
-            col_p4.markdown(f"**Active Position:** `{dir_str}`<br>Entry Opt: `Rs. {active_pos.entry_option_price}` | Target Opt: `+{active_pos.option_target}` pt", unsafe_allow_html=True)
+            col_p4.markdown(f"**Active Position:** `{dir_str}`<br>Lots: `{active_pos.remaining_lots}/{active_pos.lots}` | Entry Opt: `Rs. {active_pos.entry_option_price}` | Target Opt: `+{active_pos.option_target:.2f} pt`", unsafe_allow_html=True)
         elif desk.pending_order:
             p_dir = "CE" if desk.pending_order["direction"] == 1 else "PE"
             col_p4.markdown(f"**Order Staged:** `{p_dir}` (Filling Next Open)", unsafe_allow_html=True)
@@ -4854,6 +5783,7 @@ def main():
                     "Type": "CE (LONG)" if t.direction == 1 else "PE (SHORT)",
                     "Entry Opt (Rs. )": f"{t.entry_option_price:.2f}",
                     "Exit Opt (Rs. )": f"{t.exit_option_price:.2f}" if t.exit_option_price else "-",
+                    "Lots": f"{t.booked_lots}/{t.lots}" if hasattr(t, "lots") else "-",
                     "Option PnL (pt)": t.pnl_pts,
                     "Bars Held": t.bars_held,
                     "Exit Reason": t.exit_reason
