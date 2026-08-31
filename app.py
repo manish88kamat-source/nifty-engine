@@ -4426,11 +4426,28 @@ class SupabaseRawBusAdapter(KotakNeoAdapter):
         if not self.connected:
             return
         try:
-            rows = self._latest_live_rows(limit=max(1000, int(os.getenv("NIFTY_SUPABASE_POLL_BATCH", "500")))) if self._raw_cursor is None else self._query_live_rows()
+            # First poll bootstraps from the newest RAW BUS window, but processing
+            # must be chronological so 3-minute aggregation remains causal.
+            # Thereafter the cursor is the newest processed row, and only rows
+            # strictly newer than that cursor are consumed.
+            is_bootstrap = self._raw_cursor is None
+            rows = (
+                self._latest_live_rows(
+                    limit=max(1000, int(os.getenv("NIFTY_SUPABASE_POLL_BATCH", "500")))
+                )
+                if is_bootstrap
+                else self._query_live_rows()
+            )
             if not rows:
                 # Keep current contract state alive even when the raw bus has no new tick.
                 self._hydrate_selected_contracts()
                 return
+
+            # _latest_live_rows() is descending; reverse only the bootstrap
+            # batch so the existing bar builder sees oldest -> newest.
+            if is_bootstrap:
+                rows = list(reversed(rows))
+
             with self.lock:
                 for row in rows:
                     tok = self._live_token(row)
@@ -4461,8 +4478,12 @@ class SupabaseRawBusAdapter(KotakNeoAdapter):
                             self.feature_engine.set_previous_day(pdc, pdh, pdl)
                         if is_valid_number(op):
                             self.feature_engine.set_today_open(op)
-                self._raw_cursor_iso = str(rows[-1].get("observation_timestamp"))
-                self._raw_cursor = rows[-1].get("id")
+                # Cursor always advances to the newest row actually processed.
+                # This prevents the previous bootstrap implementation from
+                # re-reading an overlapping window on every watchdog poll.
+                newest_row = rows[-1]
+                self._raw_cursor_iso = str(newest_row.get("observation_timestamp"))
+                self._raw_cursor = newest_row.get("id")
                 self.last_error = ""
             # Latest selected-contract snapshots are queried independently of the
             # global cursor so CE/PE values cannot disappear due to batch limits.
@@ -5627,7 +5648,7 @@ def main():
     is_logged_in = adapter.connected
 
     with st.sidebar:
-        st.subheader("[LIVE] Gateway Controls â€” Supabase RAW BUS")
+        st.subheader("[LIVE] Gateway Controls Ã¢â‚¬â€ Supabase RAW BUS")
         
         if is_logged_in:
             conn_txt = getattr(adapter, "conn_state", "AUTHENTICATED")
