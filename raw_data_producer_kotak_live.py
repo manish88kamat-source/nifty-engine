@@ -985,9 +985,45 @@ def main():
         print("Streamlit not available.")
         return
 
-    st.set_page_config(page_title="NIFTY Raw Bus LIVE", layout="wide", initial_sidebar_state="collapsed")
-    st.title("📡 NIFTY Raw Bus — Kotak Neo LIVE")
-    st.caption("Kotak Neo LIVE raw observations → Supabase only. yfinance is intentionally absent from this environment.")
+    st.set_page_config(
+        page_title="NIFTY Raw Bus LIVE",
+        page_icon="📡",
+        layout="wide",
+        initial_sidebar_state="collapsed",
+    )
+
+    # Mobile-first shell. The old Streamlit sidebar is intentionally not used:
+    # controls live in the main page so the phone view opens directly on the
+    # operational dashboard instead of showing a large sidebar overlay.
+    st.markdown("""
+<style>
+/* ===== MOBILE-FIRST RAW BUS APP SHELL ===== */
+#MainMenu, footer {visibility:hidden;}
+header[data-testid="stHeader"] {background:transparent;}
+/* HARD DISABLE THE STREAMLIT SIDEBAR. Controls are in the main-page CONTROL CENTER. */
+section[data-testid="stSidebar"],
+div[data-testid="stSidebar"],
+[data-testid="stSidebarNav"],
+button[data-testid="stSidebarCollapseButton"] {display:none !important; visibility:hidden !important; width:0 !important; min-width:0 !important;}
+.block-container {max-width:980px !important; padding-top:1.0rem !important; padding-bottom:2rem !important;}
+.rawbus-app {max-width:900px;margin:0 auto;}
+.rawbus-top {text-align:center;margin:2px auto 14px;}
+.rawbus-brand {font-size:clamp(30px,8vw,48px);font-weight:900;line-height:1.0;letter-spacing:-.025em;}
+.rawbus-sub {font-size:clamp(13px,3.8vw,17px);opacity:.68;margin-top:7px;font-weight:650;}
+.rawbus-divider {height:1px;background:rgba(128,128,128,.22);margin:14px 0;}
+.rawbus-control-title {font-size:18px;font-weight:850;margin:4px 0 8px;}
+.rawbus-note {font-size:12px;opacity:.62;}
+/* Keep Streamlit controls comfortable on phones. */
+.stButton > button {min-height:46px;border-radius:12px;font-weight:750;}
+.stTextInput input {min-height:44px;border-radius:12px;}
+@media(max-width:560px){
+  .block-container {padding-left:.72rem !important;padding-right:.72rem !important;}
+  .rawbus-brand {font-size:31px;}
+  .rawbus-sub {font-size:13px;}
+  .stButton > button {width:100%;}
+}
+</style>
+""", unsafe_allow_html=True)
 
     if "kotak" not in st.session_state:
         st.session_state.kotak = KotakConnector()
@@ -996,21 +1032,58 @@ def main():
 
     kotak: KotakConnector = st.session_state.kotak
 
-    with st.sidebar:
-        st.header("🔑 Kotak Neo Authentication")
-        totp_input = st.text_input("Live TOTP Code", type="password")
+    # Supabase credentials can still come from Streamlit secrets/env. The
+    # controls below are deliberately in the main page, not the sidebar.
+    supabase_url_input = st.session_state.get(
+        "supabase_url_input", env_or_secret("SUPABASE_URL", "")
+    )
+    supabase_key_input = st.session_state.get(
+        "supabase_key_input", env_or_secret("SUPABASE_KEY", "")
+    )
+    supabase = SupabasePublisher(
+        url_override=supabase_url_input,
+        key_override=supabase_key_input,
+    )
 
-        st.markdown("---")
-        st.header("🗄️ Supabase RAW BUS")
+    # Main app header: dashboard is the first thing visible on a phone.
+    st.markdown(
+        '<div class="rawbus-app"><div class="rawbus-top">'
+        '<div class="rawbus-brand">📡 NIFTY RAW BUS</div>'
+        '<div class="rawbus-sub">KOTAK NEO LIVE · INSTITUTIONAL RAW DATA PRODUCER</div>'
+        '</div></div>',
+        unsafe_allow_html=True,
+    )
+
+    sup_health = supabase.health() if supabase.url and supabase.key else {
+        "reachable": False,
+        "error": "Supabase not configured",
+    }
+    dashboard_placeholder = st.empty()
+    with dashboard_placeholder.container():
+        _render_mobile_dashboard(kotak, supabase, sup_health)
+
+    # All controls are below the dashboard and collapsed by default. This is
+    # the key mobile UX change: no sidebar overlay on first load.
+    with st.expander("⚙️ CONTROL CENTER", expanded=False):
+        st.markdown('<div class="rawbus-control-title">🔑 Kotak Neo Authentication</div>', unsafe_allow_html=True)
+        totp_input = st.text_input(
+            "Live TOTP Code",
+            type="password",
+            key="main_totp_input",
+            placeholder="Enter 6-digit TOTP",
+        )
+
+        st.markdown('<div class="rawbus-divider"></div>', unsafe_allow_html=True)
+        st.markdown('<div class="rawbus-control-title">🗄️ Supabase RAW BUS</div>', unsafe_allow_html=True)
         supabase_url_input = st.text_input(
             "Supabase URL",
-            value=st.session_state.get("supabase_url_input", env_or_secret("SUPABASE_URL", "")),
+            value=supabase_url_input,
             key="supabase_url_input",
             placeholder="https://your-project.supabase.co",
         )
         supabase_key_input = st.text_input(
             "Supabase Key",
-            value=st.session_state.get("supabase_key_input", env_or_secret("SUPABASE_KEY", "")),
+            value=supabase_key_input,
             type="password",
             key="supabase_key_input",
             placeholder="Supabase anon/service key",
@@ -1020,41 +1093,44 @@ def main():
             key_override=supabase_key_input,
         )
 
-        if st.button("Test Supabase RAW BUS"):
-            health = supabase.health()
-            if health.get("reachable"):
-                st.success("Supabase RAW BUS reachable.")
-            else:
-                st.error(health.get("error", "Supabase connection failed."))
-
-        st.markdown("---")
         c1, c2 = st.columns(2)
         with c1:
-            if st.button("Connect Kotak"):
+            if st.button("Test Supabase RAW BUS", use_container_width=True):
+                health = supabase.health()
+                if health.get("reachable"):
+                    st.success("Supabase RAW BUS reachable.")
+                else:
+                    st.error(health.get("error", "Supabase connection failed."))
+        with c2:
+            if st.button("Connect Kotak", use_container_width=True):
                 try:
                     kotak.login(totp_override=totp_input)
                     st.success("Authenticated Successfully!")
+                    st.rerun()
                 except Exception as exc:
                     st.error(str(exc))
-        with c2:
-            if st.button("Discover Instruments", disabled=not kotak.connected):
+
+        c3, c4 = st.columns(2)
+        with c3:
+            if st.button("Discover Instruments", disabled=not kotak.connected, use_container_width=True):
                 try:
                     kotak.discover_instruments()
                     st.success("Discovery Complete!")
+                    st.rerun()
                 except Exception as exc:
                     st.error(str(exc))
+        with c4:
+            can_start = bool(kotak.connected and kotak.future_token and supabase.url and supabase.key)
+            if not st.session_state.producer_running:
+                if st.button("▶ START RAW PRODUCER", type="primary", disabled=not can_start, use_container_width=True):
+                    st.session_state.producer_running = True
+                    st.rerun()
+            else:
+                if st.button("■ STOP PRODUCER", use_container_width=True):
+                    st.session_state.producer_running = False
+                    st.rerun()
 
-        can_start = bool(kotak.connected and kotak.future_token and supabase.url and supabase.key)
-        if not st.session_state.producer_running:
-            if st.button("Start Raw Producer Loop", type="primary", disabled=not can_start):
-                st.session_state.producer_running = True
-                st.rerun()
-        else:
-            if st.button("Stop Producer Loop"):
-                st.session_state.producer_running = False
-                st.rerun()
-
-        if st.button("Test Live Raw → Supabase", disabled=not can_start):
+        if st.button("Test Live Raw → Supabase", disabled=not can_start, use_container_width=True):
             try:
                 raw_quotes = kotak.fetch_raw_quotes()
                 published = 0
@@ -1078,29 +1154,36 @@ def main():
                     "pcr_contracts": len(kotak.pcr_tokens),
                     "status": "PASS" if raw_quotes and published else "PARTIAL/NO_DATA",
                 }
+                st.rerun()
             except Exception as exc:
                 st.session_state["last_live_test"] = {"status": "ERROR", "error": str(exc)}
 
         if st.session_state.get("last_live_test"):
             st.json(st.session_state["last_live_test"])
 
-    sup_health = supabase.health()
-    dashboard_placeholder = st.empty()
-    with dashboard_placeholder.container():
-        _render_mobile_dashboard(kotak, supabase, sup_health)
+        st.markdown(
+            '<div class="rawbus-note">Credentials remain session/env controlled. '
+            'No credential values are written into the source code.</div>',
+            unsafe_allow_html=True,
+        )
 
-    st.markdown("### Raw Data Contract")
-    st.code(
-        "Kotak Neo → LIVE RAW → Supabase → all 3 engines\n"
-        "No yfinance in this worker.\n"
-        "No features / scores / labels / regime / decisions cross the bus.",
-        language="text",
-    )
+    # Refresh the dashboard once after control interactions so the main view
+    # remains the single source of truth for operational status.
+    with dashboard_placeholder.container():
+        _render_mobile_dashboard(kotak, supabase, supabase.health() if supabase.url and supabase.key else sup_health)
 
     if kotak.logs:
-        with st.expander("Discovery & Execution Logs", expanded=True):
+        with st.expander("📋 Discovery & Execution Logs", expanded=False):
             for log in kotak.logs[-30:]:
                 st.text(log)
+
+    with st.expander("🔒 RAW DATA CONTRACT", expanded=False):
+        st.code(
+            "Kotak Neo → LIVE RAW → Supabase → all 3 engines\n"
+            "No yfinance in this worker.\n"
+            "No features / scores / labels / regime / decisions cross the bus.",
+            language="text",
+        )
 
     if st.session_state.producer_running:
         st.success("🟢 Kotak LIVE Raw Producer is active. Raw quotes are being published to Supabase `raw_observations`.")
