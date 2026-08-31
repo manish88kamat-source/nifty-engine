@@ -1810,14 +1810,38 @@ class KotakConnector:
     # LIVE RAW QUOTES
     # -----------------------------------------------------------------------
 
+    def _ensure_market_data_client(self) -> bool:
+        """Ensure a fresh Kotak client exists for the quotes-only data path.
+
+        Kotak Neo documents the quotes API as usable with the consumer key
+        without a completed TOTP/MPIN session.  The raw producer only needs
+        market data, so feed recovery must not force a fresh 2FA login.
+        """
+        if NeoAPI is None:
+            return False
+        try:
+            self.client = NeoAPI(
+                environment=CONFIG["neo_environment"],
+                consumer_key=self.consumer_key,
+            )
+            self.connected = True
+            return True
+        except Exception as exc:
+            self.client = None
+            self.connected = False
+            self.log(f"Market-data client rebuild failed: {exc}")
+            return False
+
     def fetch_raw_quotes(
         self
     ) -> List[Dict[str, Any]]:
 
-        if (
-            not self.connected
-            or not self.client
-        ):
+        if not self.client:
+            self._ensure_market_data_client()
+
+        # Quotes are a market-data endpoint and do not require a completed
+        # TOTP/MPIN session.  Do not turn a feed reconnect into an auth prompt.
+        if not self.client:
             return []
 
 
@@ -1885,27 +1909,41 @@ class KotakConnector:
 
 
         try:
-
             response = self.client.quotes(
-
-                instrument_tokens=
-                    tokens_to_poll,
-
+                instrument_tokens=tokens_to_poll,
                 quote_type="all"
-
             )
+            records = extract_records(response)
+            if records:
+                self.connected = True
+                return records
 
-            return extract_records(
-                response
-            )
-
+            raise RuntimeError("Kotak returned no quote records.")
 
         except Exception as exc:
+            self.log(f"Quote fetch error: {exc}")
 
-            self.log(
-                f"Quote fetch error: {exc}"
-            )
-
+            # Surgical recovery: rebuild only the market-data client and retry
+            # once.  No TOTP is generated or requested on this path.
+            self.client = None
+            self.connected = False
+            if not self._ensure_market_data_client():
+                return []
+            try:
+                response = self.client.quotes(
+                    instrument_tokens=tokens_to_poll,
+                    quote_type="all"
+                )
+                records = extract_records(response)
+                if records:
+                    self.connected = True
+                    self.log(f"Market-data recovery successful: {len(records)} quotes.")
+                    return records
+                self.log("Market-data recovery returned no quote records.")
+            except Exception as retry_exc:
+                self.client = None
+                self.connected = False
+                self.log(f"Market-data recovery failed: {retry_exc}")
             return []
 
 
@@ -2314,8 +2352,25 @@ def _worker_login_and_discover(kotak, reason: str):
     kotak.discover_instruments()
 
 
-def run_kotak_worker() -> None:
-    """Persistent worker executed by this same app.py with --kotak-worker."""
+def _worker_market_data_recover(kotak, reason: str) -> bool:
+    """Recover the raw market-data path without re-running TOTP authentication."""
+    _worker_write_state(
+        status="RECONNECTING",
+        connection="RECONNECTING",
+        recovery_reason=reason,
+        recovery_started_at=_worker_now(),
+    )
+    kotak.client = None
+    kotak.connected = False
+    return bool(kotak._ensure_market_data_client())
+
+
+def run_kotak_worker(startup_totp: str = "") -> None:
+    """Persistent worker executed by this same app.py with --kotak-worker.
+
+    The manual TOTP is used only for the initial authenticated bootstrap.
+    Subsequent raw-market-data recovery never asks for another TOTP.
+    """
     pid = os.getpid()
     poll_interval = float(CONFIG.get("poll_interval_sec", 3.0))
     consecutive_failures = 0
@@ -2350,7 +2405,7 @@ def run_kotak_worker() -> None:
             raise RuntimeError("Supabase configuration is missing.")
 
         _worker_write_state(status="AUTHENTICATING", connection="AUTHENTICATING", auto_reauth=auto_reauth)
-        kotak.login()
+        kotak.login(totp_override=startup_totp)
         auth_count += 1
         _worker_write_state(status="DISCOVERING", connection="AUTHENTICATED", auth_count=auth_count)
         kotak.discover_instruments()
@@ -2409,14 +2464,44 @@ def run_kotak_worker() -> None:
                 if consecutive_failures >= 3:
                     recovery_attempts += 1
                     if not auto_reauth:
-                        _worker_write_state(
-                            status="AUTH_REQUIRED", connection="DISCONNECTED",
-                            recovery_attempts=recovery_attempts,
-                            last_error=("Automatic recovery requires a configured KOTAK_TOTP secret; "
-                                         "a 6-digit TOTP is startup-only."),
-                            auto_reauth=False,
-                        )
-                        time.sleep(10.0)
+                        try:
+                            recovered = _worker_market_data_recover(
+                                kotak,
+                                f"{consecutive_failures} consecutive feed failures; market-data-only recovery",
+                            )
+                            if recovered:
+                                successful_recoveries += 1
+                                consecutive_failures = 0
+                                last_recovery = _worker_now()
+                                last_error = ""
+                                _worker_write_state(
+                                    status="LIVE", connection="CONNECTED",
+                                    recovery_attempts=recovery_attempts,
+                                    successful_recoveries=successful_recoveries,
+                                    last_recovery=last_recovery, last_error="",
+                                    auth_count=auth_count, auto_reauth=False,
+                                )
+                            else:
+                                _worker_write_state(
+                                    status="FEED_LOST", connection="DISCONNECTED",
+                                    recovery_attempts=recovery_attempts,
+                                    successful_recoveries=successful_recoveries,
+                                    last_error=last_error, auth_count=auth_count,
+                                    auto_reauth=False,
+                                )
+                                time.sleep(min(15.0, 2.0 * recovery_attempts))
+                        except Exception as recover_exc:
+                            kotak.connected = False
+                            kotak.client = None
+                            last_error = str(recover_exc)
+                            _worker_write_state(
+                                status="FEED_LOST", connection="DISCONNECTED",
+                                recovery_attempts=recovery_attempts,
+                                successful_recoveries=successful_recoveries,
+                                last_error=last_error, auth_count=auth_count,
+                                auto_reauth=False,
+                            )
+                            time.sleep(min(15.0, 2.0 * recovery_attempts))
                     else:
                         try:
                             _worker_login_and_discover(kotak, f"{consecutive_failures} consecutive feed failures")
@@ -2455,7 +2540,7 @@ def run_kotak_worker() -> None:
         )
 
 
-def _prepare_worker_environment(kotak, supabase_url: str, supabase_key: str):
+def _prepare_worker_environment(kotak, supabase_url: str, supabase_key: str, startup_totp: str = ""):
     env = os.environ.copy()
     for name in ("KOTAK_CONSUMER_KEY", "KOTAK_MOBILE", "KOTAK_UCC", "KOTAK_MPIN"):
         value = env_or_secret(name, "")
@@ -2466,6 +2551,8 @@ def _prepare_worker_environment(kotak, supabase_url: str, supabase_key: str):
         env["KOTAK_TOTP"] = str(configured_totp)
     elif getattr(kotak, "totp_secret", ""):
         env["KOTAK_TOTP"] = str(kotak.totp_secret)
+    if startup_totp:
+        env["KOTAK_STARTUP_TOTP"] = str(startup_totp)
     if supabase_url:
         env["SUPABASE_URL"] = str(supabase_url)
     if supabase_key:
@@ -2473,11 +2560,11 @@ def _prepare_worker_environment(kotak, supabase_url: str, supabase_key: str):
     return env
 
 
-def _start_kotak_worker(kotak, supabase_url: str, supabase_key: str):
+def _start_kotak_worker(kotak, supabase_url: str, supabase_key: str, startup_totp: str = ""):
     existing_pid = _worker_read_state().get("pid")
     if _worker_alive(existing_pid):
         return int(existing_pid), "already_running"
-    env = _prepare_worker_environment(kotak, supabase_url, supabase_key)
+    env = _prepare_worker_environment(kotak, supabase_url, supabase_key, startup_totp)
     process = subprocess.Popen(
         [sys.executable, os.path.abspath(__file__), "--kotak-worker"],
         env=env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
@@ -2877,7 +2964,7 @@ def main():
             ):
                 try:
                     pid, mode = _start_kotak_worker(
-                        kotak, supabase.url, supabase.key
+                        kotak, supabase.url, supabase.key, totp_input.strip()
                     )
                     st.session_state.worker_running = True
                     st.session_state.producer_running = True
@@ -3328,6 +3415,6 @@ def main():
 
 if __name__ == "__main__":
     if "--kotak-worker" in sys.argv:
-        run_kotak_worker()
+        run_kotak_worker(os.getenv("KOTAK_STARTUP_TOTP", "").strip())
     else:
         main()
