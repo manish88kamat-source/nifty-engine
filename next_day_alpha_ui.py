@@ -18,8 +18,8 @@ import streamlit as st
 # LOCKED ENGINE BINDING
 # This UI intentionally refuses to fall back to older engine generations.
 # The locked base for the current root-cause investigation is:
-# next_day_alpha_engine_FINAL_BUGFIXED_V3_ROOT_CAUSE_FIXED.py
-ENGINE_MODULE_NAME = "next_day_alpha_engine_FINAL_BUGFIXED_V3_ROOT_CAUSE_FIXED"
+# next_day_alpha_aap.py
+ENGINE_MODULE_NAME = "next_day_alpha_aap"
 
 try:
     engine_module = __import__(
@@ -47,7 +47,7 @@ IST_OFFSET = timedelta(hours=5, minutes=30)
 ROOT = Path(__file__).resolve().parent
 RAW_TABLE = os.getenv("SUPABASE_RAW_TABLE", "raw_observations")
 
-st.set_page_config(page_title="Next-Day Alpha", page_icon="", layout="wide")
+st.set_page_config(page_title="Next-Day Alpha", page_icon=None, layout="wide")
 st.title("NEXT-DAY INTRADAY STOCK ALPHA")
 st.caption("Standalone - Supabase RAW BUS consumer - No direct Kotak login - No TOTP")
 
