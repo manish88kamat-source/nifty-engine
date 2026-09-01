@@ -7321,7 +7321,14 @@ def _nd_bus_read(
     if not SUPABASE_URL or not SUPABASE_KEY:
         return []
     wanted = {_nd_canonical(x) for x in (symbols or []) if _nd_is_equity(x)}
-    variants = sorted({v for x in wanted for v in (x, f"{x}-EQ")})
+    # RAW producer keeps Yahoo's authoritative symbol spelling (e.g. HDFCBANK.NS).
+    # The engine may use canonical symbols internally, so query every producer
+    # spelling that can represent the same equity before canonical post-filtering.
+    variants = sorted({
+        v
+        for x in wanted
+        for v in (x, f"{x}.NS", f"{x}-EQ", f"{x}_EQ")
+    })
     rows: List[Dict[str, Any]] = []
     offset = 0
     page_size = min(5000, max(500, int(limit)))
@@ -7425,7 +7432,9 @@ def _nd_history(symbol: str, days: int = 320, interval: str = "1d") -> pd.DataFr
             return pd.DataFrame()
         symbols = [s]
     end = now_ist()
-    rows = _nd_bus_read("yahoo_historical", dataset, symbols, end - timedelta(days=int(days)), end, 100000)
+    # yfinance_history is the authoritative producer source in the RAW BUS.
+    # Do not use the legacy yahoo_historical source here.
+    rows = _nd_bus_read("yfinance_history", dataset, symbols, end - timedelta(days=int(days)), end, 100000)
     frame = _nd_frame(rows)
     if s in ("NIFTY_SPOT", "INDIAVIX") and not frame.empty:
         # The dataset is authoritative; keep only its market-reference symbol.
@@ -8483,7 +8492,7 @@ def build_day_ahead_watchlist() -> Dict[str, Any]:
         diag = raw_bus_contract_diagnostics()
         raise RuntimeError(
             "RAW BUS: insufficient NIFTY spot history; "
-            f"expected dataset={SUPABASE_DATASETS['nifty_daily']} with producer symbol ^NSEI; "
+            f"expected source=yfinance_history, dataset={SUPABASE_DATASETS['nifty_daily']}, producer symbol ^NSEI; "
             f"diagnostic={json.dumps(diag, ensure_ascii=True, default=str)}"
         )
 
