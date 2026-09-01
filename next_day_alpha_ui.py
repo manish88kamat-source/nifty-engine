@@ -1,6 +1,7 @@
-# PATCHED next_day_alpha_ui.py
-# Drop-in replacement for the current UI file.
-# Core engine/math/indicator/learning logic is NOT changed.
+# NEXT-DAY ALPHA UI - V3 ROOT-CAUSE DEBUG BOUND
+# Based directly on the uploaded current UI.
+# Engine/math/indicator/learning logic is NOT changed here.
+# Older engine fallbacks are intentionally disabled.
 
 #!/usr/bin/env python3
 from __future__ import annotations
@@ -14,13 +15,33 @@ import pandas as pd
 import requests
 import streamlit as st
 
+# LOCKED ENGINE BINDING
+# This UI intentionally refuses to fall back to older engine generations.
+# The locked base for the current root-cause investigation is:
+# next_day_alpha_engine_FINAL_BUGFIXED_V3_ROOT_CAUSE_FIXED.py
+ENGINE_MODULE_NAME = "next_day_alpha_engine_FINAL_BUGFIXED_V3_ROOT_CAUSE_FIXED"
+
 try:
-    from next_day_alpha_engine_FINAL_BUGFIXED_V1 import NextDayAlphaEngine
-except ImportError:
-    try:
-        from next_day_alpha_engine_FINAL_BUGFIXED import NextDayAlphaEngine
-    except ImportError:
-        from next_day_alpha_engine import NextDayAlphaEngine
+    engine_module = __import__(
+        ENGINE_MODULE_NAME,
+        fromlist=[
+            "NextDayAlphaEngine",
+            "day_ahead_status",
+            "raw_bus_contract_diagnostics",
+        ],
+    )
+    NextDayAlphaEngine = engine_module.NextDayAlphaEngine
+    day_ahead_status_fn = getattr(engine_module, "day_ahead_status", None)
+    raw_bus_contract_diagnostics_fn = getattr(
+        engine_module, "raw_bus_contract_diagnostics", None
+    )
+except Exception as exc:
+    raise RuntimeError(
+        "LOCKED ENGINE IMPORT FAILED: "
+        f"{ENGINE_MODULE_NAME}.py must be deployed beside this UI. "
+        f"Older engine fallbacks are intentionally disabled. "
+        f"Original error: {exc}"
+    ) from exc
 
 IST_OFFSET = timedelta(hours=5, minutes=30)
 ROOT = Path(__file__).resolve().parent
@@ -187,6 +208,48 @@ def live_bus_health() -> Dict[str, Any]:
     }
 
 
+def render_raw_bus_contract_diagnostics() -> None:
+    """Render the authoritative V3 RAW-BUS contract diagnostics."""
+    st.subheader("RAW BUS CONTRACT DIAGNOSTICS")
+
+    if not callable(raw_bus_contract_diagnostics_fn):
+        st.error(
+            "V3 diagnostic API missing: raw_bus_contract_diagnostics(). "
+            "This indicates an incorrect/stale engine deployment."
+        )
+        return
+
+    try:
+        diag = raw_bus_contract_diagnostics_fn()
+    except Exception as exc:
+        st.error(f"RAW BUS diagnostic query failed: {exc}")
+        return
+
+    st.json(diag)
+
+    datasets = diag.get("datasets", {}) if isinstance(diag, dict) else {}
+    if not datasets:
+        return
+
+    rows = []
+    for name, item in datasets.items():
+        rows.append(
+            {
+                "Check": name,
+                "Dataset": item.get("dataset"),
+                "Rows": item.get("rows"),
+                "Symbols": ", ".join(item.get("symbols", [])) or "-",
+            }
+        )
+
+    if rows:
+        st.dataframe(
+            pd.DataFrame(rows),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+
 @st.cache_resource
 def get_engine() -> NextDayAlphaEngine:
     return NextDayAlphaEngine()
@@ -245,21 +308,37 @@ except Exception as exc:
 
 if not result:
     status = {}
-    try:
-        from next_day_alpha_engine import day_ahead_status
-        status = day_ahead_status()
-    except Exception:
-        pass
+    if callable(day_ahead_status_fn):
+        try:
+            status = day_ahead_status_fn()
+        except Exception as exc:
+            st.error(f"Engine status read failed: {exc}")
+
     if status.get("status") == "FAILED":
         st.error("DAY-AHEAD SNAPSHOT FAILED FOR TODAY")
         if status.get("error"):
             st.code(str(status["error"]))
-        st.caption("The scan must complete successfully before a frozen TOP 15 is published.")
     else:
         st.warning("NO FROZEN DAY-AHEAD SNAPSHOT FOR TODAY")
         st.caption("The scheduled day-ahead scan has not completed successfully yet.")
-    st.caption("Historical source: Supabase RAW BUS | Live/opening source: Supabase RAW BUS fed by Kotak Producer")
-    if st.button("Run Day-Ahead Scan Now", type="primary", use_container_width=True):
+
+    st.caption(
+        "Historical source: Supabase RAW BUS | "
+        "Live/opening source: Supabase RAW BUS fed by Kotak Producer"
+    )
+
+    with st.expander("WHY DID THE DAY-AHEAD SCAN FAIL?", expanded=True):
+        st.caption(
+            "The diagnostic below reads the same Supabase RAW BUS contract "
+            "used by the locked V3 engine. It does not manufacture or alter data."
+        )
+        render_raw_bus_contract_diagnostics()
+
+    if st.button(
+        "Run Day-Ahead Scan Now",
+        type="primary",
+        use_container_width=True,
+    ):
         try:
             with st.spinner("Running day-ahead scan from Supabase RAW BUS..."):
                 engine.run_day_ahead()
@@ -267,6 +346,9 @@ if not result:
             st.rerun()
         except Exception as exc:
             st.error(f"Day-ahead scan failed: {exc}")
+            with st.expander("FAILURE DIAGNOSTICS", expanded=True):
+                render_raw_bus_contract_diagnostics()
+
     st.stop()
 
 day = result.get("day_ahead", {})
@@ -347,6 +429,7 @@ else:
 
 with st.expander("ENGINE / DATA CONTRACT", expanded=False):
     st.write({
+        "locked_engine_module": ENGINE_MODULE_NAME,
         "engine": result.get("engine"),
         "version": result.get("version"),
         "generated_at": result.get("generated_at"),
