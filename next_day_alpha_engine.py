@@ -8159,41 +8159,81 @@ def _nd_query_rows(
     if source == "yfinance_history":
         sources.append("yahoo_historical")
 
+    # PostgREST URL/query limits make one giant 500-symbol `in.(...)` predicate
+    # fragile. Batch the symbol universe at the transport boundary. For the
+    # authoritative yFinance producer we query its real `.NS` spelling instead
+    # of sending four aliases for every equity; compatibility sources retain the
+    # broader alias set. The raw contract and downstream calculations remain
+    # unchanged.
+    SYMBOL_BATCH_SIZE = 80
+
     for src in sources:
-        offset = 0
-        page_size = min(5000, max(500, int(limit)))
-        while len(rows) < limit:
-            take = min(page_size, limit - len(rows))
-            params: List[Tuple[str, str]] = [
-                ("select", "symbol,instrument_token,observation_timestamp,raw"),
-                ("source", f"eq.{src}"),
-                ("order", "observation_timestamp.asc"),
-                ("limit", str(take)),
-                ("offset", str(offset)),
-            ]
-            if interval:
-                params.append(("raw->>interval", f"eq.{interval}"))
-            if variants:
-                params.append(("symbol", "in.(" + ",".join(variants) + ")"))
-            try:
-                response = requests.get(
-                    f"{SUPABASE_URL}/rest/v1/{SUPABASE_RAW_TABLE}",
-                    headers=_nd_raw_headers(), params=params, timeout=30,
-                )
-                response.raise_for_status()
-                page = response.json()
-            except Exception as exc:
-                LOGGER.warning("RAW BUS read failed source=%s interval=%s offset=%s: %s", src, interval, offset, exc)
-                break
-            if not isinstance(page, list) or not page:
-                break
-            rows.extend(x for x in page if isinstance(x, dict))
-            if len(page) < take:
-                break
-            offset += len(page)
-        # A primary source is authoritative; compatibility source is used only
-        # when the primary source returned nothing for this request.
+        if src == "yfinance_history" and wanted:
+            query_variants = {f"{s}.NS" for s in wanted}
+            if "NIFTY_SPOT" in wanted:
+                query_variants.update({"NIFTY_SPOT", "NIFTY 50", "NIFTY50", "^NSEI"})
+            if "INDIAVIX" in wanted:
+                query_variants.update({"INDIAVIX", "^INDIAVIX"})
+        else:
+            query_variants = set(variants)
+
+        ordered_variants = sorted(query_variants)
+        variant_batches = (
+            [ordered_variants[i:i + SYMBOL_BATCH_SIZE] for i in range(0, len(ordered_variants), SYMBOL_BATCH_SIZE)]
+            if ordered_variants else [None]
+        )
+
+        source_rows: List[Dict[str, Any]] = []
+        for batch_no, variant_batch in enumerate(variant_batches, start=1):
+            offset = 0
+            page_size = min(5000, max(500, int(limit)))
+            batch_rows: List[Dict[str, Any]] = []
+            while len(batch_rows) < limit:
+                take = min(page_size, limit - len(batch_rows))
+                params: List[Tuple[str, str]] = [
+                    ("select", "symbol,instrument_token,observation_timestamp,raw"),
+                    ("source", f"eq.{src}"),
+                    ("order", "observation_timestamp.asc"),
+                    ("limit", str(take)),
+                    ("offset", str(offset)),
+                ]
+                if interval:
+                    params.append(("raw->>interval", f"eq.{interval}"))
+                if variant_batch:
+                    params.append(("symbol", "in.(" + ",".join(variant_batch) + ")"))
+                if since is not None:
+                    params.append(("raw->>event_timestamp", f"gte.{since.astimezone(timezone.utc).isoformat()}"))
+                if until is not None:
+                    params.append(("raw->>event_timestamp", f"lte.{until.astimezone(timezone.utc).isoformat()}"))
+                try:
+                    response = requests.get(
+                        f"{SUPABASE_URL}/rest/v1/{SUPABASE_RAW_TABLE}",
+                        headers=_nd_raw_headers(), params=params, timeout=30,
+                    )
+                    response.raise_for_status()
+                    page = response.json()
+                except Exception as exc:
+                    LOGGER.warning(
+                        "RAW BUS read failed source=%s interval=%s batch=%d/%d offset=%s: %s",
+                        src, interval, batch_no, len(variant_batches), offset, exc,
+                    )
+                    break
+                if not isinstance(page, list) or not page:
+                    break
+                batch_rows.extend(x for x in page if isinstance(x, dict))
+                if len(page) < take:
+                    break
+                offset += len(page)
+            source_rows.extend(batch_rows)
+
+        rows = source_rows
         if rows:
+            LOGGER.info(
+                "RAW BUS read source=%s interval=%s symbols_requested=%d rows=%d batches=%d",
+                src, interval, len(wanted), len(rows), len(variant_batches),
+            )
+            # A primary source is authoritative; compatibility source is used
+            # only when the primary source returned nothing for this request.
             break
 
     # Apply event-time filtering after extraction. This is essential because
