@@ -7220,10 +7220,10 @@ SUPABASE_URL = os.getenv("SUPABASE_URL", "").strip().rstrip("/")
 SUPABASE_KEY = os.getenv("SUPABASE_ANON_KEY", os.getenv("SUPABASE_KEY", "")).strip()
 SUPABASE_RAW_TABLE = os.getenv("SUPABASE_RAW_TABLE", "raw_observations").strip()
 SUPABASE_DATASETS = {
-    "daily": os.getenv("NEXT_DAY_SUPABASE_DAILY_DATASET", "next_day_stock_daily"),
-    "hourly": os.getenv("NEXT_DAY_SUPABASE_MTF_HOURLY_DATASET", "next_day_mtf_hourly"),
-    "15m": os.getenv("NEXT_DAY_SUPABASE_MTF_15M_DATASET", "next_day_mtf_15m"),
-    "nifty_daily": os.getenv("NEXT_DAY_SUPABASE_NIFTY_DATASET", "nifty_spot_daily"),
+    "daily": os.getenv("NEXT_DAY_SUPABASE_DAILY_DATASET", "nifty500_daily"),
+    "hourly": os.getenv("NEXT_DAY_SUPABASE_MTF_HOURLY_DATASET", "v7_mtf_hourly_requested"),
+    "15m": os.getenv("NEXT_DAY_SUPABASE_MTF_15M_DATASET", "v7_mtf_15m_requested"),
+    "nifty_daily": os.getenv("NEXT_DAY_SUPABASE_NIFTY_DATASET", "nifty_benchmark_daily"),
     "vix_daily": os.getenv("NEXT_DAY_SUPABASE_VIX_DATASET", "india_vix_daily"),
 }
 
@@ -7242,9 +7242,14 @@ def _nd_is_equity(symbol: Any) -> bool:
         return False
     if s in {"NIFTY_SPOT", "NIFTY 50", "NIFTY50", "^NSEI", "INDIAVIX", "^INDIAVIX"}:
         return False
-    if s.endswith(("CE", "PE", "FUT")) or "FUT" in s:
+    # Do not reject ordinary equities merely because their ticker ends in
+    # CE/PE (e.g. RELIANCE). Reject derivative naming only when an expiry/
+    # strike structure is actually present.
+    if "FUT" in s and re.search(r"\d{2}[A-Z]{3}\d+", s):
         return False
-    if re.search(r"\d{2}[A-Z]{3}\d+", s):
+    if re.search(r"\d{2}[A-Z]{3}\d+(CE|PE)$", s):
+        return False
+    if re.search(r"^NIFTY\d{2}[A-Z]{3}\d+", s) and (s.endswith("CE") or s.endswith("PE")):
         return False
     if re.search(r"\d{4,}", s):
         return False
@@ -7971,7 +7976,7 @@ if __name__ == "__main__":
 import re as _re
 
 # Canonical release metadata.
-VERSION = "NEXT_DAY_ALPHA_ENGINE_LOCKED_BASE_HOTFIX_1"
+VERSION = "NEXT_DAY_ALPHA_ENGINE_LOCKED_BASE_HOTFIX_2_RAWBUS_CONTRACT"
 AUDIT_FILE = ROOT / "audit_summary.json"
 MORNING_FINAL_MIN_SCORE = MORNING_CONFIRMATION_MIN_SCORE
 MORNING_WATCH_SCORE = MORNING_WATCH_SCORE
@@ -8090,9 +8095,14 @@ def _nd_is_equity(symbol: Any) -> bool:
     s = _nd_canonical(symbol)
     if not s or s in {"NIFTY_SPOT", "NIFTY 50", "NIFTY50", "^NSEI", "INDIAVIX", "^INDIAVIX"}:
         return False
-    if s.endswith(("CE", "PE", "FUT")) or "FUT" in s:
+    # Do not reject ordinary equities merely because their ticker ends in
+    # CE/PE (e.g. RELIANCE). Reject derivative naming only when an expiry/
+    # strike structure is actually present.
+    if "FUT" in s and _re.search(r"\d{2}[A-Z]{3}\d+", s):
         return False
-    if _re.search(r"\d{2}[A-Z]{3}\d+", s) or _re.search(r"\d{4,}", s):
+    if _re.search(r"\d{2}[A-Z]{3}\d+(CE|PE)$", s):
+        return False
+    if _re.search(r"^NIFTY\d{2}[A-Z]{3}\d+", s) and (s.endswith("CE") or s.endswith("PE")):
         return False
     if any(x in s for x in ("BANKNIFTY", "FINNIFTY", "MIDCPNIFTY")):
         return False
@@ -8115,7 +8125,23 @@ def _nd_query_rows(
     # Reference series are allowed only when explicitly requested.
     allowed_reference = {"NIFTY_SPOT", "INDIAVIX"}
     if wanted:
-        variants = sorted({v for s in wanted for v in (s, f"{s}-EQ")})
+        # Producer stores the original Yahoo ticker as `symbol` (e.g.
+        # HDFCBANK.NS and ^NSEI). The engine canonicalizes internally, so the
+        # PostgREST query must include both canonical and producer spellings.
+        variants_set = set()
+        for s in wanted:
+            variants_set.update({
+                s,
+                f"{s}.NS",
+                f"{s}-EQ",
+                f"{s}_EQ",
+            })
+        # Explicit benchmark/VIX aliases used by the historical producer.
+        if "NIFTY_SPOT" in wanted:
+            variants_set.update({"NIFTY_SPOT", "NIFTY 50", "NIFTY50", "^NSEI"})
+        if "INDIAVIX" in wanted:
+            variants_set.update({"INDIAVIX", "^INDIAVIX"})
+        variants = sorted(variants_set)
     else:
         variants = []
 
@@ -8224,6 +8250,7 @@ def _nd_interval_for_dataset(dataset: Optional[str]) -> Optional[str]:
         "next_day_mtf_hourly": "1h",
         "next_day_mtf_15m": "15m",
         "nifty_spot_daily": "1d",
+        "nifty_benchmark_daily": "1d",
         "india_vix_daily": "1d",
     }.get(dataset)
 
@@ -8232,10 +8259,13 @@ def _nd_history(symbol: str, days: int = 320, interval: str = "1d") -> pd.DataFr
     s = _nd_canonical(symbol)
     if s == "NIFTY_SPOT":
         dataset = SUPABASE_DATASETS["nifty_daily"]
-        wanted = [s]
+        # yfinance producer publishes the benchmark under its original Yahoo
+        # ticker (^NSEI), not the engine's internal NIFTY_SPOT alias.
+        wanted = ["NIFTY_SPOT", "^NSEI", "NIFTY 50", "NIFTY50"]
     elif s == "INDIAVIX":
         dataset = SUPABASE_DATASETS["vix_daily"]
-        wanted = [s]
+        # yfinance producer publishes India VIX as ^INDIAVIX.
+        wanted = ["INDIAVIX", "^INDIAVIX"]
     else:
         if not _nd_is_equity(s):
             return pd.DataFrame()
@@ -8246,8 +8276,15 @@ def _nd_history(symbol: str, days: int = 320, interval: str = "1d") -> pd.DataFr
     end = now_ist()
     start = end - timedelta(days=int(days))
     rows = _nd_query_rows(source="yfinance_history", interval=interval, symbols=wanted, since=start, until=end, limit=10000 if interval != "1d" else 5000)
-    # Reference datasets are identified by their interval; do not require a
-    # dataset key because the producer contract is interval-based.
+    # Dataset is part of the producer's raw payload contract. Enforce it after
+    # transport extraction so unrelated yfinance series cannot satisfy a request.
+    rows = [r for r in rows if str(_nd_raw(r).get("dataset", "")) in {dataset,
+        "nifty_spot_daily" if s == "NIFTY_SPOT" else "",
+        "india_vix_daily" if s == "INDIAVIX" else "",
+        "next_day_stock_daily" if s not in {"NIFTY_SPOT", "INDIAVIX"} and interval == "1d" else "",
+        "next_day_mtf_hourly" if s not in {"NIFTY_SPOT", "INDIAVIX"} and interval == "1h" else "",
+        "next_day_mtf_15m" if s not in {"NIFTY_SPOT", "INDIAVIX"} and interval == "15m" else "",
+    }]
     frame = _nd_frame(rows)
     if not frame.empty:
         cutoff = pd.Timestamp(start)
@@ -8407,6 +8444,34 @@ def _nd_vix() -> Dict[str, Any]:
     return {"status":"OK","level":round(level,3),"change_5d_pct":round(change,3) if np.isfinite(change) else None,"percentile":round(float((c<=level).mean()*100),2),"regime":regime,"confirmation_bonus":V7_VIX_HIGH_CONFIRM_BONUS if regime=="HIGH_VOLATILITY" else V7_VIX_CAUTION_CONFIRM_BONUS if regime=="CAUTION" else 0.0,"risk_multiplier":.65 if regime=="HIGH_VOLATILITY" else .80 if regime=="CAUTION" else 1.0,"directional_predictor":False}
 
 
+def raw_bus_contract_diagnostics() -> Dict[str, Any]:
+    """Return read-only diagnostics for the producer/consumer RAW-BUS contract.
+
+    This never manufactures market data and never changes engine calculations.
+    It exists so deployment failures identify dataset/symbol mismatches instead
+    of collapsing into the generic `insufficient NIFTY spot history` message.
+    """
+    result: Dict[str, Any] = {
+        "status": "OK",
+        "table": SUPABASE_RAW_TABLE,
+        "source": "yfinance_history",
+        "datasets": {},
+    }
+    checks = [
+        ("nifty_benchmark", SUPABASE_DATASETS["nifty_daily"], ["NIFTY_SPOT", "^NSEI", "NIFTY 50", "NIFTY50"]),
+        ("india_vix", SUPABASE_DATASETS["vix_daily"], ["INDIAVIX", "^INDIAVIX"]),
+    ]
+    for name, dataset, symbols in checks:
+        rows = _nd_query_rows(source="yfinance_history", interval="1d", symbols=symbols, since=None, until=None, limit=2000)
+        matching = [r for r in rows if str(_nd_raw(r).get("dataset", "")) == dataset]
+        result["datasets"][name] = {
+            "dataset": dataset,
+            "rows": len(matching),
+            "symbols": sorted({_nd_symbol(r) for r in matching}),
+        }
+    return result
+
+
 def build_day_ahead_watchlist() -> Dict[str, Any]:
     """Authoritative day-ahead pipeline: RAW BUS -> independent calculations."""
     validate_config()
@@ -8415,7 +8480,12 @@ def build_day_ahead_watchlist() -> Dict[str, Any]:
     symbols=universe["Symbol"].tolist()
     benchmark=_nd_history("NIFTY_SPOT",320,"1d")
     if benchmark.empty or len(benchmark)<70:
-        raise RuntimeError("RAW BUS: insufficient NIFTY spot history")
+        diag = raw_bus_contract_diagnostics()
+        raise RuntimeError(
+            "RAW BUS: insufficient NIFTY spot history; "
+            f"expected dataset={SUPABASE_DATASETS['nifty_daily']} with producer symbol ^NSEI; "
+            f"diagnostic={json.dumps(diag, ensure_ascii=True, default=str)}"
+        )
 
     short=_nd_fetch_daily_window(symbols,14,VOLUME_SHOCKER_LOOKBACK_DAYS)
     shock=[]; shock_profiles={}
