@@ -19,7 +19,7 @@ import streamlit as st
 # This UI intentionally refuses to fall back to older engine generations.
 # The locked base for the current root-cause investigation is:
 # next_day_alpha_aap.py
-ENGINE_MODULE_NAME = "next_day_alpha_aap"
+ENGINE_MODULE_NAME ="next_day_alpha_engine"
 
 try:
     engine_module = __import__(
