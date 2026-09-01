@@ -14,7 +14,13 @@ import pandas as pd
 import requests
 import streamlit as st
 
-from next_day_alpha_engine import NextDayAlphaEngine
+try:
+    from next_day_alpha_engine_FINAL_BUGFIXED_V1 import NextDayAlphaEngine
+except ImportError:
+    try:
+        from next_day_alpha_engine_FINAL_BUGFIXED import NextDayAlphaEngine
+    except ImportError:
+        from next_day_alpha_engine import NextDayAlphaEngine
 
 IST_OFFSET = timedelta(hours=5, minutes=30)
 ROOT = Path(__file__).resolve().parent
@@ -79,11 +85,13 @@ def _is_equity_symbol(value: Any) -> bool:
     s = _canonical_equity_symbol(value)
     if not s or s in {"NIFTY_SPOT", "NIFTY 50", "NIFTY50", "^NSEI", "INDIAVIX", "^INDIAVIX"}:
         return False
-    if s.endswith(("CE", "PE", "FUT")) or "FUT" in s:
+    if __import__("re").search(r"\d{2}[A-Z]{3}\d+(?:CE|PE)$", s):
+        return False
+    if __import__("re").search(r"\d{2}[A-Z]{3}.*FUT$", s) or __import__("re").search(r"(?:FUT|FUTURES)$", s):
+        return False
+    if __import__("re").search(r"\d{4,}", s):
         return False
     if any(x in s for x in ("BANKNIFTY", "FINNIFTY", "MIDCPNIFTY")):
-        return False
-    if __import__("re").search(r"\d{2}[A-Z]{3}\d+", s) or __import__("re").search(r"\d{4,}", s):
         return False
     return bool(__import__("re").fullmatch(r"[A-Z][A-Z0-9&._-]*", s))
 
@@ -225,7 +233,12 @@ with st.expander("RAW BUS LIVE HEALTH", expanded=False):
     st.write(live)
 
 try:
-    result = engine.today_snapshot()
+    snapshot_method = getattr(engine, "today_snapshot", None)
+    if callable(snapshot_method):
+        result = snapshot_method()
+    else:
+        result = {}
+        st.error("Canonical engine API missing: today_snapshot()")
 except Exception as exc:
     result = {}
     st.error(f"Engine result read failed: {exc}")
