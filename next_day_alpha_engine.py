@@ -10,7 +10,7 @@ Purpose
 A completely isolated stock-selection engine for:
 
 1. Market-close / day-ahead scan
-2. Selecting exactly up to TOP 5 high-quality stock candidates
+2. Selecting exactly up to TOP 15 high-quality overnight stock candidates
 3. Assigning directional bias (LONG / SHORT)
 4. Next morning 09:15-09:20 confirmation
 5. Producing FINAL 2 / FINAL 1 / NO TRADE
@@ -133,13 +133,14 @@ from functools import wraps
 from logging.handlers import RotatingFileHandler
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from zoneinfo import ZoneInfo
 
 import numpy as np
 import pandas as pd
+import requests
 
 try:
     from neo_api_client import NeoAPI
@@ -194,7 +195,18 @@ MIN_AVG_VOLUME = 100_000
 
 DAY_AHEAD_MIN_SCORE = 68.0
 # No forced trade rule: fewer than 5 may be returned if quality gates fail.
-TOP5_COUNT = 5
+# The overnight research basket is now TOP 15. TOP5_COUNT remains a
+# compatibility alias for older callers; it no longer controls the basket size.
+DAY_AHEAD_TOP_N = max(1, int(os.getenv("NEXT_DAY_TOP_N", "15")))
+TOP15_COUNT = DAY_AHEAD_TOP_N
+TOP5_COUNT = DAY_AHEAD_TOP_N
+
+# First-stage volume-shocker gate. These are raw volume-behaviour gates, not
+# replacements for the existing indicator mathematics.
+VOLUME_SHOCKER_LOOKBACK_DAYS = 5
+VOLUME_SHOCKER_MIN_CONSECUTIVE_DAYS = max(2, int(os.getenv("NEXT_DAY_VOLUME_CONSECUTIVE_DAYS", "3")))
+VOLUME_SHOCKER_MIN_DAILY_PCT = float(os.getenv("NEXT_DAY_VOLUME_MIN_PCT", "5.0"))
+MAJOR_FILTER_MAX_CANDIDATES = max(50, int(os.getenv("NEXT_DAY_MAJOR_FILTER_MAX", "50")))
 
 # ----------------------------- Morning confirmation ------------------------
 
@@ -237,7 +249,7 @@ LOG_FILE = ROOT / "next_day_alpha.log"
 LOG_MAX_BYTES = max(1_000_000, int(os.getenv("NEXT_DAY_LOG_MAX_BYTES", str(5 * 1024 * 1024))))
 LOG_BACKUP_COUNT = max(1, int(os.getenv("NEXT_DAY_LOG_BACKUP_COUNT", "5")))
 NEXT_DAY_REQUIRE_KOTAK = os.getenv("NEXT_DAY_REQUIRE_KOTAK", "0") == "1"
-DAY_AHEAD_RUN_MINUTE = 31
+DAY_AHEAD_RUN_MINUTE = 35
 DAY_AHEAD_SNAPSHOT_START_MINUTE = 15
 DAY_AHEAD_SNAPSHOT_END_MINUTE = 30
 
@@ -3527,7 +3539,7 @@ def build_day_ahead_watchlist() -> Dict[str, Any]:
 
         _atomic_write_text(
             CACHE_JSON,
-            json.dumps(result, ensure_ascii=False, indent=2, default=str),
+            json.dumps(result, ensure_ascii=True, indent=2, default=str),
         )
 
     return result
@@ -3817,7 +3829,7 @@ def capture_kotak_day_ahead_snapshot(symbols: List[str]) -> Dict[str, Dict[str, 
 
 
 def capture_kotak_opening_window(symbols: List[str]) -> None:
-    """Capture 09:15-09:20 raw quotes for only the current TOP 5.
+    """Capture 09:15-09:20 raw quotes for only the frozen TOP 15.
 
     This keeps the critical morning confirmation on Kotak rather than a
     delayed 1-minute provider. The loop is harmless if the engine is not live.
@@ -5158,7 +5170,7 @@ def _v7_select_final5(enriched: pd.DataFrame) -> pd.DataFrame:
     x = x[x["hard_rr_pass"] == True].copy()
     if x.empty: return x
     selected, sector_count = [], {}
-    for _, row in x.sort_values("V7Score", ascending=False).iterrows():
+    for _, row in x.sort_values(["V7Score", "Symbol"], ascending=[False, True]).iterrows():
         sector = str(row.get("SectorBucket", "UNKNOWN"))
         if sector_count.get(sector, 0) >= 2: continue
         selected.append(row)
@@ -5329,7 +5341,7 @@ def _v7_run_morning_confirmation() -> Dict[str, Any]:
     nifty_gap=market_gap(NIFTY_TICKER)
     vix=latest.get("macro_regime",{})
     # Morning sector regime is calculated from the 30-stock raw basket first.
-    basket=latest.get("day_ahead",{}).get("bet_basket_30",[])
+    basket=candidates
     regimes=_v7_sector_regimes(basket)
     confirmations=[]
     for c in candidates:
@@ -5372,7 +5384,7 @@ def _v7_run_morning_confirmation() -> Dict[str, Any]:
     status="FINAL_2" if len(final)>=2 else ("FINAL_1" if len(final)==1 else "NO_TRADE")
     result={"status":status,"generated_at":now_ist().isoformat(),"required_confirmation_score":required,"vix_regime":vix,"sector_regimes":regimes,"final":final,"confirmations":confirmations,"no_trade_reason":"No candidate satisfied thesis, sector, circuit, R:R and morning confirmation gates." if not final else ""}
     latest["morning_confirmation"]=result
-    _atomic_write_text(CACHE_JSON,json.dumps(latest,ensure_ascii=False,indent=2,default=str))
+    _atomic_write_text(CACHE_JSON,json.dumps(latest,ensure_ascii=True,indent=2,default=str))
     return result
 
 run_morning_confirmation = _v7_run_morning_confirmation
@@ -5401,6 +5413,10 @@ class NextDayAlphaEngine:
     ) -> Dict[str, Any]:
 
         return load_latest()
+
+    def today_snapshot(self) -> Dict[str, Any]:
+        """Return only today's frozen day-ahead snapshot; never a stale prior-day cache."""
+        return _load_frozen_day_ahead_snapshot(now_ist().strftime("%Y-%m-%d"))
 
     def run_if_due(
         self,
@@ -5615,7 +5631,7 @@ def print_day_ahead(
     )
 
     print(
-        "DAY-AHEAD TOP 5"
+        "DAY-AHEAD TOP 15"
     )
 
     print(
@@ -5730,7 +5746,7 @@ def run_streamlit_dashboard() -> None:
 
     st.set_page_config(page_title="Next-Day Stock Alpha Engine", layout="wide")
     st.title("NEXT-DAY STOCK ALPHA ENGINE")
-    st.caption("Standalone â€¢ Raw-data sharing only â€¢ Kotak Neo live â€¢ Trusted catalyst layer")
+    st.caption("Standalone - Raw-data sharing only - Kotak Neo live - Trusted catalyst layer")
 
     result = load_latest()
     day = result.get("day_ahead", {})
@@ -5742,14 +5758,14 @@ def run_streamlit_dashboard() -> None:
     c3.metric("FINAL", len(morning.get("final", [])))
     c4.metric("Engine", result.get("version", "UNKNOWN"))
 
-    st.subheader("DAY-AHEAD TOP 5")
+    st.subheader("DAY-AHEAD TOP 15")
     top5 = day.get("top5", [])
     if top5:
         st.dataframe(pd.DataFrame(top5), use_container_width=True, hide_index=True)
     else:
         st.warning("NO QUALIFIED CANDIDATE")
 
-    st.subheader("09:15â€“09:20 CONFIRMATION")
+    st.subheader("09:15-09:20 CONFIRMATION")
     confirmations = morning.get("confirmations", [])
     if confirmations:
         st.dataframe(pd.DataFrame(confirmations), use_container_width=True, hide_index=True)
@@ -5758,7 +5774,7 @@ def run_streamlit_dashboard() -> None:
         st.success("FINAL TRADE CANDIDATES")
         st.dataframe(pd.DataFrame(final), use_container_width=True, hide_index=True)
     else:
-        st.info("NO TRADE â€” engine never forces two trades.")
+        st.info("NO TRADE - engine never forces two trades.")
 
     st.caption("A score is a quality score, not a guaranteed win probability. Historical calibration is required before any probability claim.")
 
@@ -6191,12 +6207,33 @@ def _supabase_vix_daily(days: int = 320) -> pd.DataFrame:
     )
 
 def _supabase_live_frame(symbol: str) -> pd.DataFrame:
-    rows = _supabase_raw_read(
-        dataset=SUPABASE_DATASETS["live"],
-        symbol=str(symbol).replace(".NS", ""),
+    clean = _canonical_equity_symbol(symbol)
+    since = datetime.now(IST) - timedelta(minutes=30)
+    rows = _raw_bus_read(
+        source="kotak_live",
+        symbol=clean,
+        since=since,
         limit=5000,
     )
-    return _raw_ohlcv_frame(rows)
+    records = []
+    for row in rows:
+        raw = _bus_raw(row)
+        ts = _bus_timestamp(row)
+        ltp = _bus_number(raw, "ltp", "lp", "last_price", "lastPrice", "c")
+        if ts is None or not np.isfinite(ltp):
+            continue
+        records.append({
+            "Datetime": ts,
+            "Open": ltp,
+            "High": ltp,
+            "Low": ltp,
+            "Close": ltp,
+            "Volume": _bus_number(raw, "volume", "v", "tradedVolume", default=0.0),
+        })
+    if not records:
+        return pd.DataFrame(columns=["Datetime", "Open", "High", "Low", "Close", "Volume"])
+    return pd.DataFrame(records).sort_values("Datetime").drop_duplicates("Datetime", keep="last").reset_index(drop=True)
+
 
 def _supabase_fetch_yahoo_compat(
     ticker: str,
@@ -6311,7 +6348,7 @@ def supabase_raw_contract_status() -> Dict[str, Any]:
     }
 
 # ============================================================================
-# FINAL SUPABASE RAW BUS BINDINGS â€” LOCKED
+# FINAL SUPABASE RAW BUS BINDINGS - LOCKED
 # ============================================================================
 # One-way architecture:
 #   Kotak LIVE producer -> Supabase raw_observations
@@ -6334,30 +6371,77 @@ def _raw_bus_headers() -> Dict[str, str]:
     }
 
 
+def _canonical_equity_symbol(symbol: str) -> str:
+    """Canonical internal equity symbol used by the Next-Day engine."""
+    value = str(symbol or "").upper().strip()
+    for suffix in (".NS", "-EQ"):
+        if value.endswith(suffix):
+            value = value[: -len(suffix)]
+    return value.strip()
+
+
+def _supabase_symbol_variants(symbol: str) -> List[str]:
+    """Return only producer-compatible symbol variants; never invent tokens."""
+    canonical = _canonical_equity_symbol(symbol)
+    if not canonical:
+        return []
+    # Yahoo producer stores canonical symbols; Kotak equity producer commonly
+    # stores the exchange suffix. Query both in one server-side IN predicate.
+    return list(dict.fromkeys([canonical, f"{canonical}-EQ"]))
+
+
 def _raw_bus_read(
     *,
     source: Optional[str] = None,
     symbol: Optional[str] = None,
     dataset: Optional[str] = None,
     since: Optional[datetime] = None,
+    until: Optional[datetime] = None,
+    event_since: Optional[datetime] = None,
+    event_until: Optional[datetime] = None,
     limit: int = 50000,
 ) -> List[Dict[str, Any]]:
+    """Read only the RAW rows actually required by the consumer.
+
+    Important contract:
+      * historical market time comes from raw.event_timestamp;
+      * live freshness may use observation_timestamp;
+      * candidate symbols are filtered server-side;
+      * Kotak ``ABC-EQ`` and Yahoo ``ABC`` are treated as the same internal
+        equity symbol, while the returned row's real instrument_token remains
+        authoritative.
+    """
     if not SUPABASE_URL or not SUPABASE_KEY:
         return []
+
     params: List[Tuple[str, str]] = [
         ("select", "*"),
         ("order", "observation_timestamp.asc"),
-        ("limit", str(int(limit))),
+        ("limit", str(max(1, int(limit)))),
     ]
     if source:
         params.append(("source", f"eq.{source}"))
     if symbol:
-        params.append(("symbol", f"eq.{str(symbol).replace('.NS', '').upper()}"))
+        variants = _supabase_symbol_variants(symbol)
+        if len(variants) == 1:
+            params.append(("symbol", f"eq.{variants[0]}"))
+        elif variants:
+            params.append(("symbol", "in.(" + ",".join(variants) + ")"))
     if dataset:
-        # Historical producer stores dataset inside the raw JSON payload.
         params.append(("raw->>dataset", f"eq.{dataset}"))
+
+    # Historical producer writes the true candle timestamp inside raw.
+    if event_since is not None:
+        params.append(("raw->>event_timestamp", f"gte.{event_since.astimezone(timezone.utc).isoformat()}"))
+    if event_until is not None:
+        params.append(("raw->>event_timestamp", f"lte.{event_until.astimezone(timezone.utc).isoformat()}"))
+
+    # Live freshness window can safely use the table observation timestamp.
     if since is not None:
         params.append(("observation_timestamp", f"gte.{since.astimezone(timezone.utc).isoformat()}"))
+    if until is not None:
+        params.append(("observation_timestamp", f"lte.{until.astimezone(timezone.utc).isoformat()}"))
+
     try:
         response = requests.get(
             f"{SUPABASE_URL}/rest/v1/{SUPABASE_RAW_TABLE}",
@@ -6532,5 +6616,2137 @@ fetch_yahoo_chart = _supabase_fetch_yahoo_compat
 fetch_intraday = _supabase_fetch_intraday_compat
 market_gap = _supabase_market_gap_compat
 
+
+# ============================================================================
+# FINAL LOCKED DAY-AHEAD PIPELINE
+# ============================================================================
+# This layer changes ONLY data selection/orchestration/persistence. Existing
+# indicator formulas, scoring mathematics, MTF calculations and confirmation
+# calculations above are deliberately reused unchanged.
+
+DAY_AHEAD_SNAPSHOT_DIR = ROOT / "snapshots"
+DAY_AHEAD_SNAPSHOT_DIR.mkdir(parents=True, exist_ok=True)
+DAY_AHEAD_STATUS_JSON = DAY_AHEAD_SNAPSHOT_DIR / "latest_status.json"
+
+
+def _day_ahead_snapshot_paths(trading_date: str) -> Tuple[Path, Path]:
+    return (
+        DAY_AHEAD_SNAPSHOT_DIR / f"{trading_date}_top15.json",
+        DAY_AHEAD_SNAPSHOT_DIR / f"{trading_date}_top15.csv",
+    )
+
+
+def _freeze_day_ahead_snapshot(result: Dict[str, Any]) -> None:
+    trading_date = str(result.get("data_as_of") or now_ist().strftime("%Y-%m-%d"))
+    json_path, csv_path = _day_ahead_snapshot_paths(trading_date)
+
+    # Never overwrite an existing daily snapshot. This is what makes the
+    # overnight TOP 15 deterministic across dashboard refreshes/restarts.
+    if not json_path.exists():
+        _atomic_write_text(json_path, json.dumps(result, ensure_ascii=True, indent=2, default=str))
+
+    rows = result.get("day_ahead", {}).get("top15", [])
+    if rows and not csv_path.exists():
+        pd.DataFrame(rows).to_csv(csv_path, index=False)
+
+
+def _load_frozen_day_ahead_snapshot(trading_date: Optional[str] = None) -> Dict[str, Any]:
+    trading_date = trading_date or now_ist().strftime("%Y-%m-%d")
+    json_path, _ = _day_ahead_snapshot_paths(trading_date)
+    if not json_path.exists():
+        return {}
+    try:
+        with json_path.open("r", encoding="utf-8") as fh:
+            payload = json.load(fh)
+        return payload if isinstance(payload, dict) else {}
+    except Exception:
+        return {}
+
+
+def _volume_shocker_profile(df: pd.DataFrame) -> Optional[Dict[str, float]]:
+    """Measure only the last five completed daily volume changes."""
+    if df is None or df.empty or "Volume" not in df.columns:
+        return None
+    x = df.copy()
+    x["Volume"] = pd.to_numeric(x["Volume"], errors="coerce")
+    x = x.dropna(subset=["Volume"]).tail(VOLUME_SHOCKER_LOOKBACK_DAYS)
+    if len(x) < VOLUME_SHOCKER_LOOKBACK_DAYS:
+        return None
+    volumes = x["Volume"].to_numpy(dtype=float)
+    if np.any(~np.isfinite(volumes)) or np.any(volumes <= 0):
+        return None
+    pct = (pd.Series(volumes).pct_change() * 100.0).iloc[1:].to_numpy(dtype=float)
+
+    run = 0
+    for value in pct[::-1]:
+        if np.isfinite(value) and value >= VOLUME_SHOCKER_MIN_DAILY_PCT:
+            run += 1
+        else:
+            break
+
+    if run < VOLUME_SHOCKER_MIN_CONSECUTIVE_DAYS:
+        return None
+
+    consecutive = pct[-run:]
+    avg_pct = float(np.mean(consecutive))
+    cumulative_pct = float((volumes[-1] / volumes[-run-1] - 1.0) * 100.0)
+    prior_avg = float(np.mean(volumes[:-run])) if len(volumes) > run else np.nan
+    latest_ratio = float(volumes[-1] / prior_avg) if np.isfinite(prior_avg) and prior_avg > 0 else np.nan
+    shock_score = float(avg_pct * run + max(cumulative_pct, 0.0) * 0.35 + max(latest_ratio - 1.0, 0.0) * 20.0)
+    return {
+        "volume_shock_consecutive_days": float(run),
+        "volume_shock_avg_daily_pct": avg_pct,
+        "volume_shock_cumulative_pct": cumulative_pct,
+        "volume_shock_latest_vs_prior_ratio": latest_ratio,
+        "volume_shock_score": shock_score,
+    }
+
+
+def _volume_shocker_candidates(
+    universe: pd.DataFrame,
+    histories: Dict[str, pd.DataFrame],
+) -> Tuple[List[str], Dict[str, Dict[str, float]]]:
+    """First gate: last five completed sessions and consecutive volume expansion."""
+    candidates = []
+    profiles: Dict[str, Dict[str, float]] = {}
+    for _, item in universe.iterrows():
+        symbol = _canonical_equity_symbol(item.get("Symbol", ""))
+        df = histories.get(symbol)
+        if not symbol or df is None or len(df) < VOLUME_SHOCKER_LOOKBACK_DAYS:
+            continue
+        shock = _volume_shocker_profile(df)
+        if shock is None:
+            continue
+        profiles[symbol] = dict(shock)
+        candidates.append((symbol, shock["volume_shock_score"]))
+    candidates.sort(key=lambda x: (-x[1], x[0]))
+    return [symbol for symbol, _ in candidates], profiles
+
+
+def _major_filter_candidates(
+    universe: pd.DataFrame,
+    histories: Dict[str, pd.DataFrame],
+    shock_profiles: Dict[str, Dict[str, float]],
+) -> Tuple[List[str], Dict[str, Dict[str, float]]]:
+    """Second gate: objective tradability/quality filters after volume shock."""
+    candidates = []
+    profiles = {}
+    lookup = universe.set_index(universe["Symbol"].astype(str).map(_canonical_equity_symbol))
+    for symbol, shock in shock_profiles.items():
+        df = histories.get(symbol)
+        if df is None or len(df) < 5:
+            continue
+        d = df.copy()
+        d["Close"] = pd.to_numeric(d["Close"], errors="coerce")
+        d["Volume"] = pd.to_numeric(d["Volume"], errors="coerce")
+        d = d.dropna(subset=["Close", "Volume"])
+        if d.empty:
+            continue
+        close = float(d["Close"].iloc[-1])
+        avg_volume = float(d["Volume"].tail(min(20, len(d))).mean())
+        avg_turnover_cr = float((d["Close"].tail(min(20, len(d))) * d["Volume"].tail(min(20, len(d)))).mean() / 1e7)
+        if close < MIN_PRICE or avg_volume < MIN_AVG_VOLUME or avg_turnover_cr < MIN_AVG_TURNOVER_CR:
+            continue
+        profile = dict(shock)
+        profile.update({"avg_volume_20": avg_volume, "avg_turnover_20_cr": avg_turnover_cr, "last_close": close})
+        profiles[symbol] = profile
+        candidates.append((symbol, shock["volume_shock_score"]))
+    candidates.sort(key=lambda x: (-x[1], x[0]))
+    return [symbol for symbol, _ in candidates[:MAJOR_FILTER_MAX_CANDIDATES]], profiles
+
+
+def _supabase_fetch_daily_window(
+    symbols: List[str],
+    calendar_days: int,
+    *,
+    minimum_rows: int = 1,
+) -> Dict[str, pd.DataFrame]:
+    """Fetch only the requested daily window and symbols from Supabase.
+
+    This is deliberately server-side filtered. It never downloads the full
+    historical table and then filters it locally.
+    """
+    if not symbols or not SUPABASE_URL or not SUPABASE_KEY:
+        return {}
+
+    end_ts = datetime.now(IST)
+    start_ts = end_ts - timedelta(days=int(calendar_days))
+    wanted = {_canonical_equity_symbol(s) for s in symbols if _canonical_equity_symbol(s)}
+    variants = sorted({v for s in wanted for v in _supabase_symbol_variants(s)})
+    if not variants:
+        return {}
+
+    rows: List[Dict[str, Any]] = []
+    page_size = 5000
+    offset = 0
+    while True:
+        params: List[Tuple[str, str]] = [
+            ("select", "symbol,instrument_token,observation_timestamp,raw"),
+            ("source", "eq.yahoo_historical"),
+            ("raw->>dataset", "eq.next_day_stock_daily"),
+            ("raw->>event_timestamp", f"gte.{start_ts.astimezone(timezone.utc).isoformat()}"),
+            ("raw->>event_timestamp", f"lte.{end_ts.astimezone(timezone.utc).isoformat()}"),
+            ("symbol", "in.(" + ",".join(variants) + ")"),
+            ("order", "raw->>event_timestamp.asc"),
+            ("limit", str(page_size)),
+            ("offset", str(offset)),
+        ]
+        try:
+            response = requests.get(
+                f"{SUPABASE_URL}/rest/v1/{SUPABASE_RAW_TABLE}",
+                headers=_raw_bus_headers(),
+                params=params,
+                timeout=30,
+            )
+            response.raise_for_status()
+            page = response.json()
+        except Exception as exc:
+            LOGGER.warning("Supabase daily window read failed offset=%s: %s", offset, exc)
+            break
+        if not isinstance(page, list) or not page:
+            break
+        rows.extend(page)
+        if len(page) < page_size:
+            break
+        offset += page_size
+
+    grouped: Dict[str, List[Dict[str, Any]]] = {}
+    for row in rows:
+        canonical = _canonical_equity_symbol(row.get("symbol", ""))
+        if canonical in wanted:
+            grouped.setdefault(canonical, []).append(row)
+
+    result = {k: _historical_frame(v) for k, v in grouped.items()}
+    return {k: v for k, v in result.items() if v is not None and len(v) >= minimum_rows}
+
+
+def _supabase_fetch_history_all(symbols: List[str], days: int = 320) -> Dict[str, pd.DataFrame]:
+    """Compatibility wrapper: server-side symbol/date filtering only."""
+    return _supabase_fetch_daily_window(symbols, days, minimum_rows=MIN_HISTORY_DAYS)
+
+
+def _supabase_fetch_history_locked(symbol: str, days: int = 320) -> pd.DataFrame:
+    return _supabase_history(str(symbol).replace(".NS", "").upper(), days, "1d", "next_day_stock_daily")
+
+
+# Historical data boundary: no direct yFinance read by the Next-Day engine.
+def fetch_history(symbols: List[str], days: int = 320) -> Dict[str, pd.DataFrame]:
+    result = _supabase_fetch_history_all(symbols, days)
+    valid = {k: v for k, v in result.items() if v is not None and len(v) >= MIN_HISTORY_DAYS}
+    _set_source_health(
+        "SUPABASE_RAW",
+        status="CONNECTED" if valid else "ERROR",
+        last_success_ist=now_ist().isoformat() if valid else None,
+        symbols_ok=len(valid),
+        error=None if valid else "No qualifying daily historical RAW rows in Supabase",
+    )
+    return valid
+
+
+def _build_final_day_ahead_v8() -> Dict[str, Any]:
+    timestamp = now_ist()
+    universe = load_nifty500_universe()
+    symbols = universe["Symbol"].astype(str).str.upper().str.strip().drop_duplicates().tolist()
+    benchmark = fetch_yahoo_chart(NIFTY_TICKER, days=320, interval="1d")
+
+    # Stage 1: only the last week of daily RAW is needed for the first gate.
+    # This avoids pulling hundreds of days for the entire universe.
+    short_histories = _supabase_fetch_daily_window(
+        symbols,
+        calendar_days=14,
+        minimum_rows=VOLUME_SHOCKER_LOOKBACK_DAYS,
+    )
+    if not short_histories:
+        raise RuntimeError("Supabase RAW BUS returned no usable one-week volume history")
+
+    shock_symbols_all, shock_profiles = _volume_shocker_candidates(universe, short_histories)
+    if not shock_symbols_all:
+        raise RuntimeError("Volume Shocker gate produced no qualifying stocks")
+
+    # Stage 2: fetch a modest recent window only for volume-shocker survivors,
+    # apply the major tradability/quality gates, and cap the population at ~50.
+    major_histories = _supabase_fetch_daily_window(
+        shock_symbols_all,
+        calendar_days=60,
+        minimum_rows=5,
+    )
+    shock_profiles_major = {s: shock_profiles[s] for s in major_histories if s in shock_profiles}
+    major_symbols, major_profiles = _major_filter_candidates(
+        universe,
+        major_histories,
+        shock_profiles_major,
+    )
+    if not major_symbols:
+        raise RuntimeError("Major stock filters produced no qualifying stocks")
+
+    # Stage 3: only the ~50 survivors receive the full historical depth needed
+    # by the existing indicator/MTF mathematics.
+    histories = _supabase_fetch_daily_window(
+        major_symbols,
+        calendar_days=420,
+        minimum_rows=MIN_HISTORY_DAYS,
+    )
+    if not histories:
+        raise RuntimeError("Supabase RAW BUS returned no usable full history for major-filter survivors")
+
+    combined_profiles = {s: {**shock_profiles.get(s, {}), **major_profiles.get(s, {})} for s in histories}
+
+    # Full existing indicator/scoring stack is deliberately executed ONLY on
+    # the ~50 survivors. The formulas are unchanged above.
+    rows = []
+    universe_lookup = universe.set_index(universe["Symbol"].astype(str).map(_canonical_equity_symbol))
+    for symbol in major_symbols:
+        df = histories.get(symbol)
+        if df is None:
+            continue
+        try:
+            item = universe_lookup.loc[symbol]
+            industry = str(item.get("Industry", "UNKNOWN"))
+        except Exception:
+            industry = "UNKNOWN"
+        features = build_features(symbol, df, benchmark, industry)
+        if features is not None:
+            features.update(combined_profiles.get(symbol, {}))
+            rows.append(features)
+
+    if not rows:
+        raise RuntimeError("No usable stocks survived the full indicator evaluation")
+
+    frame = add_sector_features(pd.DataFrame(rows))
+    scored = score_candidates(frame)
+
+    # Full MTF layer is retained, but it is now applied to the complete ~50
+    # post-shocker population rather than an old 30-stock intermediate basket.
+    basket = scored.head(MAJOR_FILTER_MAX_CANDIDATES).copy()
+    enriched = _v7_enrich_basket(basket)
+    vix = _v7_vix_context()
+    if not enriched.empty:
+        enriched["MacroVIXRegime"] = vix.get("regime", "UNAVAILABLE")
+
+    # Stage 4: deterministic TOP 15 selection. No live Kotak quote is needed
+    # to determine the overnight basket; live Kotak RAW is reserved for morning.
+    top15 = _v7_select_final5(enriched).head(DAY_AHEAD_TOP_N)
+
+    candidates = []
+    for rank, (_, row) in enumerate(top15.iterrows(), start=1):
+        d = row.to_dict()
+        sym = str(row["Symbol"]).upper()
+        d["sector_bucket"] = _v7_sector_bucket(d.get("Industry"))
+        d["risk_profile"] = _v7_risk_profile(d, vix)
+        catalyst_text = str(d.get("CatalystText", "")).strip()
+        direction = str(d.get("Direction", "NEUTRAL"))
+        thesis = (
+            f"{direction} thesis: existing quantitative setup is supported by "
+            f"volume-shocker persistence, full indicator score and MTF structure. "
+            f"Catalyst context: {catalyst_text if catalyst_text else 'No verified NSE catalyst found.'}"
+        )
+        candidates.append({
+            "rank": rank, "symbol": sym, "industry": str(d.get("Industry", "UNKNOWN")),
+            "sector_bucket": d["sector_bucket"], "direction": direction,
+            "day_ahead_score": round(safe_float(d.get("DayAheadScore"), 0), 2),
+            "v7_score": round(safe_float(d.get("V7Score"), 0), 2),
+            "selection_score": round(safe_float(d.get("V7Score"), 0), 2),
+            "setup_type": str(d.get("SetupType", "UNKNOWN")),
+            "trend_score": round(safe_float(d.get("TrendScore"), 50), 2),
+            "momentum_score": round(safe_float(d.get("MomentumScore"), 50), 2),
+            "relative_strength_score": round(safe_float(d.get("RelativeStrengthScore"), 50), 2),
+            "sector_score": round(safe_float(d.get("SectorScore"), 50), 2),
+            "volume_score": round(safe_float(d.get("VolumeScore"), 50), 2),
+            "volatility_score": round(safe_float(d.get("VolatilityScore"), 50), 2),
+            "catalyst_score": round(safe_float(d.get("CatalystScoreFinal"), 50), 2),
+            "anti_false_positive_score": round(safe_float(d.get("AntiFalsePositiveScore"), 50), 2),
+            "volume_shock_consecutive_days": int(safe_float(d.get("volume_shock_consecutive_days"), 0)),
+            "volume_shock_avg_daily_pct": round(safe_float(d.get("volume_shock_avg_daily_pct"), np.nan), 3),
+            "volume_shock_cumulative_pct": round(safe_float(d.get("volume_shock_cumulative_pct"), np.nan), 3),
+            "volume_shock_latest_vs_prior_ratio": round(safe_float(d.get("volume_shock_latest_vs_prior_ratio"), np.nan), 3),
+            "ltp": round(safe_float(d.get("LTP"), np.nan), 2),
+            "atr_pct": round(safe_float(d.get("ATRpct"), np.nan), 3),
+            "ret_1d": round(safe_float(d.get("Ret1D"), np.nan), 3),
+            "ret_5d": round(safe_float(d.get("Ret5D"), np.nan), 3),
+            "ret_20d": round(safe_float(d.get("Ret20D"), np.nan), 3),
+            "rs_5d": round(safe_float(d.get("RS5D"), np.nan), 3),
+            "rs_20d": round(safe_float(d.get("RS20D"), np.nan), 3),
+            "mtf_score": round(safe_float(d.get("mtf_score"), 50), 2),
+            "support": safe_float(d.get("support"), np.nan), "resistance": safe_float(d.get("resistance"), np.nan),
+            "invalidation": safe_float(d.get("invalidation"), np.nan), "target": safe_float(d.get("target"), np.nan),
+            "rr": round(safe_float(d.get("rr"), np.nan), 3),
+            "invalidation_atr": round(safe_float(d.get("invalidation_atr"), np.nan), 3),
+            "pattern_conflicts": int(d.get("pattern_conflicts", 0)), "pattern_supports": int(d.get("pattern_supports", 0)),
+            "hard_rr_pass": bool(d.get("hard_rr_pass", False)),
+            "overnight_eligibility": str(d.get("OvernightEligibility", "WATCH_ONLY")),
+            "catalyst_text": catalyst_text,
+            "thesis": thesis,
+            "invalidation_rule": "Structural S/R or ATR fallback; hard R:R gate applies.",
+        })
+
+    result = {
+        "engine": "NEXT_DAY_ALPHA_ENGINE",
+        "version": V7_VERSION + "_LOCKED_TOP15_VOLUME_SHOCKER",
+        "generated_at": timestamp.isoformat(),
+        "data_as_of": timestamp.strftime("%Y-%m-%d"),
+        "selection_pipeline": {
+            "volume_shocker_lookback_days": VOLUME_SHOCKER_LOOKBACK_DAYS,
+            "volume_shocker_min_consecutive_days": VOLUME_SHOCKER_MIN_CONSECUTIVE_DAYS,
+            "volume_shocker_min_daily_pct": VOLUME_SHOCKER_MIN_DAILY_PCT,
+            "volume_shocker_survivors": len(shock_symbols_all),
+            "major_filter_output": len(major_symbols),
+            "full_indicator_population": len(scored),
+            "full_history_symbols": len(histories),
+            "overnight_top15": len(candidates),
+            "snapshot_frozen": True,
+        },
+        "architecture": {
+            "nifty_3min_engine_modified": False,
+            "shared_raw_data_allowed": True,
+            "shared_calculated_features": False,
+            "shared_scores": False,
+            "shared_regime_decisions": False,
+            "shared_decisions": False,
+            "shared_labels": False,
+            "shared_predictions": False,
+            "shared_raw_fields_only": True,
+            "next_day_direct_broker_access": False,
+            "historical_source": "Supabase:yahoo_historical",
+            "live_source": "Supabase:kotak_live",
+        },
+        "macro_regime": vix,
+        "day_ahead": {
+            "universe_size": len(symbols),
+            "volume_shocker_count": len(shock_symbols),
+            "usable_symbols": len(frame),
+            "scored_symbols": len(scored),
+            "top15_count": len(candidates),
+            "top15": candidates,
+            # Compatibility aliases. Both point to the same frozen TOP 15.
+            "top5_count": len(candidates),
+            "top5": candidates,
+            "bet_basket_size": len(basket_records) if 'basket_records' in locals() else len(enriched),
+            "bet_basket_30": [],
+        },
+        "morning_confirmation": {"status": "PENDING", "final": []},
+        "probability_note": "Quality scores are not win probabilities. VIX is not a directional predictor. Historical calibration is required before any probability claim.",
+        "quality_controls": {
+            "hard_rr_gate": V7_MIN_RR,
+            "min_invalidation_atr": V7_MIN_INVALIDATION_DISTANCE_ATR,
+            "max_invalidation_atr": V7_MAX_INVALIDATION_DISTANCE_ATR,
+            "mtf_timeframes": ["W", "D", "4H", "1H", "15M"],
+            "no_trade_allowed": True,
+        },
+    }
+    _atomic_write_text(CACHE_JSON, json.dumps(result, ensure_ascii=True, indent=2, default=str))
+    _freeze_day_ahead_snapshot(result)
+    return result
+
+
+# Active day-ahead builder: staged TOP-15 pipeline above.
+build_day_ahead_watchlist = _build_final_day_ahead_v8
+
+
+def _locked_live_top15() -> List[Dict[str, Any]]:
+    latest = load_latest()
+    day = latest.get("day_ahead", {}) if isinstance(latest, dict) else {}
+    return day.get("top15", day.get("top5", []))
+
+
+# Active public readers always expose TOP 15, never the latest arbitrary RAW symbol.
+NextDayAlphaEngine.live_top15 = lambda self: _locked_live_top15()
+NextDayAlphaEngine.live_top5 = lambda self: _locked_live_top15()
+
+# Active morning confirmation consumes the frozen TOP 15.
+def _morning_indicator_overlay(candidate: Dict[str, Any], intra: pd.DataFrame, nifty: Optional[pd.DataFrame]) -> Dict[str, Any]:
+    """Calculate existing indicator families on the 09:15-09:20 candidate window.
+
+    This is an additional confirmation layer. It does not alter the existing
+    indicator implementations or the day-ahead scoring formulas.
+    """
+    out = {
+        "rsa": np.nan, "macd_hist": np.nan, "rsi": np.nan,
+        "supertrend_direction": "UNKNOWN", "sma20": np.nan,
+        "price_vs_sma20_pct": np.nan, "atr_pct": np.nan,
+        "indicator_alignment": 50.0,
+    }
+    if intra is None or intra.empty or len(intra) < 3:
+        return out
+
+    x = intra.copy()
+    for col in ("Open", "High", "Low", "Close", "Volume"):
+        x[col] = pd.to_numeric(x.get(col), errors="coerce")
+    x = x.dropna(subset=["High", "Low", "Close"]).reset_index(drop=True)
+    if len(x) < 3:
+        return out
+
+    close = x["Close"]
+    rsi_series = rsi(close, 14)
+    macd_line, macd_signal, macd_hist = macd(close)
+    st_dir = supertrend_direction(x, 10, 3.0)
+    sma20 = close.rolling(20, min_periods=1).mean()
+    atr_series = atr(x, 14)
+
+    last_close = safe_float(close.iloc[-1], np.nan)
+    sma = safe_float(sma20.iloc[-1], np.nan)
+    atr_value = safe_float(atr_series.iloc[-1], np.nan)
+    out["rsi"] = safe_float(rsi_series.iloc[-1], np.nan)
+    out["macd_hist"] = safe_float(macd_hist.iloc[-1], np.nan)
+    out["supertrend_direction"] = "LONG" if safe_float(st_dir.iloc[-1], 0) > 0 else "SHORT"
+    out["sma20"] = sma
+    out["price_vs_sma20_pct"] = ((last_close / sma) - 1.0) * 100.0 if np.isfinite(last_close) and np.isfinite(sma) and sma else np.nan
+    out["atr_pct"] = (atr_value / last_close) * 100.0 if np.isfinite(atr_value) and np.isfinite(last_close) and last_close else np.nan
+
+    # RSA/relative-strength confirmation uses the candidate's opening return
+    # relative to the NIFTY opening return, using only raw price observations.
+    stock_ret = ((last_close / safe_float(x["Open"].iloc[0], np.nan)) - 1.0) * 100.0 if np.isfinite(last_close) and safe_float(x["Open"].iloc[0], np.nan) else np.nan
+    nifty_ret = np.nan
+    if nifty is not None and not nifty.empty and "Close" in nifty:
+        n = pd.to_numeric(nifty["Close"], errors="coerce").dropna()
+        if len(n) >= 2 and safe_float(n.iloc[0], np.nan):
+            nifty_ret = ((safe_float(n.iloc[-1], np.nan) / safe_float(n.iloc[0], np.nan)) - 1.0) * 100.0
+    out["rsa"] = stock_ret - nifty_ret if np.isfinite(stock_ret) and np.isfinite(nifty_ret) else np.nan
+
+    direction = str(candidate.get("direction", "LONG"))
+    votes = []
+    if direction == "LONG":
+        votes += [out["macd_hist"] > 0, out["supertrend_direction"] == "LONG", out["price_vs_sma20_pct"] > 0, out["rsi"] >= 50, out["rsa"] > 0]
+    else:
+        votes += [out["macd_hist"] < 0, out["supertrend_direction"] == "SHORT", out["price_vs_sma20_pct"] < 0, out["rsi"] <= 50, out["rsa"] < 0]
+    valid = [v for v in votes if isinstance(v, (bool, np.bool_))]
+    out["indicator_alignment"] = float(np.mean(valid) * 100.0) if valid else 50.0
+    return out
+
+
+def _locked_morning_confirmation() -> Dict[str, Any]:
+    latest = load_latest()
+    candidates = latest.get("day_ahead", {}).get("top15", []) if latest else []
+    if not candidates:
+        return {"status": "NO_CANDIDATES", "final": [], "confirmations": []}
+
+    # First run the existing confirmation mathematics on the frozen TOP 15.
+    base = _v7_run_morning_confirmation()
+    confirmations = base.get("confirmations", [])
+
+    # Overlay the existing RSI/MACD/SuperTrend/SMA/ATR/relative-strength
+    # families on the same 09:15-09:20 raw window, then use the overlay only as
+    # a confirmation gate/ranking tie-breaker.
+    nifty = fetch_yahoo_chart(NIFTY_TICKER, days=5, interval="1d")
+    candidate_map = {str(c.get("symbol")): c for c in candidates}
+    for item in confirmations:
+        sym = str(item.get("symbol"))
+        overlay = _morning_indicator_overlay(candidate_map.get(sym, {}), fetch_intraday(sym), nifty)
+        item["morning_indicators"] = overlay
+        item["indicator_alignment_score"] = round(safe_float(overlay.get("indicator_alignment"), 50.0), 2)
+        # Directional conflict is a rejection; neutral/partial alignment remains
+        # subject to the existing confirmation score and acceptance/breakout gates.
+        direction = str(item.get("direction", "LONG"))
+        if overlay.get("indicator_alignment", 50.0) < 40.0:
+            item["status"] = "REJECTED"
+            item["reason"] = "Morning indicator alignment contradicts thesis"
+        elif overlay.get("indicator_alignment", 50.0) >= 80.0:
+            item["confirmation_score"] = clip(safe_float(item.get("confirmation_score"), 0.0) + 5.0)
+            item["indicator_confirmation"] = "STRONG"
+        else:
+            item["indicator_confirmation"] = "PARTIAL"
+
+    required = safe_float(base.get("required_confirmation_score"), MORNING_CONFIRMATION_MIN_SCORE)
+    confirmed = [
+        x for x in confirmations
+        if x.get("status") not in ("REJECTED", "DATA_NOT_READY")
+        and safe_float(x.get("confirmation_score"), 0.0) >= required
+        and (x.get("acceptance") or x.get("breakout"))
+        and safe_float(x.get("indicator_alignment_score"), 0.0) >= 60.0
+    ]
+    confirmed.sort(key=lambda x: (safe_float(x.get("confirmation_score"), 0.0), safe_float(x.get("indicator_alignment_score"), 0.0), safe_float(x.get("previous_day_score"), 0.0)), reverse=True)
+
+    top5_confirmed = confirmed[:5]
+    final = []
+    sector_used = {}
+    for item in top5_confirmed:
+        sec = item.get("sector_bucket", "UNKNOWN")
+        if sector_used.get(sec, 0) >= 1:
+            continue
+        final.append(item)
+        sector_used[sec] = sector_used.get(sec, 0) + 1
+        if len(final) >= 2:
+            break
+    if len(final) < 2:
+        for item in top5_confirmed:
+            if item not in final:
+                final.append(item)
+            if len(final) >= 2:
+                break
+
+    status = "FINAL_2" if len(final) >= 2 else ("FINAL_1" if len(final) == 1 else "NO_TRADE")
+    result = {
+        **base,
+        "status": status,
+        "top5_confirmed": top5_confirmed,
+        "final": final,
+        "confirmations": confirmations,
+        "generated_at": now_ist().isoformat(),
+    }
+    latest["morning_confirmation"] = result
+    _atomic_write_text(CACHE_JSON, json.dumps(latest, ensure_ascii=False, indent=2, default=str))
+    return result
+
+run_morning_confirmation = _locked_morning_confirmation
+NextDayAlphaEngine.run_morning = lambda self: run_morning_confirmation()
+
+run_morning_confirmation = _locked_morning_confirmation
+NextDayAlphaEngine.run_morning = lambda self: run_morning_confirmation()
+
+
+
+def _locked_run_if_due(self) -> Optional[Dict[str, Any]]:
+    current = now_ist()
+    if current.hour > DAY_AHEAD_RUN_HOUR or (current.hour == DAY_AHEAD_RUN_HOUR and current.minute >= DAY_AHEAD_RUN_MINUTE):
+        today = current.strftime("%Y-%m-%d")
+        frozen = _load_frozen_day_ahead_snapshot(today)
+        if frozen:
+            return frozen
+        return build_day_ahead_watchlist()
+    return None
+
+NextDayAlphaEngine.run_if_due = _locked_run_if_due
+
+
+
+# ============================================================================
+# FINAL HARDENED RUNTIME OVERRIDES
+# ============================================================================
+# The historical implementation above is retained for provenance. The block
+# below is the single active runtime contract. It fixes the previously observed
+# ordering/override problems without changing the isolation boundary.
+
+# --- Canonical RAW BUS contract ---------------------------------------------
+SUPABASE_URL = os.getenv("SUPABASE_URL", "").strip().rstrip("/")
+SUPABASE_KEY = os.getenv("SUPABASE_ANON_KEY", os.getenv("SUPABASE_KEY", "")).strip()
+SUPABASE_RAW_TABLE = os.getenv("SUPABASE_RAW_TABLE", "raw_observations").strip()
+SUPABASE_DATASETS = {
+    "daily": os.getenv("NEXT_DAY_SUPABASE_DAILY_DATASET", "nifty500_daily"),
+    "hourly": os.getenv("NEXT_DAY_SUPABASE_MTF_HOURLY_DATASET", "v7_mtf_hourly_requested"),
+    "15m": os.getenv("NEXT_DAY_SUPABASE_MTF_15M_DATASET", "v7_mtf_15m_requested"),
+    "nifty_daily": os.getenv("NEXT_DAY_SUPABASE_NIFTY_DATASET", "nifty_benchmark_daily"),
+    "vix_daily": os.getenv("NEXT_DAY_SUPABASE_VIX_DATASET", "india_vix_daily"),
+}
+
+
+def _nd_canonical(symbol: Any) -> str:
+    s = str(symbol or "").upper().strip()
+    for suffix in (".NS", "-EQ", "_EQ"):
+        if s.endswith(suffix):
+            s = s[:-len(suffix)]
+    return s.strip()
+
+
+def _nd_is_equity(symbol: Any) -> bool:
+    s = _nd_canonical(symbol)
+    if not s:
+        return False
+    if s in {"NIFTY_SPOT", "NIFTY 50", "NIFTY50", "^NSEI", "INDIAVIX", "^INDIAVIX"}:
+        return False
+    # Do not reject ordinary equities merely because their ticker ends in
+    # CE/PE (e.g. RELIANCE). Reject derivative naming only when an expiry/
+    # strike structure is actually present.
+    if "FUT" in s and re.search(r"\d{2}[A-Z]{3}\d+", s):
+        return False
+    if re.search(r"\d{2}[A-Z]{3}\d+(CE|PE)$", s):
+        return False
+    if re.search(r"^NIFTY\d{2}[A-Z]{3}\d+", s) and (s.endswith("CE") or s.endswith("PE")):
+        return False
+    if re.search(r"\d{4,}", s):
+        return False
+    if any(x in s for x in ("BANKNIFTY", "FINNIFTY", "MIDCPNIFTY")):
+        return False
+    return not bool(re.search(r"[^A-Z0-9&._-]", s))
+
+
+# Keep compatibility for every caller in the original file.
+_is_equity_symbol = _nd_is_equity
+_canonical_equity_symbol = _nd_canonical
+
+
+def _nd_raw_headers() -> Dict[str, str]:
+    return {
+        "apikey": SUPABASE_KEY,
+        "Authorization": f"Bearer {SUPABASE_KEY}",
+        "Accept": "application/json",
+    }
+
+
+def _nd_raw(row: Dict[str, Any]) -> Dict[str, Any]:
+    value = row.get("raw")
+    return value if isinstance(value, dict) else {}
+
+
+def _nd_ts(row: Dict[str, Any]) -> Optional[pd.Timestamp]:
+    raw = _nd_raw(row)
+    for value in (
+        raw.get("event_timestamp"), raw.get("timestamp"),
+        raw.get("last_traded_time"), raw.get("received_at"),
+        row.get("observation_timestamp"),
+    ):
+        try:
+            ts = pd.to_datetime(value, errors="coerce", utc=True)
+            if not pd.isna(ts):
+                return ts.tz_convert(IST)
+        except Exception:
+            pass
+    return None
+
+
+def _nd_num(raw: Dict[str, Any], *keys: str, default=np.nan) -> float:
+    for key in keys:
+        if key not in raw:
+            continue
+        try:
+            x = float(raw[key])
+            if np.isfinite(x):
+                return x
+        except Exception:
+            pass
+    return default
+
+
+def _nd_symbol(row: Dict[str, Any]) -> str:
+    raw = _nd_raw(row)
+    return _nd_canonical(row.get("symbol") or raw.get("symbol") or raw.get("display_symbol"))
+
+
+def _nd_bus_read(
+    source: str,
+    dataset: Optional[str] = None,
+    symbols: Optional[List[str]] = None,
+    since: Optional[datetime] = None,
+    until: Optional[datetime] = None,
+    limit: int = 50000,
+) -> List[Dict[str, Any]]:
+    if not SUPABASE_URL or not SUPABASE_KEY:
+        return []
+    wanted = {_nd_canonical(x) for x in (symbols or []) if _nd_is_equity(x)}
+    # RAW producer keeps Yahoo's authoritative symbol spelling (e.g. HDFCBANK.NS).
+    # The engine may use canonical symbols internally, so query every producer
+    # spelling that can represent the same equity before canonical post-filtering.
+    variants = sorted({
+        v
+        for x in wanted
+        for v in (x, f"{x}.NS", f"{x}-EQ", f"{x}_EQ")
+    })
+    rows: List[Dict[str, Any]] = []
+    offset = 0
+    page_size = min(5000, max(500, int(limit)))
+
+    while len(rows) < limit:
+        take = min(page_size, limit - len(rows))
+        params: List[Tuple[str, str]] = [
+            ("select", "*"),
+            ("source", f"eq.{source}"),
+            ("order", "observation_timestamp.asc"),
+            ("limit", str(take)),
+            ("offset", str(offset)),
+        ]
+        if dataset:
+            params.append(("raw->>dataset", f"eq.{dataset}"))
+        if variants:
+            params.append(("symbol", "in.(" + ",".join(variants) + ")"))
+        if since is not None:
+            params.append(("observation_timestamp", f"gte.{since.astimezone(timezone.utc).isoformat()}"))
+        if until is not None:
+            params.append(("observation_timestamp", f"lte.{until.astimezone(timezone.utc).isoformat()}"))
+
+        try:
+            response = requests.get(
+                f"{SUPABASE_URL}/rest/v1/{SUPABASE_RAW_TABLE}",
+                headers=_nd_raw_headers(), params=params, timeout=30,
+            )
+            response.raise_for_status()
+            page = response.json()
+        except Exception as exc:
+            LOGGER.warning("RAW BUS read failed source=%s dataset=%s offset=%s: %s", source, dataset, offset, exc)
+            break
+        if not isinstance(page, list) or not page:
+            break
+        rows.extend(x for x in page if isinstance(x, dict))
+        if len(page) < take:
+            break
+        offset += len(page)
+
+    out = []
+    for row in rows:
+        raw = _nd_raw(row)
+        symbol = _nd_symbol(row)
+        raw_symbol = _nd_canonical(raw.get("symbol") or raw.get("display_symbol") or symbol)
+        if symbol != raw_symbol:
+            continue
+        if wanted and symbol not in wanted:
+            continue
+        # Live source must never leak derivatives into this engine.
+        if source == "kotak_live" and not _nd_is_equity(symbol):
+            continue
+        if dataset and str(raw.get("dataset", "")) != dataset:
+            continue
+        ts = _nd_ts(row)
+        if ts is None:
+            continue
+        if since is not None and ts < pd.Timestamp(since):
+            continue
+        if until is not None and ts > pd.Timestamp(until):
+            continue
+        out.append(row)
+    return out
+
+
+def _nd_frame(rows: List[Dict[str, Any]]) -> pd.DataFrame:
+    records = []
+    for row in rows:
+        raw = _nd_raw(row)
+        ts = _nd_ts(row)
+        if ts is None:
+            continue
+        records.append({
+            "DateTime": ts,
+            "Open": _nd_num(raw, "open", "o", "pOpen", "openPrice"),
+            "High": _nd_num(raw, "high", "h", "pHigh", "highPrice"),
+            "Low": _nd_num(raw, "low", "l", "pLow", "lowPrice"),
+            "Close": _nd_num(raw, "close", "c", "ltp", "lp", "last_price", "lastPrice"),
+            "Volume": _nd_num(raw, "volume", "v", "vol", "tradedVolume", "vtt", default=0.0),
+        })
+    if not records:
+        return pd.DataFrame(columns=["DateTime", "Open", "High", "Low", "Close", "Volume"])
+    x = pd.DataFrame(records)
+    for c in ("Open", "High", "Low", "Close", "Volume"):
+        x[c] = pd.to_numeric(x[c], errors="coerce")
+    return x.dropna(subset=["Open", "High", "Low", "Close"]).sort_values("DateTime").drop_duplicates("DateTime", keep="last").reset_index(drop=True)
+
+
+def _nd_history(symbol: str, days: int = 320, interval: str = "1d") -> pd.DataFrame:
+    s = _nd_canonical(symbol)
+    if s == "NIFTY_SPOT":
+        dataset = SUPABASE_DATASETS["nifty_daily"]
+        symbols = None
+    elif s == "INDIAVIX":
+        dataset = SUPABASE_DATASETS["vix_daily"]
+        symbols = None
+    else:
+        if not _nd_is_equity(s):
+            return pd.DataFrame()
+        dataset = {"1d": SUPABASE_DATASETS["daily"], "1h": SUPABASE_DATASETS["hourly"], "15m": SUPABASE_DATASETS["15m"]}.get(interval)
+        if not dataset:
+            return pd.DataFrame()
+        symbols = [s]
+    end = now_ist()
+    # yfinance_history is the authoritative producer source in the RAW BUS.
+    # Do not use the legacy yahoo_historical source here.
+    rows = _nd_bus_read("yfinance_history", dataset, symbols, end - timedelta(days=int(days)), end, 100000)
+    frame = _nd_frame(rows)
+    if s in ("NIFTY_SPOT", "INDIAVIX") and not frame.empty:
+        # The dataset is authoritative; keep only its market-reference symbol.
+        frame = frame.reset_index(drop=True)
+    return frame
+
+
+def _nd_fetch_daily_window(symbols: List[str], days: int, minimum_rows: int) -> Dict[str, pd.DataFrame]:
+    clean = sorted({_nd_canonical(x) for x in symbols if _nd_is_equity(x)})
+    if not clean:
+        return {}
+    end = now_ist()
+    rows = _nd_bus_read("yahoo_historical", SUPABASE_DATASETS["daily"], clean, end - timedelta(days=days), end, 150000)
+    grouped: Dict[str, List[Dict[str, Any]]] = {}
+    for row in rows:
+        s = _nd_symbol(row)
+        if s in clean:
+            grouped.setdefault(s, []).append(row)
+    return {s: _nd_frame(rs) for s, rs in grouped.items() if len(_nd_frame(rs)) >= minimum_rows}
+
+
+def fetch_yahoo_chart(ticker: str, days: int = 320, interval: str = "1d") -> pd.DataFrame:
+    t = str(ticker).upper().strip()
+    if t == "^NSEI":
+        return _nd_history("NIFTY_SPOT", days, interval)
+    if t == "^INDIAVIX":
+        return _nd_history("INDIAVIX", days, interval)
+    return _nd_history(_nd_canonical(t), days, interval)
+
+
+def fetch_history(symbols: List[str], days: int = 320) -> Dict[str, pd.DataFrame]:
+    data = _nd_fetch_daily_window(symbols, days, MIN_HISTORY_DAYS)
+    return {s: df for s, df in data.items() if _nd_is_equity(s) and len(df) >= MIN_HISTORY_DAYS}
+
+
+# --- Correct indicator math --------------------------------------------------
+
+def _nd_slope_norm(series: pd.Series, n: int, atr_value: float) -> float:
+    y = pd.to_numeric(series, errors="coerce").dropna().tail(n)
+    if len(y) < 3 or not np.isfinite(atr_value) or atr_value <= 0:
+        return np.nan
+    xx = np.arange(len(y), dtype=float)
+    return float(np.polyfit(xx, y.to_numpy(dtype=float), 1)[0]) / atr_value
+
+
+def _nd_structure(df: pd.DataFrame, window: int = 5) -> Dict[str, Any]:
+    if len(df) < window * 4:
+        return {"Structure": "NEUTRAL", "StructureStrength": 50.0, "HHHL": 0, "LHLL": 0}
+    h = pd.to_numeric(df["High"], errors="coerce")
+    l = pd.to_numeric(df["Low"], errors="coerce")
+    ph, rh = h.iloc[-2*window:-window].max(), h.iloc[-window:].max()
+    pl, rl = l.iloc[-2*window:-window].min(), l.iloc[-window:].min()
+    hh, hl = rh > ph, rl > pl
+    lh, ll = rh < ph, rl < pl
+    if hh and hl: return {"Structure":"LONG","StructureStrength":90.0,"HHHL":1,"LHLL":0}
+    if lh and ll: return {"Structure":"SHORT","StructureStrength":90.0,"HHHL":0,"LHLL":1}
+    if hh or hl: return {"Structure":"LONG","StructureStrength":68.0,"HHHL":int(hh),"LHLL":0}
+    if lh or ll: return {"Structure":"SHORT","StructureStrength":68.0,"HHHL":0,"LHLL":int(lh or ll)}
+    return {"Structure":"NEUTRAL","StructureStrength":50.0,"HHHL":0,"LHLL":0}
+
+
+def build_features(symbol: str, df: pd.DataFrame, benchmark: Optional[pd.DataFrame], industry: str) -> Optional[Dict[str, Any]]:
+    s = _nd_canonical(symbol)
+    if not _nd_is_equity(s) or df is None or len(df) < MIN_HISTORY_DAYS:
+        return None
+    d = df.copy()
+    for c in ("Open","High","Low","Close","Volume"):
+        d[c] = pd.to_numeric(d[c], errors="coerce")
+    d = d.dropna(subset=["Open","High","Low","Close"]).sort_values("DateTime").drop_duplicates("DateTime", keep="last").reset_index(drop=True)
+    if len(d) < MIN_HISTORY_DAYS:
+        return None
+
+    c = d["Close"]
+    d["EMA20"], d["EMA50"], d["EMA200"] = ema(c,20), ema(c,50), ema(c,200)
+    d["ATR14"] = atr(d,14)
+    d["ATRpct"] = d["ATR14"] / c * 100.0
+    d["ADX14"], d["PlusDI"], d["MinusDI"] = adx(d,14)
+    d["SuperTrendDirection"] = supertrend_direction(d,10,3.0)
+    d["RSI14"] = rsi(c,14)
+    d["MACD"], d["MACDSignal"], d["MACDHist"] = macd(c)
+    d["RangePct"] = (d["High"]-d["Low"]) / c * 100.0
+    d["Turnover"] = c * d["Volume"].fillna(0.0)
+
+    last = d.iloc[-1]
+    close = safe_float(last["Close"])
+    avg_turnover = safe_float(d["Turnover"].tail(20).mean() / 1e7)
+    avg_volume = safe_float(d["Volume"].tail(20).mean())
+    if not np.isfinite(close) or close < MIN_PRICE or avg_turnover < MIN_AVG_TURNOVER_CR or avg_volume < MIN_AVG_VOLUME:
+        return None
+
+    def ret(n):
+        return _return_pct(c,n)
+    ret1, ret5, ret20, ret60 = ret(1), ret(5), ret(20), ret(60)
+
+    nr1 = nr5 = nr20 = np.nan
+    if benchmark is not None and len(benchmark) >= 70:
+        bc = pd.to_numeric(benchmark["Close"], errors="coerce").dropna()
+        nr1, nr5, nr20 = _return_pct(bc,1), _return_pct(bc,5), _return_pct(bc,20)
+    rs1 = ret1-nr1 if np.isfinite(ret1) and np.isfinite(nr1) else np.nan
+    rs5 = ret5-nr5 if np.isfinite(ret5) and np.isfinite(nr5) else np.nan
+    rs20 = ret20-nr20 if np.isfinite(ret20) and np.isfinite(nr20) else np.nan
+
+    a14 = safe_float(last["ATR14"])
+    ema20v, ema50v, ema200v = safe_float(last["EMA20"]), safe_float(last["EMA50"]), safe_float(last["EMA200"])
+    slope20 = _nd_slope_norm(d["EMA20"],5,a14)
+    slope50 = _nd_slope_norm(d["EMA50"],5,a14)
+    slope200 = _nd_slope_norm(d["EMA200"],10,a14)
+    structure = _nd_structure(d,5)
+
+    p20h, p20l = d["High"].iloc[-21:-1].max(), d["Low"].iloc[-21:-1].min()
+    p60h, p60l = d["High"].iloc[-61:-1].max(), d["Low"].iloc[-61:-1].min()
+    b20u, b20d = int(close > p20h), int(close < p20l)
+    b60u, b60d = int(close > p60h), int(close < p60l)
+
+    av20, av5 = d["Volume"].iloc[-21:-1].mean(), d["Volume"].iloc[-6:-1].mean()
+    latest_vol = safe_float(last["Volume"],0)
+    vr20 = latest_vol/av20 if np.isfinite(av20) and av20>0 else np.nan
+    vr5 = latest_vol/av5 if np.isfinite(av5) and av5>0 else np.nan
+    atr20 = d["ATRpct"].iloc[-21:-1].mean()
+    expansion = safe_float(last["ATRpct"])/atr20 if np.isfinite(atr20) and atr20>0 else np.nan
+
+    row = {
+        "LTP":close,"EMA20":ema20v,"EMA50":ema50v,"EMA200":ema200v,
+        "EMA20SlopeNorm":slope20,"EMA50SlopeNorm":slope50,"EMA200SlopeNorm":slope200,
+        "ADX14":safe_float(last["ADX14"]),"PlusDI":safe_float(last["PlusDI"]),"MinusDI":safe_float(last["MinusDI"]),
+        "SuperTrendDirection":safe_float(last["SuperTrendDirection"],0),"Structure":structure["Structure"],
+        "Breakout20Up":b20u,"Breakout20Down":b20d,"Breakout60Up":b60u,"Breakout60Down":b60d,
+    }
+    long_checks = [close>ema20v if np.isfinite(ema20v) else False, close>ema50v if np.isfinite(ema50v) else False, close>ema200v if np.isfinite(ema200v) else False, slope20>0 if np.isfinite(slope20) else False, slope50>0 if np.isfinite(slope50) else False, safe_float(last["ADX14"])>=20 and safe_float(last["PlusDI"])>safe_float(last["MinusDI"]), safe_float(last["SuperTrendDirection"])>0, structure["Structure"]=="LONG", bool(b20u or b60u)]
+    short_checks = [close<ema20v if np.isfinite(ema20v) else False, close<ema50v if np.isfinite(ema50v) else False, close<ema200v if np.isfinite(ema200v) else False, slope20<0 if np.isfinite(slope20) else False, slope50<0 if np.isfinite(slope50) else False, safe_float(last["ADX14"])>=20 and safe_float(last["MinusDI"])>safe_float(last["PlusDI"]), safe_float(last["SuperTrendDirection"])<0, structure["Structure"]=="SHORT", bool(b20d or b60d)]
+    long_pct, short_pct = np.mean(long_checks)*100.0, np.mean(short_checks)*100.0
+    direction = "LONG" if long_pct >= short_pct+12 else "SHORT" if short_pct >= long_pct+12 else "NEUTRAL"
+
+    return {"Symbol":s,"Industry":industry or "UNKNOWN","LTP":close,"AvgTurnoverCr":avg_turnover,"AvgVolume20":avg_volume,"Ret1D":ret1,"Ret5D":ret5,"Ret20D":ret20,"Ret60D":ret60,"NiftyRet1D":nr1,"NiftyRet5D":nr5,"NiftyRet20D":nr20,"RS1D":rs1,"RS5D":rs5,"RS20D":rs20,"EMA20":ema20v,"EMA50":ema50v,"EMA200":ema200v,"AboveEMA20":int(np.isfinite(ema20v) and close>ema20v),"AboveEMA50":int(np.isfinite(ema50v) and close>ema50v),"AboveEMA200":int(np.isfinite(ema200v) and close>ema200v),"EMA20SlopeNorm":slope20,"EMA50SlopeNorm":slope50,"EMA200SlopeNorm":slope200,"ATR14":a14,"ATRpct":safe_float(last["ATRpct"]),"ATRExpansion":expansion,"RangePct":safe_float(last["RangePct"]),"RSI14":safe_float(last["RSI14"]),"MACD":safe_float(last["MACD"]),"MACDSignal":safe_float(last["MACDSignal"]),"MACDHist":safe_float(last["MACDHist"]),"ADX14":safe_float(last["ADX14"]),"PlusDI":safe_float(last["PlusDI"]),"MinusDI":safe_float(last["MinusDI"]),"SuperTrendDirection":int(safe_float(last["SuperTrendDirection"],0)),**structure,"Breakout20Up":b20u,"Breakout20Down":b20d,"Breakout60Up":b60u,"Breakout60Down":b60d,"VolumeRatio20":vr20,"VolumeRatio5":vr5,"LongVotes":sum(long_checks),"ShortVotes":sum(short_checks),"LongVotePct":long_pct,"ShortVotePct":short_pct,"Direction":direction}
+
+
+def _nd_score_candidates(frame: pd.DataFrame) -> pd.DataFrame:
+    if frame.empty:
+        return frame
+    x = frame.copy()
+    x["StockVsSector5D"] = x["Ret5D"] - x["SectorRet5D"]
+    x["StockVsSector20D"] = x["Ret20D"] - x["SectorRet20D"]
+    rows=[]
+    for _, r in x.iterrows():
+        direction=str(r.get("Direction","NEUTRAL"))
+        if direction not in ("LONG","SHORT"):
+            continue
+        sign=1 if direction=="LONG" else -1
+        align=np.mean([r.get("AboveEMA20",0) if sign>0 else 1-r.get("AboveEMA20",0), r.get("AboveEMA50",0) if sign>0 else 1-r.get("AboveEMA50",0), r.get("AboveEMA200",0) if sign>0 else 1-r.get("AboveEMA200",0)])*100
+        slope_score=safe_mean([clip(50+safe_float(r.get("EMA20SlopeNorm"))*sign*35),clip(50+safe_float(r.get("EMA50SlopeNorm"))*sign*35),clip(50+safe_float(r.get("EMA200SlopeNorm"))*sign*25)],50)
+        adxv=safe_float(r.get("ADX14")); diok=(safe_float(r.get("PlusDI"))>safe_float(r.get("MinusDI"))) if sign>0 else (safe_float(r.get("MinusDI"))>safe_float(r.get("PlusDI")))
+        adxscore=clip(45+max(adxv-15,0)*2.75) if np.isfinite(adxv) else 50
+        trend=clip(.25*align+.20*slope_score+.20*adxscore+.15*(90 if diok else 20)+.10*(90 if sign*safe_float(r.get("SuperTrendDirection"),0)>0 else 20)+.10*(safe_float(r.get("StructureStrength"),50) if r.get("Structure")==direction else 100-safe_float(r.get("StructureStrength"),50)))
+        retcomp=safe_mean([safe_float(r.get("Ret1D"))*.30,safe_float(r.get("Ret5D"))*.45,safe_float(r.get("Ret20D"))*.25])
+        ret_score=clip(50+retcomp*sign*10)
+        rv=safe_float(r.get("RSI14"));
+        if not np.isfinite(rv): rsis=50
+        elif direction=="LONG": rsis=90 if 60<=rv<=70 else clip(50+(rv-50)*1.3) if rv<=75 else max(30,70-(rv-75)*4)
+        else: rsis=90 if 30<=rv<=40 else clip(50+(50-rv)*1.3) if rv>=25 else max(30,70-(25-rv)*4)
+        macdh=safe_float(r.get("MACDHist")); a=safe_float(r.get("ATR14")); macds=clip(50+(macdh/a if np.isfinite(macdh) and np.isfinite(a) and a>0 else 0)*sign*80)
+        momentum=clip(.38*ret_score+.32*rsis+.30*macds)
+        rsval=safe_mean([r.get("RS1D"),r.get("RS5D"),r.get("RS20D"),r.get("StockVsSector5D"),r.get("StockVsSector20D")],0); relative=clip(50+rsval*sign*14)
+        sec_ret=safe_mean([r.get("SectorRet1D"),r.get("SectorRet5D"),r.get("SectorRet20D")],0); sec_rs=safe_mean([r.get("SectorRS5D"),r.get("SectorRS20D")],0); breadth=safe_float(r.get("SectorLongBreadth" if sign>0 else "SectorShortBreadth"),50); sector=clip(.35*clip(50+sec_ret*10*sign)+.30*clip(50+sec_rs*14*sign)+.35*breadth)
+        ratios=[safe_float(r.get("VolumeRatio20")),safe_float(r.get("VolumeRatio5"))]; volume=safe_mean([clip(50+math.log(max(v,.05))*30) for v in ratios if np.isfinite(v) and v>0],50)
+        ap=safe_float(r.get("ATRpct")); ex=safe_float(r.get("ATRExpansion"));
+        if not np.isfinite(ap): volat=50
+        elif ap<MIN_ATR_PCT: volat=35
+        elif ap<=4.5: volat=88
+        elif ap<=MAX_ATR_PCT: volat=88-(ap-4.5)*7
+        else: volat=20
+        if np.isfinite(ex): volat += 8 if 1.05<=ex<=1.8 else -15 if ex>2.5 else -8 if ex<.75 else 0
+        volatility=clip(volat)
+        b=int(r.get("Breakout20Up" if sign>0 else "Breakout20Down",0))+int(r.get("Breakout60Up" if sign>0 else "Breakout60Down",0)); setup=clip(.60*(safe_float(r.get("StructureStrength"),50) if r.get("Structure")==direction else 100-safe_float(r.get("StructureStrength"),50))+.40*clip(50+b*25))
+        penalty=0; one=abs(safe_float(r.get("Ret1D"),0));
+        if np.isfinite(ap) and ap>MAX_ATR_PCT: penalty+=18
+        if one>5: penalty+=min(15,(one-5)*3)
+        if np.isfinite(safe_float(r.get("VolumeRatio20"))) and safe_float(r.get("VolumeRatio20"))<.65: penalty+=10
+        if relative<38: penalty+=14
+        if sector<38: penalty+=14
+        if direction!=r.get("Direction"): penalty+=12
+        if direction=="LONG" and np.isfinite(rv) and rv>82: penalty+=10
+        if direction=="SHORT" and np.isfinite(rv) and rv<18: penalty+=10
+        anti=clip(100-penalty)
+        cat=catalyst_for_symbol(str(r["Symbol"]))
+        catalyst=safe_float(cat.get("CatalystScore"),50); cd=str(cat.get("CatalystDirection","UNKNOWN"));
+        if (direction=="LONG" and cd=="BEARISH") or (direction=="SHORT" and cd=="BULLISH"): catalyst=100-catalyst
+        base=trend*.20+momentum*.15+relative*.20+sector*.10+volume*.10+volatility*.08+catalyst*.07+setup*.10
+        score=clip(base*(.78+.22*anti/100))
+        setup_type="RELATIVE_STRENGTH_BREAKOUT" if setup>=75 and relative>=70 and direction=="LONG" else "RELATIVE_WEAKNESS_BREAKDOWN" if setup>=75 and relative>=70 else "TREND_CONTINUATION" if trend>=78 and momentum>=68 else "VOLATILITY_EXPANSION" if volatility>=78 and volume>=70 else "CATALYST_MOMENTUM" if catalyst>=72 and momentum>=65 else "BREAKOUT" if (r.get("Breakout20Up") or r.get("Breakout20Down")) else "STRUCTURED_MOMENTUM"
+        out=r.to_dict(); out.update({"TrendScore":trend,"MomentumScore":momentum,"RelativeStrengthScore":relative,"SectorScore":sector,"VolumeScore":volume,"VolatilityScore":volatility,"SetupScore":setup,"CatalystScoreFinal":catalyst,"CatalystDirection":cd,"CatalystCount":cat.get("CatalystCount",0),"CatalystText":cat.get("CatalystText",""),"CatalystSources":cat.get("CatalystSources",[]),"AntiFalsePositiveScore":anti,"DayAheadScore":score,"SetupType":setup_type}); rows.append(out)
+    return pd.DataFrame(rows).sort_values(["DayAheadScore","RelativeStrengthScore"],ascending=False).reset_index(drop=True) if rows else pd.DataFrame()
+
+
+# --- Structural MTF hardening ------------------------------------------------
+def _nd_mtf_fetch(symbol: str) -> Dict[str, Any]:
+    daily=_nd_history(symbol,420,"1d"); hourly=_nd_history(symbol,180,"1h"); mins15=_nd_history(symbol,55,"15m")
+    frames={"W":_resample_ohlc(daily,"W-FRI"),"D":daily,"4H":_resample_ohlc(hourly,"4h"),"1H":hourly,"15M":mins15}
+    levels={}; parts=[]
+    for tf,frame in frames.items():
+        lv=_local_levels(frame) if frame is not None and not frame.empty else {"support":np.nan,"resistance":np.nan,"atr":np.nan}
+        pat,ps=_mw_pattern(frame) if frame is not None and not frame.empty else ("NONE",0)
+        lv.update({"pattern":pat,"pattern_score":ps}); levels[tf]=lv; parts.append(25 if pat=="M_TOP" else 75 if pat=="W_BOTTOM" else 50)
+    return {"symbol":symbol,"mtf":levels,"mtf_score":float(np.mean(parts)) if parts else 50.0}
+
+
+def _nd_directional_mtf(row: pd.Series, mtf: Dict[str, Any]) -> Dict[str, Any]:
+    direction=str(row.get("Direction","NEUTRAL")); price=safe_float(row.get("LTP")); av=safe_float(row.get("ATR14"));
+    if not np.isfinite(av) or av<=0:
+        ap=safe_float(row.get("ATRpct")); av=price*ap/100 if np.isfinite(price) and np.isfinite(ap) else np.nan
+    supports=[]; resistances=[]; conflicts=0; supports_count=0
+    for lv in mtf.values():
+        s=safe_float(lv.get("support")); r=safe_float(lv.get("resistance"));
+        if np.isfinite(s) and np.isfinite(price) and s<price: supports.append(s)
+        if np.isfinite(r) and np.isfinite(price) and r>price: resistances.append(r)
+        p=lv.get("pattern")
+        if direction=="LONG": conflicts+=p=="M_TOP"; supports_count+=p=="W_BOTTOM"
+        elif direction=="SHORT": conflicts+=p=="W_BOTTOM"; supports_count+=p=="M_TOP"
+    ss=max(supports) if supports else np.nan; rr=min(resistances) if resistances else np.nan; minrisk=max(1.0*av,.25*av) if np.isfinite(av) and av>0 else np.nan
+    if direction=="LONG":
+        risk=price-ss if np.isfinite(price) and np.isfinite(ss) else np.nan
+        if not np.isfinite(risk) or not np.isfinite(minrisk) or risk<minrisk: stop=price-minrisk if np.isfinite(price) and np.isfinite(minrisk) else np.nan; risk=minrisk; source="ATR_FLOOR"
+        else: stop=ss; source="STRUCTURAL_SR"
+        target=rr if np.isfinite(rr) else price*0+price+2*av if np.isfinite(price) and np.isfinite(av) else np.nan; reward=target-price if np.isfinite(target) else np.nan
+    elif direction=="SHORT":
+        risk=rr-price if np.isfinite(price) and np.isfinite(rr) else np.nan
+        if not np.isfinite(risk) or not np.isfinite(minrisk) or risk<minrisk: stop=price+minrisk if np.isfinite(price) and np.isfinite(minrisk) else np.nan; risk=minrisk; source="ATR_FLOOR"
+        else: stop=rr; source="STRUCTURAL_SR"
+        target=ss if np.isfinite(ss) else price-2*av if np.isfinite(price) and np.isfinite(av) else np.nan; reward=price-target if np.isfinite(target) else np.nan
+    else:
+        return {"mtf_score":50.0,"support":ss,"resistance":rr,"invalidation":np.nan,"target":np.nan,"risk_points":np.nan,"reward_points":np.nan,"rr":np.nan,"invalidation_atr":np.nan,"hard_rr_pass":False,"pattern_conflicts":conflicts,"pattern_supports":supports_count}
+    rratio=reward/risk if np.isfinite(reward) and np.isfinite(risk) and risk>0 else np.nan; invatr=risk/av if np.isfinite(risk) and np.isfinite(av) and av>0 else np.nan
+    score=clip(50+supports_count*6-conflicts*9)
+    hard=bool(np.isfinite(rratio) and rratio>=V7_MIN_RR and np.isfinite(invatr) and V7_MIN_INVALIDATION_DISTANCE_ATR<=invatr<=V7_MAX_INVALIDATION_DISTANCE_ATR)
+    return {"mtf_score":score,"support":ss,"resistance":rr,"invalidation":stop,"invalidation_source":source,"target":target,"risk_points":risk,"reward_points":reward,"rr":rratio,"invalidation_atr":invatr,"hard_rr_pass":hard,"pattern_conflicts":conflicts,"pattern_supports":supports_count}
+
+
+def _nd_enrich(basket: pd.DataFrame) -> pd.DataFrame:
+    if basket.empty: return basket
+    jobs={}
+    with ThreadPoolExecutor(max_workers=V7_MTF_THREADS) as pool:
+        for s in basket["Symbol"].astype(str): jobs[s]=pool.submit(_nd_mtf_fetch,s)
+        rows=[]
+        for _,r in basket.iterrows():
+            m=jobs[str(r["Symbol"])].result(); risk=_nd_directional_mtf(r,m.get("mtf",{})); out=r.to_dict(); out.update(risk); out["MTF"]=m.get("mtf",{}); out["V7Score"]=clip(safe_float(out.get("DayAheadScore"))*0.72+safe_float(risk.get("mtf_score"),50)*0.18+safe_float(out.get("AntiFalsePositiveScore"),50)*0.10); rows.append(out)
+    return pd.DataFrame(rows).sort_values(["V7Score","DayAheadScore"],ascending=False).reset_index(drop=True)
+
+
+def _nd_select_top15(enriched: pd.DataFrame) -> pd.DataFrame:
+    if enriched.empty: return enriched
+    x=enriched[enriched["Direction"].isin(["LONG","SHORT"])].copy(); x=x[x["DayAheadScore"]>=DAY_AHEAD_MIN_SCORE]; x=x[x["hard_rr_pass"]==True]
+    if x.empty: return x
+    selected=[]; counts={}
+    for _,r in x.iterrows():
+        sec=_sector_bucket(r.get("Industry"));
+        if counts.get(sec,0)>=2: continue
+        z=r.copy(); z["SelectionScore"]=safe_float(r["V7Score"])-(SECTOR_REPEAT_PENALTY if counts.get(sec,0)>=1 else 0); selected.append(z); counts[sec]=counts.get(sec,0)+1
+        if len(selected)>=DAY_AHEAD_TOP_N: break
+    if len(selected)<DAY_AHEAD_TOP_N:
+        used={str(r["Symbol"]) for r in selected}
+        for _,r in x.iterrows():
+            if str(r["Symbol"]) in used: continue
+            z=r.copy(); z["SelectionScore"]=safe_float(r["V7Score"]); selected.append(z); used.add(str(r["Symbol"]))
+            if len(selected)>=DAY_AHEAD_TOP_N: break
+    return pd.DataFrame(selected).sort_values(["SelectionScore","V7Score"],ascending=False).head(DAY_AHEAD_TOP_N).reset_index(drop=True)
+
+
+def _nd_vix() -> Dict[str, Any]:
+    v=_nd_history("INDIAVIX",320,"1d")
+    if v.empty: return {"status":"UNAVAILABLE","directional_predictor":False}
+    c=pd.to_numeric(v["Close"],errors="coerce").dropna(); level=safe_float(c.iloc[-1]); prev=safe_float(c.iloc[-6]) if len(c)>=6 else np.nan; change=(level/prev-1)*100 if np.isfinite(prev) and prev else np.nan
+    regime="HIGH_VOLATILITY" if level>=VIX_HIGH or (np.isfinite(change) and change>=VIX_SPIKE_PCT) else "CAUTION" if level>=VIX_CAUTION else "NORMAL"
+    return {"status":"OK","level":round(level,3),"change_5d_pct":round(change,3) if np.isfinite(change) else None,"percentile":round(float((c<=level).mean()*100),2),"regime":regime,"confirmation_bonus":5.0 if regime=="HIGH_VOLATILITY" else 2.0 if regime=="CAUTION" else 0.0,"risk_multiplier":.65 if regime=="HIGH_VOLATILITY" else .80 if regime=="CAUTION" else 1.0,"directional_predictor":False}
+
+
+def build_day_ahead_watchlist() -> Dict[str, Any]:
+    validate_config()
+    timestamp=now_ist(); universe=_clean_universe(load_nifty500_universe())
+    symbols=[_nd_canonical(s) for s in universe["Symbol"].astype(str) if _nd_is_equity(s)]
+    benchmark=_nd_history("NIFTY_SPOT",320,"1d")
+    if benchmark.empty or len(benchmark)<70: raise RuntimeError("RAW BUS: insufficient NIFTY spot history")
+
+    short=_nd_fetch_daily_window(symbols,14,VOLUME_SHOCKER_LOOKBACK_DAYS)
+    shock=[]; shock_profiles={}
+    for s,df in short.items():
+        prof=_volume_shocker_profile(df)
+        if prof: shock.append((s,prof["volume_shock_score"])); shock_profiles[s]=prof
+    shock.sort(key=lambda z:(-z[1],z[0])); shock_symbols=[s for s,_ in shock]
+    if not shock_symbols: raise RuntimeError("Volume Shocker gate produced no qualifying equities")
+
+    major_hist=_nd_fetch_daily_window(shock_symbols,60,5); major=[]; major_profiles={}
+    for s,df in major_hist.items():
+        close=safe_float(df["Close"].iloc[-1]); av=safe_float(df["Volume"].tail(20).mean()); turn=safe_float((df["Close"].tail(20)*df["Volume"].tail(20)).mean()/1e7)
+        if np.isfinite(close) and close>=MIN_PRICE and np.isfinite(av) and av>=MIN_AVG_VOLUME and np.isfinite(turn) and turn>=MIN_AVG_TURNOVER_CR:
+            major.append((s,shock_profiles.get(s,{}).get("volume_shock_score",0))); major_profiles[s]={**shock_profiles.get(s,{}),"avg_volume_20":av,"avg_turnover_20_cr":turn,"last_close":close}
+    major.sort(key=lambda z:(-z[1],z[0])); major_symbols=[s for s,_ in major[:MAJOR_FILTER_MAX_CANDIDATES]]
+    if not major_symbols: raise RuntimeError("Major liquidity filter produced no qualifying equities")
+
+    histories=_nd_fetch_daily_window(major_symbols,420,MIN_HISTORY_DAYS)
+    lookup=universe.drop_duplicates("Symbol").set_index("Symbol")
+    rows=[]
+    for s,df in histories.items():
+        try: industry=str(lookup.loc[s,"Industry"])
+        except Exception: industry="UNKNOWN"
+        f=build_features(s,df,benchmark,industry)
+        if f: f.update({**shock_profiles.get(s,{}),**major_profiles.get(s,{})}); rows.append(f)
+    if not rows: raise RuntimeError("No usable stocks survived full indicator evaluation")
+    frame=add_sector_features(pd.DataFrame(rows)); scored=_nd_score_candidates(frame)
+    if scored.empty: raise RuntimeError("No directional candidate survived scoring")
+    enriched=_nd_enrich(scored.head(MAJOR_FILTER_MAX_CANDIDATES)); vix=_nd_vix(); top=_nd_select_top15(enriched)
+
+    candidates=[]
+    for rank,(_,r) in enumerate(top.iterrows(),1):
+        if not _nd_is_equity(r["Symbol"]): continue
+        d=r.to_dict(); candidates.append({"rank":rank,"symbol":str(r["Symbol"]),"industry":str(r.get("Industry","UNKNOWN")),"sector_bucket":_sector_bucket(r.get("Industry")),"direction":str(r["Direction"]),"day_ahead_score":round(safe_float(r.get("DayAheadScore")),2),"v7_score":round(safe_float(r.get("V7Score")),2),"selection_score":round(safe_float(r.get("SelectionScore",r.get("V7Score"))),2),"setup_type":str(r.get("SetupType","UNKNOWN")),"trend_score":round(safe_float(r.get("TrendScore"),50),2),"momentum_score":round(safe_float(r.get("MomentumScore"),50),2),"relative_strength_score":round(safe_float(r.get("RelativeStrengthScore"),50),2),"sector_score":round(safe_float(r.get("SectorScore"),50),2),"volume_score":round(safe_float(r.get("VolumeScore"),50),2),"volatility_score":round(safe_float(r.get("VolatilityScore"),50),2),"catalyst_score":round(safe_float(r.get("CatalystScoreFinal"),50),2),"anti_false_positive_score":round(safe_float(r.get("AntiFalsePositiveScore"),50),2),"ltp":round(safe_float(r.get("LTP")),2),"atr14":round(safe_float(r.get("ATR14")),4),"atr_pct":round(safe_float(r.get("ATRpct")),3),"ret_1d":round(safe_float(r.get("Ret1D")),3),"ret_5d":round(safe_float(r.get("Ret5D")),3),"ret_20d":round(safe_float(r.get("Ret20D")),3),"rs_5d":round(safe_float(r.get("RS5D")),3),"rs_20d":round(safe_float(r.get("RS20D")),3),"volume_shock_score":round(safe_float(r.get("volume_shock_score")),2),"volume_shock_consecutive_days":int(safe_float(r.get("volume_shock_consecutive_days"),0)),"mtf_score":round(safe_float(r.get("mtf_score"),50),2),"support":safe_float(r.get("support")),"resistance":safe_float(r.get("resistance")),"invalidation":safe_float(r.get("invalidation")),"target":safe_float(r.get("target")),"rr":round(safe_float(r.get("rr")),3),"invalidation_atr":round(safe_float(r.get("invalidation_atr")),3),"hard_rr_pass":bool(r.get("hard_rr_pass",False)),"catalyst_direction":str(r.get("CatalystDirection","UNKNOWN")),"catalyst_count":int(safe_float(r.get("CatalystCount"),0)),"catalyst_text":str(r.get("CatalystText","")),"macro_vix_regime":vix.get("regime","UNAVAILABLE"),"thesis":f"{r['Direction']} thesis from independent quantitative stock-selection calculations; morning confirmation remains mandatory.","invalidation_rule":"Structural S/R or ATR floor; hard R:R gate applies."})
+
+    result={"engine":"NEXT_DAY_ALPHA_ENGINE","version":VERSION+"_LOCKED","generated_at":timestamp.isoformat(),"data_as_of":timestamp.strftime("%Y-%m-%d"),"architecture":{"raw_bus":"SUPABASE","raw_table":SUPABASE_RAW_TABLE,"historical":"yahoo_historical_via_raw_bus","live":"kotak_live_via_raw_bus","nifty_3min_engine_modified":False,"shared_calculated_features":False,"shared_scores":False,"shared_regime_decisions":False,"shared_labels":False,"shared_predictions":False,"shared_decisions":False,"option_selection":False},"pipeline":{"universe":len(symbols),"volume_shocker_survivors":len(shock_symbols),"major_filter_survivors":len(major_symbols),"full_history_survivors":len(histories),"indicator_scored":len(scored),"mtf_enriched":len(enriched),"hard_rr_survivors":int(enriched["hard_rr_pass"].sum()) if "hard_rr_pass" in enriched else 0},"macro_regime":vix,"day_ahead":{"universe_size":len(symbols),"top15_count":len(candidates),"top15":candidates,"top5_count":len(candidates),"top5":candidates},"morning_confirmation":{"status":"PENDING","final":[],"confirmations":[]},"probability_note":"Quality/ranking score only; not a calibrated win probability."}
+    _atomic_write_text(CACHE_JSON,json.dumps(result,ensure_ascii=False,indent=2,default=str)); _freeze_day_ahead_snapshot(result); _atomic_write_text(AUDIT_FILE,json.dumps(result["pipeline"],indent=2))
+    return result
+
+
+# --- Day-ahead execution status / failure audit -----------------------------
+# The dashboard must distinguish "not run yet" from "ran and failed".
+_ORIGINAL_BUILD_DAY_AHEAD_WATCHLIST = build_day_ahead_watchlist
+
+def _write_day_ahead_status(status: str, error: str = "", result: Optional[Dict[str, Any]] = None) -> None:
+    payload = {
+        "status": status,
+        "updated_at": now_ist().isoformat(),
+        "trading_date": now_ist().strftime("%Y-%m-%d"),
+        "error": error,
+        "snapshot_exists": _day_ahead_snapshot_paths(now_ist().strftime("%Y-%m-%d"))[0].exists(),
+    }
+    if result:
+        payload["top15_count"] = len(result.get("day_ahead", {}).get("top15", []))
+    try:
+        _atomic_write_text(DAY_AHEAD_STATUS_JSON, json.dumps(payload, ensure_ascii=True, indent=2, default=str))
+    except Exception:
+        LOGGER.exception("Unable to write day-ahead status")
+
+def _build_day_ahead_watchlist_safe() -> Dict[str, Any]:
+    try:
+        result = _ORIGINAL_BUILD_DAY_AHEAD_WATCHLIST()
+        _write_day_ahead_status("SUCCESS", result=result)
+        return result
+    except Exception as exc:
+        _write_day_ahead_status("FAILED", error=str(exc))
+        LOGGER.exception("Day-ahead scan failed")
+        raise
+
+build_day_ahead_watchlist = _build_day_ahead_watchlist_safe
+
+
+def day_ahead_status() -> Dict[str, Any]:
+    """Return execution/snapshot status for the current trading date."""
+    today = now_ist().strftime("%Y-%m-%d")
+    snapshot = _load_frozen_day_ahead_snapshot(today)
+    status = {}
+    try:
+        if DAY_AHEAD_STATUS_JSON.exists():
+            with DAY_AHEAD_STATUS_JSON.open("r", encoding="utf-8") as fh:
+                raw = json.load(fh)
+                if isinstance(raw, dict):
+                    status = raw
+    except Exception:
+        status = {}
+    status["trading_date"] = today
+    status["snapshot_exists"] = bool(snapshot)
+    status["snapshot_top15_count"] = len(snapshot.get("day_ahead", {}).get("top15", [])) if snapshot else 0
+    if snapshot:
+        status["status"] = "SNAPSHOT_READY"
+    elif status.get("status") not in {"FAILED"}:
+        status["status"] = "NOT_RUN"
+    return status
+
+
+# --- Live RAW BUS aggregation ------------------------------------------------
+def _nd_live_bars(symbol: str, start: datetime, end: datetime) -> pd.DataFrame:
+    rows=_nd_bus_read("kotak_live",None,[symbol],start,end,30000)
+    records=[]
+    for row in rows:
+        raw=_nd_raw(row); ts=_nd_ts(row); ltp=_nd_num(raw,"ltp","lp","last_price","lastPrice","c")
+        if ts is None or not np.isfinite(ltp) or ltp<=0: continue
+        records.append({"DateTime":ts,"LTP":ltp,"VolumeRaw":_nd_num(raw,"volume","v","tradedVolume","vtt",default=np.nan)})
+    if not records: return pd.DataFrame()
+    x=pd.DataFrame(records).sort_values("DateTime").drop_duplicates("DateTime",keep="last").reset_index(drop=True)
+    cv=pd.to_numeric(x["VolumeRaw"],errors="coerce"); delta=cv.diff();
+    if len(delta): delta.iloc[0]=cv.iloc[0] if np.isfinite(cv.iloc[0]) else 0
+    reset=(cv.notna() & cv.shift(1).notna() & (delta<0)); delta=delta.where(~reset,cv).clip(lower=0).fillna(0)
+    x["VolumeDelta"]=delta; x["Minute"]=x["DateTime"].dt.floor("min")
+    return x.groupby("Minute",sort=True).agg(Open=("LTP","first"),High=("LTP","max"),Low=("LTP","min"),Close=("LTP","last"),Volume=("VolumeDelta","sum")).reset_index().rename(columns={"Minute":"DateTime"})
+
+
+def fetch_intraday(symbol: str) -> pd.DataFrame:
+    clean=_nd_canonical(symbol)
+    if not _nd_is_equity(clean): return pd.DataFrame()
+    today=now_ist().date(); start=datetime(today.year,today.month,today.day,9,15,tzinfo=IST); end=datetime(today.year,today.month,today.day,15,30,tzinfo=IST)
+    return _nd_live_bars(clean,start,end)
+
+
+def market_gap(ticker: str = NIFTY_TICKER) -> float:
+    if ticker != NIFTY_TICKER: return np.nan
+    today=now_ist().date(); start=datetime(today.year,today.month,today.day,9,0,tzinfo=IST); end=datetime(today.year,today.month,today.day,9,20,tzinfo=IST)
+    rows=_nd_bus_read("kotak_live",None,None,start,end,30000)
+    candidates=[]
+    for row in rows:
+        raw=_nd_raw(row); sym=str(row.get("symbol") or raw.get("symbol") or raw.get("display_symbol") or "").upper();
+        if sym not in {"NIFTY_SPOT","NIFTY 50","NIFTY50","NIFTY 50-EQ"}: continue
+        ts=_nd_ts(row); op=_nd_num(raw,"open","o","openPrice"); pc=_nd_num(raw,"close","c","previousClose","pdc")
+        if ts is not None and np.isfinite(op) and np.isfinite(pc) and pc>0: candidates.append((ts,(op/pc-1)*100))
+    return sorted(candidates,key=lambda z:z[0])[0][1] if candidates else np.nan
+
+
+def _nd_previous_close(symbol: str) -> float:
+    d=_nd_history(symbol,10,"1d"); return safe_float(d["Close"].iloc[-1]) if not d.empty else np.nan
+
+
+def _nd_opening_slice(bars: pd.DataFrame) -> pd.DataFrame:
+    if bars is None or bars.empty: return pd.DataFrame()
+    today=now_ist().date(); start=datetime(today.year,today.month,today.day,9,15,tzinfo=IST); end=start+timedelta(minutes=5)
+    return bars[(bars["DateTime"]>=start)&(bars["DateTime"]<end)].copy()
+
+
+def confirm_candidate(candidate: Dict[str,Any], nifty_open_gap: float, opening: pd.DataFrame, previous_close: float, sector_gap: float=np.nan, vix: Optional[Dict[str,Any]]=None) -> Confirmation:
+    symbol=str(candidate.get("symbol","")); direction=str(candidate.get("direction","NEUTRAL")); prevscore=safe_float(candidate.get("day_ahead_score"),0)
+    if not _nd_is_equity(symbol) or opening is None or opening.empty or not np.isfinite(previous_close) or previous_close<=0:
+        return Confirmation(symbol,direction,prevscore,0.0,"DATA_NOT_READY","Opening RAW BUS data unavailable",previous_close,np.nan,np.nan,nifty_open_gap,sector_gap,np.nan,np.nan,np.nan,np.nan,np.nan,np.nan,np.nan,np.nan,False,False,False,False)
+    x=opening.copy();
+    for c in ("Open","High","Low","Close","Volume"): x[c]=pd.to_numeric(x[c],errors="coerce")
+    x=x.dropna(subset=["Open","High","Low","Close"])
+    op=safe_float(x["Open"].iloc[0]); hi=safe_float(x["High"].max()); lo=safe_float(x["Low"].min()); last=safe_float(x["Close"].iloc[-1])
+    gap=(op/previous_close-1)*100 if np.isfinite(op) and op>0 else np.nan; rng=(hi-lo)/op*100 if np.isfinite(op) and op>0 else np.nan
+    typical=(x["High"]+x["Low"]+x["Close"])/3; vol=x["Volume"].fillna(0); denom=vol.sum(); vw=safe_float((typical*vol).sum()/denom) if denom>0 else last; cvw=(last/vw-1)*100 if np.isfinite(vw) and vw>0 else np.nan
+    daily=_nd_history(symbol,10,"1d"); avgvol=safe_float(daily["Volume"].tail(5).mean()) if not daily.empty else np.nan; expected=avgvol/75 if np.isfinite(avgvol) and avgvol>0 else np.nan; ov=safe_float(vol.sum(),0); vr=ov/expected if np.isfinite(expected) and expected>0 else np.nan
+    rsn=gap-nifty_open_gap if np.isfinite(nifty_open_gap) else np.nan; rss=gap-sector_gap if np.isfinite(sector_gap) else np.nan; po=(last/op-1)*100 if np.isfinite(op) and op>0 else np.nan; sign=1 if direction=="LONG" else -1
+    gapq=clip(50+safe_float(rsn,0)*14*sign); secq=clip(50+safe_float(rss,0)*12*sign); vq=92 if np.isfinite(cvw) and cvw*sign>.10 else 30; mq=clip(50+po*18*sign); volq=clip(45+math.log(max(vr,.05))*28) if np.isfinite(vr) else 50; rangeq=82 if np.isfinite(rng) and .15<=rng<=MAX_OPENING_RANGE_PCT else 40
+    acceptance=bool(np.isfinite(vw) and last*sign>vw*sign and po*sign>0); rejection=bool(np.isfinite(vw) and last*sign<vw*sign and po*sign<-.20); breakout=bool(last>=hi*.999 if direction=="LONG" else last<=lo*1.001); breakdown=bool(last<=lo*1.001 if direction=="LONG" else last>=hi*.999)
+    score=gapq*.12+secq*.10+vq*.20+mq*.18+volq*.10+rangeq*.05+(100 if acceptance else 35)*.15+(100 if breakout else 40)*.10
+    if rejection: score-=25
+    if direction=="LONG" and gap>MAX_GAP_PCT and po<0: score-=15
+    if direction=="SHORT" and gap<-MAX_GAP_PCT and po>0: score-=15
+    if np.isfinite(rng) and rng>MAX_OPENING_RANGE_PCT: score-=10
+    vrg=(vix or {}).get("regime"); score-=5 if vrg=="HIGH_VOLATILITY" else 2 if vrg=="CAUTION" else 0; score=clip(score)
+    if rejection: status,reason="REJECTED","Opening behaviour contradicted the overnight thesis"
+    elif score>=MORNING_FINAL_MIN_SCORE and acceptance and (breakout or np.isfinite(cvw)): status,reason="CONFIRMED","Price acceptance + VWAP + directional momentum aligned"
+    elif score>=MORNING_WATCH_SCORE: status,reason="WATCH","Partial confirmation; below final threshold"
+    else: status,reason="REJECTED","Insufficient morning confirmation"
+    return Confirmation(symbol,direction,prevscore,round(score,2),status,reason,round(previous_close,2),round(op,2),round(gap,3),round(safe_float(nifty_open_gap),3),round(safe_float(sector_gap),3),round(hi,2),round(lo,2),round(rng,3),round(vw,2),round(cvw,3),round(vr,3),round(rsn,3),round(rss,3),acceptance,rejection,breakout,breakdown)
+
+
+def run_morning_confirmation() -> Dict[str,Any]:
+    today=now_ist(); frozen=_load_frozen_day_ahead_snapshot(today.strftime("%Y-%m-%d")); latest=frozen or load_latest(); candidates=[c for c in latest.get("day_ahead",{}).get("top15",[]) if _nd_is_equity(c.get("symbol"))]
+    if not candidates: return {"status":"NO_CANDIDATES","final":[],"confirmations":[]}
+    nifty=market_gap(NIFTY_TICKER); vix=latest.get("macro_regime",{}); opening={}; prev={}
+    start=datetime(today.year,today.month,today.day,9,15,tzinfo=IST); end=start+timedelta(minutes=5)
+    with ThreadPoolExecutor(max_workers=min(8,len(candidates))) as pool:
+        jobs={pool.submit(_nd_live_bars,c["symbol"],start,end):c["symbol"] for c in candidates}
+        for f in as_completed(jobs):
+            try: opening[jobs[f]]=_nd_opening_slice(f.result())
+            except Exception: opening[jobs[f]]=pd.DataFrame()
+    with ThreadPoolExecutor(max_workers=min(8,len(candidates))) as pool:
+        jobs={pool.submit(_nd_previous_close,c["symbol"]):c["symbol"] for c in candidates}
+        for f in as_completed(jobs):
+            try: prev[jobs[f]]=f.result()
+            except Exception: prev[jobs[f]]=np.nan
+    confirmations=[]
+    for c in candidates:
+        sector=str(c.get("sector_bucket","UNKNOWN")); peer_gaps=[]
+        for p in candidates:
+            if p is c or p.get("sector_bucket")!=sector: continue
+            b=opening.get(p["symbol"]); pc=prev.get(p["symbol"])
+            if b is not None and not b.empty and np.isfinite(pc) and pc>0:
+                oo=safe_float(b["Open"].iloc[0]);
+                if np.isfinite(oo): peer_gaps.append((oo/pc-1)*100)
+        sg=float(np.median(peer_gaps)) if peer_gaps else np.nan
+        item=asdict(confirm_candidate(c,nifty,opening.get(c["symbol"],pd.DataFrame()),prev.get(c["symbol"],np.nan),sg,vix)); item["sector_bucket"]=sector; confirmations.append(item)
+    confirmed=[x for x in confirmations if x["status"]=="CONFIRMED" and safe_float(x["confirmation_score"])>=MORNING_FINAL_MIN_SCORE and (x["acceptance"] or x["breakout"])]
+    confirmed.sort(key=lambda x:(safe_float(x["confirmation_score"]),safe_float(x["previous_day_score"])),reverse=True)
+    final=[]; used=set()
+    for x in confirmed:
+        if x.get("sector_bucket") in used: continue
+        final.append(x); used.add(x.get("sector_bucket"));
+        if len(final)>=2: break
+    if len(final)<2:
+        for x in confirmed:
+            if x not in final: final.append(x)
+            if len(final)>=2: break
+    status="FINAL_2" if len(final)>=2 else "FINAL_1" if len(final)==1 else "NO_TRADE"
+    result={"status":status,"generated_at":now_ist().isoformat(),"nifty_gap_pct":nifty,"vix_regime":vix,"final":final,"confirmations":confirmations}
+    latest["morning_confirmation"]=result; _atomic_write_text(CACHE_JSON,json.dumps(latest,ensure_ascii=True,indent=2,default=str)); return result
+
+
+# --- Locked public methods ----------------------------------------------------
+def _nd_live_top15(self):
+    frozen=_load_frozen_day_ahead_snapshot(now_ist().strftime("%Y-%m-%d"))
+    return [x for x in frozen.get("day_ahead",{}).get("top15",[]) if _nd_is_equity(x.get("symbol"))]
+
+NextDayAlphaEngine.live_top15=_nd_live_top15
+NextDayAlphaEngine.live_top5=_nd_live_top15
+NextDayAlphaEngine.run_day_ahead=lambda self: build_day_ahead_watchlist()
+NextDayAlphaEngine.run_morning=lambda self: run_morning_confirmation()
+
+
+def _nd_run_if_due(self):
+    now=now_ist()
+    if now.hour>DAY_AHEAD_RUN_HOUR or (now.hour==DAY_AHEAD_RUN_HOUR and now.minute>=DAY_AHEAD_RUN_MINUTE):
+        frozen=_load_frozen_day_ahead_snapshot(now.strftime("%Y-%m-%d"))
+        return frozen if frozen else build_day_ahead_watchlist()
+    return None
+NextDayAlphaEngine.run_if_due=_nd_run_if_due
+
+
+def validate_config() -> Dict[str,Any]:
+    errors=[]
+    if not SUPABASE_URL: errors.append("SUPABASE_URL is missing")
+    if not SUPABASE_KEY: errors.append("SUPABASE_ANON_KEY/SUPABASE_KEY is missing")
+    if errors: raise RuntimeError("Configuration validation failed: "+" | ".join(errors))
+    return {"ok":True,"errors":[]}
+
+
+def _nd_main():
+    import argparse
+    parser=argparse.ArgumentParser(description="Standalone NIFTY Next-Day Stock Alpha Engine")
+    parser.add_argument("--day-ahead",action="store_true")
+    parser.add_argument("--morning",action="store_true")
+    parser.add_argument("--show",action="store_true")
+    parser.add_argument("--background",action="store_true")
+    parser.add_argument("--streamlit",action="store_true")
+    args=parser.parse_args(); engine=NextDayAlphaEngine()
+    if args.streamlit: return run_streamlit_dashboard()
+    if args.day_ahead: return print_day_ahead(engine.run_day_ahead())
+    if args.morning: return print_morning(engine.run_morning())
+    if args.show: return print(json.dumps(engine.latest(),indent=2,ensure_ascii=True,default=str))
+    if args.background:
+        engine.start_if_due_background()
+        try:
+            while True: time.sleep(1)
+        except KeyboardInterrupt: engine.stop()
+        return
+    result=engine.run_if_due(); print_day_ahead(result or engine.latest())
+
 if __name__ == "__main__":
-    main()
+    _nd_main()
+# === AUTHORITATIVE LOCKED-BASE HOTFIX LAYER ===
+# This block is intentionally the final runtime binding layer. It is based only
+# on next_day_alpha_engine_FINAL_BUGFIXED.py and fixes merge/override defects
+# without changing the engine isolation contract.
+
+import re as _re
+
+# Canonical release metadata.
+VERSION = "NEXT_DAY_ALPHA_ENGINE_LOCKED_BASE_HOTFIX_2_RAWBUS_CONTRACT"
+AUDIT_FILE = ROOT / "audit_summary.json"
+MORNING_FINAL_MIN_SCORE = MORNING_CONFIRMATION_MIN_SCORE
+MORNING_WATCH_SCORE = MORNING_WATCH_SCORE
+VIX_CAUTION = V7_VIX_CAUTION
+VIX_HIGH = V7_VIX_HIGH
+VIX_SPIKE_PCT = V7_VIX_SPIKE_PCT
+
+# Names used by the final pipeline were left undefined by the previous merge.
+_sector_bucket = _v7_sector_bucket
+_resample_ohlc = _v7_resample_ohlc
+_local_levels = _v7_local_levels
+_mw_pattern = _v7_mw_pattern
+
+
+def _return_pct(series: pd.Series, n: int) -> float:
+    """NaN-safe percentage return over n observations."""
+    if series is None or len(series) <= n:
+        return np.nan
+    x = pd.to_numeric(series, errors="coerce").dropna()
+    if len(x) <= n:
+        return np.nan
+    a = safe_float(x.iloc[-1])
+    b = safe_float(x.iloc[-1 - n])
+    if not np.isfinite(a) or not np.isfinite(b) or b == 0:
+        return np.nan
+    return float((a / b - 1.0) * 100.0)
+
+
+def _clean_universe(universe: pd.DataFrame) -> pd.DataFrame:
+    """Normalize the NSE universe while preserving the producer's symbols."""
+    if universe is None or universe.empty or "Symbol" not in universe.columns:
+        return pd.DataFrame(columns=["Symbol", "Industry"])
+    x = universe.copy()
+    x["Symbol"] = x["Symbol"].map(_nd_canonical)
+    x = x[x["Symbol"].map(_nd_is_equity)].copy()
+    if "Industry" not in x.columns:
+        x["Industry"] = "UNKNOWN"
+    x["Industry"] = x["Industry"].fillna("UNKNOWN").astype(str).str.strip()
+    return x.drop_duplicates("Symbol", keep="first").reset_index(drop=True)
+
+
+def rsi(series: pd.Series, period: int = 14) -> pd.Series:
+    """Wilder-style RSI with correct flat/zero-loss handling."""
+    s = pd.to_numeric(series, errors="coerce")
+    delta = s.diff()
+    gain = delta.clip(lower=0.0)
+    loss = -delta.clip(upper=0.0)
+    avg_gain = gain.ewm(alpha=1.0 / period, adjust=False, min_periods=period).mean()
+    avg_loss = loss.ewm(alpha=1.0 / period, adjust=False, min_periods=period).mean()
+    rs = avg_gain / avg_loss.replace(0.0, np.nan)
+    out = 100.0 - 100.0 / (1.0 + rs)
+    no_loss = avg_loss == 0.0
+    no_gain = avg_gain == 0.0
+    out = out.mask(no_loss & no_gain, 50.0)
+    out = out.mask(no_loss & ~no_gain, 100.0)
+    out = out.mask(no_gain & ~no_loss, 0.0)
+    return out
+
+
+def _nd_raw_headers() -> Dict[str, str]:
+    return {
+        "apikey": SUPABASE_KEY,
+        "Authorization": f"Bearer {SUPABASE_KEY}",
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+    }
+
+
+def _nd_raw(row: Dict[str, Any]) -> Dict[str, Any]:
+    raw = row.get("raw")
+    return raw if isinstance(raw, dict) else {}
+
+
+def _nd_ts(row: Dict[str, Any]) -> Optional[pd.Timestamp]:
+    raw = _nd_raw(row)
+    for value in (
+        raw.get("event_timestamp"), raw.get("timestamp"),
+        raw.get("last_traded_time"), raw.get("received_at"),
+        row.get("observation_timestamp"),
+    ):
+        try:
+            ts = pd.to_datetime(value, errors="coerce", utc=True)
+            if not pd.isna(ts):
+                return ts.tz_convert(IST)
+        except Exception:
+            continue
+    return None
+
+
+def _nd_num(raw: Dict[str, Any], *keys: str, default=np.nan) -> float:
+    for key in keys:
+        try:
+            value = raw.get(key)
+            if value is None or value == "":
+                continue
+            x = float(value)
+            if np.isfinite(x):
+                return x
+        except Exception:
+            continue
+    return default
+
+
+def _nd_symbol(row: Dict[str, Any]) -> str:
+    raw = _nd_raw(row)
+    return _nd_canonical(
+        row.get("symbol")
+        or raw.get("symbol")
+        or raw.get("display_symbol")
+        or raw.get("pTrdSymbol")
+        or raw.get("tradingSymbol")
+    )
+
+
+def _nd_is_equity(symbol: Any) -> bool:
+    s = _nd_canonical(symbol)
+    if not s or s in {"NIFTY_SPOT", "NIFTY 50", "NIFTY50", "^NSEI", "INDIAVIX", "^INDIAVIX"}:
+        return False
+    # Do not reject ordinary equities merely because their ticker ends in
+    # CE/PE (e.g. RELIANCE). Reject derivative naming only when an expiry/
+    # strike structure is actually present.
+    if "FUT" in s and _re.search(r"\d{2}[A-Z]{3}\d+", s):
+        return False
+    if _re.search(r"\d{2}[A-Z]{3}\d+(CE|PE)$", s):
+        return False
+    if _re.search(r"^NIFTY\d{2}[A-Z]{3}\d+", s) and (s.endswith("CE") or s.endswith("PE")):
+        return False
+    if any(x in s for x in ("BANKNIFTY", "FINNIFTY", "MIDCPNIFTY")):
+        return False
+    return bool(_re.fullmatch(r"[A-Z][A-Z0-9&._-]*", s))
+
+
+def _nd_query_rows(
+    *, source: str, interval: Optional[str], symbols: Optional[List[str]],
+    since: Optional[datetime], until: Optional[datetime], limit: int,
+) -> List[Dict[str, Any]]:
+    """Read producer rows using the actual RAW-BUS contract.
+
+    Historical producer contract verified from the producer: source is
+    yfinance_history and timeframe lives in raw.interval. Older rows using
+    yahoo_historical remain a compatibility fallback. Live remains kotak_live.
+    """
+    if not SUPABASE_URL or not SUPABASE_KEY:
+        return []
+    wanted = {_nd_canonical(s) for s in (symbols or []) if s}
+    # Reference series are allowed only when explicitly requested.
+    allowed_reference = {"NIFTY_SPOT", "INDIAVIX"}
+    if wanted:
+        # Producer stores the original Yahoo ticker as `symbol` (e.g.
+        # HDFCBANK.NS and ^NSEI). The engine canonicalizes internally, so the
+        # PostgREST query must include both canonical and producer spellings.
+        variants_set = set()
+        for s in wanted:
+            variants_set.update({
+                s,
+                f"{s}.NS",
+                f"{s}-EQ",
+                f"{s}_EQ",
+            })
+        # Explicit benchmark/VIX aliases used by the historical producer.
+        if "NIFTY_SPOT" in wanted:
+            variants_set.update({"NIFTY_SPOT", "NIFTY 50", "NIFTY50", "^NSEI"})
+        if "INDIAVIX" in wanted:
+            variants_set.update({"INDIAVIX", "^INDIAVIX"})
+        variants = sorted(variants_set)
+    else:
+        variants = []
+
+    rows: List[Dict[str, Any]] = []
+    sources = [source]
+    if source == "yfinance_history":
+        sources.append("yahoo_historical")
+
+    # PostgREST URL/query limits make one giant 500-symbol `in.(...)` predicate
+    # fragile. Batch the symbol universe at the transport boundary. For the
+    # authoritative yFinance producer we query its real `.NS` spelling instead
+    # of sending four aliases for every equity; compatibility sources retain the
+    # broader alias set. The raw contract and downstream calculations remain
+    # unchanged.
+    SYMBOL_BATCH_SIZE = 80
+
+    for src in sources:
+        if src == "yfinance_history" and wanted:
+            query_variants = {f"{s}.NS" for s in wanted}
+            if "NIFTY_SPOT" in wanted:
+                query_variants.update({"NIFTY_SPOT", "NIFTY 50", "NIFTY50", "^NSEI"})
+            if "INDIAVIX" in wanted:
+                query_variants.update({"INDIAVIX", "^INDIAVIX"})
+        else:
+            query_variants = set(variants)
+
+        ordered_variants = sorted(query_variants)
+        variant_batches = (
+            [ordered_variants[i:i + SYMBOL_BATCH_SIZE] for i in range(0, len(ordered_variants), SYMBOL_BATCH_SIZE)]
+            if ordered_variants else [None]
+        )
+
+        source_rows: List[Dict[str, Any]] = []
+        for batch_no, variant_batch in enumerate(variant_batches, start=1):
+            offset = 0
+            page_size = min(5000, max(500, int(limit)))
+            batch_rows: List[Dict[str, Any]] = []
+            while len(batch_rows) < limit:
+                take = min(page_size, limit - len(batch_rows))
+                params: List[Tuple[str, str]] = [
+                    ("select", "symbol,instrument_token,observation_timestamp,raw"),
+                    ("source", f"eq.{src}"),
+                    ("order", "observation_timestamp.asc"),
+                    ("limit", str(take)),
+                    ("offset", str(offset)),
+                ]
+                if interval:
+                    params.append(("raw->>interval", f"eq.{interval}"))
+                if variant_batch:
+                    params.append(("symbol", "in.(" + ",".join(variant_batch) + ")"))
+                if since is not None:
+                    params.append(("raw->>event_timestamp", f"gte.{since.astimezone(timezone.utc).isoformat()}"))
+                if until is not None:
+                    params.append(("raw->>event_timestamp", f"lte.{until.astimezone(timezone.utc).isoformat()}"))
+                try:
+                    response = requests.get(
+                        f"{SUPABASE_URL}/rest/v1/{SUPABASE_RAW_TABLE}",
+                        headers=_nd_raw_headers(), params=params, timeout=30,
+                    )
+                    response.raise_for_status()
+                    page = response.json()
+                except Exception as exc:
+                    LOGGER.warning(
+                        "RAW BUS read failed source=%s interval=%s batch=%d/%d offset=%s: %s",
+                        src, interval, batch_no, len(variant_batches), offset, exc,
+                    )
+                    break
+                if not isinstance(page, list) or not page:
+                    break
+                batch_rows.extend(x for x in page if isinstance(x, dict))
+                if len(page) < take:
+                    break
+                offset += len(page)
+            source_rows.extend(batch_rows)
+
+        rows = source_rows
+        if rows:
+            LOGGER.info(
+                "RAW BUS read source=%s interval=%s symbols_requested=%d rows=%d batches=%d",
+                src, interval, len(wanted), len(rows), len(variant_batches),
+            )
+            # A primary source is authoritative; compatibility source is used
+            # only when the primary source returned nothing for this request.
+            break
+
+    # Apply event-time filtering after extraction. This is essential because
+    # observation_timestamp is ingestion time, not necessarily market time.
+    out: List[Dict[str, Any]] = []
+    for row in rows:
+        raw = _nd_raw(row)
+        symbol = _nd_symbol(row)
+        if wanted and symbol not in wanted:
+            continue
+        if not wanted and source == "kotak_live":
+            # Live consumers may need NIFTY_SPOT for market gap, otherwise only
+            # equity rows are allowed.
+            if not _nd_is_equity(symbol) and symbol not in allowed_reference:
+                continue
+        if interval and str(raw.get("interval", "")) != interval:
+            continue
+        ts = _nd_ts(row)
+        if ts is None:
+            continue
+        if since is not None and ts < pd.Timestamp(since):
+            continue
+        if until is not None and ts > pd.Timestamp(until):
+            continue
+        out.append(row)
+    return out
+
+
+def _nd_frame(rows: List[Dict[str, Any]]) -> pd.DataFrame:
+    records = []
+    for row in rows:
+        raw = _nd_raw(row)
+        ts = _nd_ts(row)
+        if ts is None:
+            continue
+        records.append({
+            "DateTime": ts,
+            "Open": _nd_num(raw, "open", "Open", "o", "pOpen", "openPrice"),
+            "High": _nd_num(raw, "high", "High", "h", "pHigh", "highPrice"),
+            "Low": _nd_num(raw, "low", "Low", "l", "pLow", "lowPrice"),
+            "Close": _nd_num(raw, "close", "Close", "ltp", "lp", "last_price", "lastPrice", "c"),
+            "Volume": _nd_num(raw, "volume", "Volume", "v", "vol", "tradedVolume", "vtt", default=0.0),
+        })
+    if not records:
+        return pd.DataFrame(columns=["DateTime", "Open", "High", "Low", "Close", "Volume"])
+    x = pd.DataFrame(records)
+    for c in ("Open", "High", "Low", "Close", "Volume"):
+        x[c] = pd.to_numeric(x[c], errors="coerce")
+    return (
+        x.dropna(subset=["DateTime", "Open", "High", "Low", "Close"])
+         .sort_values("DateTime")
+         .drop_duplicates("DateTime", keep="last")
+         .reset_index(drop=True)
+    )
+
+
+def _nd_interval_for_dataset(dataset: Optional[str]) -> Optional[str]:
+    return {
+        SUPABASE_DATASETS.get("daily"): "1d",
+        SUPABASE_DATASETS.get("hourly"): "1h",
+        SUPABASE_DATASETS.get("15m"): "15m",
+        "next_day_stock_daily": "1d",
+        "next_day_mtf_hourly": "1h",
+        "next_day_mtf_15m": "15m",
+        "nifty_spot_daily": "1d",
+        "nifty_benchmark_daily": "1d",
+        "india_vix_daily": "1d",
+    }.get(dataset)
+
+
+def _nd_history(symbol: str, days: int = 320, interval: str = "1d") -> pd.DataFrame:
+    s = _nd_canonical(symbol)
+    if s == "NIFTY_SPOT":
+        dataset = SUPABASE_DATASETS["nifty_daily"]
+        # yfinance producer publishes the benchmark under its original Yahoo
+        # ticker (^NSEI), not the engine's internal NIFTY_SPOT alias.
+        wanted = ["NIFTY_SPOT", "^NSEI", "NIFTY 50", "NIFTY50"]
+    elif s == "INDIAVIX":
+        dataset = SUPABASE_DATASETS["vix_daily"]
+        # yfinance producer publishes India VIX as ^INDIAVIX.
+        wanted = ["INDIAVIX", "^INDIAVIX"]
+    else:
+        if not _nd_is_equity(s):
+            return pd.DataFrame()
+        dataset = {"1d": SUPABASE_DATASETS["daily"], "1h": SUPABASE_DATASETS["hourly"], "15m": SUPABASE_DATASETS["15m"]}.get(interval)
+        if not dataset:
+            return pd.DataFrame()
+        wanted = [s]
+    end = now_ist()
+    start = end - timedelta(days=int(days))
+    rows = _nd_query_rows(source="yfinance_history", interval=interval, symbols=wanted, since=start, until=end, limit=10000 if interval != "1d" else 5000)
+    # Dataset is part of the producer's raw payload contract. Enforce it after
+    # transport extraction so unrelated yfinance series cannot satisfy a request.
+    rows = [r for r in rows if str(_nd_raw(r).get("dataset", "")) in {dataset,
+        "nifty_spot_daily" if s == "NIFTY_SPOT" else "",
+        "india_vix_daily" if s == "INDIAVIX" else "",
+        "next_day_stock_daily" if s not in {"NIFTY_SPOT", "INDIAVIX"} and interval == "1d" else "",
+        "next_day_mtf_hourly" if s not in {"NIFTY_SPOT", "INDIAVIX"} and interval == "1h" else "",
+        "next_day_mtf_15m" if s not in {"NIFTY_SPOT", "INDIAVIX"} and interval == "15m" else "",
+    }]
+    frame = _nd_frame(rows)
+    if not frame.empty:
+        cutoff = pd.Timestamp(start)
+        frame = frame[frame["DateTime"] >= cutoff].reset_index(drop=True)
+    return frame
+
+
+def _nd_fetch_daily_window(symbols: List[str], days: int, minimum_rows: int) -> Dict[str, pd.DataFrame]:
+    clean = sorted({_nd_canonical(x) for x in symbols if _nd_is_equity(x)})
+    if not clean:
+        return {}
+    end = now_ist(); start = end - timedelta(days=int(days))
+    rows = _nd_query_rows(
+        source="yfinance_history", interval="1d", symbols=clean,
+        since=start, until=end, limit=max(5000, len(clean) * 450),
+    )
+    grouped: Dict[str, List[Dict[str, Any]]] = {}
+    for row in rows:
+        s = _nd_symbol(row)
+        if s in clean:
+            grouped.setdefault(s, []).append(row)
+    result = {}
+    for s, rs in grouped.items():
+        frame = _nd_frame(rs)
+        if len(frame) >= minimum_rows:
+            result[s] = frame
+    return result
+
+
+def fetch_yahoo_chart(ticker: str, days: int = 320, interval: str = "1d") -> pd.DataFrame:
+    t = str(ticker).upper().strip()
+    if t == "^NSEI":
+        return _nd_history("NIFTY_SPOT", days, interval)
+    if t == "^INDIAVIX":
+        return _nd_history("INDIAVIX", days, interval)
+    return _nd_history(_nd_canonical(t), days, interval)
+
+
+def fetch_history(symbols: List[str], days: int = 320) -> Dict[str, pd.DataFrame]:
+    data = _nd_fetch_daily_window(symbols, days, MIN_HISTORY_DAYS)
+    return {s: df for s, df in data.items() if len(df) >= MIN_HISTORY_DAYS}
+
+
+def _nd_live_bars(symbol: str, start: datetime, end: datetime) -> pd.DataFrame:
+    clean = _nd_canonical(symbol)
+    if not _nd_is_equity(clean):
+        return pd.DataFrame()
+    rows = _nd_query_rows(source="kotak_live", interval=None, symbols=[clean], since=start, until=end, limit=30000)
+    records = []
+    for row in rows:
+        raw = _nd_raw(row); ts = _nd_ts(row)
+        ltp = _nd_num(raw, "ltp", "lp", "last_price", "lastPrice", "c")
+        if ts is None or not np.isfinite(ltp) or ltp <= 0:
+            continue
+        records.append({"DateTime": ts, "LTP": ltp, "VolumeRaw": _nd_num(raw, "volume", "v", "tradedVolume", "vtt", default=np.nan)})
+    if not records:
+        return pd.DataFrame()
+    x = pd.DataFrame(records).sort_values("DateTime").drop_duplicates("DateTime", keep="last").reset_index(drop=True)
+    cv = pd.to_numeric(x["VolumeRaw"], errors="coerce")
+    delta = cv.diff()
+    if len(delta):
+        delta.iloc[0] = cv.iloc[0] if np.isfinite(cv.iloc[0]) else 0.0
+    reset = cv.notna() & cv.shift(1).notna() & (delta < 0)
+    delta = delta.where(~reset, cv).clip(lower=0).fillna(0.0)
+    x["VolumeDelta"] = delta
+    x["Minute"] = x["DateTime"].dt.floor("min")
+    return x.groupby("Minute", sort=True).agg(
+        Open=("LTP", "first"), High=("LTP", "max"), Low=("LTP", "min"),
+        Close=("LTP", "last"), Volume=("VolumeDelta", "sum")
+    ).reset_index().rename(columns={"Minute": "DateTime"})
+
+
+def fetch_intraday(symbol: str) -> pd.DataFrame:
+    clean = _nd_canonical(symbol)
+    if not _nd_is_equity(clean):
+        return pd.DataFrame()
+    today = now_ist().date()
+    start = datetime(today.year, today.month, today.day, 9, 15, tzinfo=IST)
+    end = datetime(today.year, today.month, today.day, 15, 30, tzinfo=IST)
+    return _nd_live_bars(clean, start, end)
+
+
+def market_gap(ticker: str = NIFTY_TICKER) -> float:
+    if ticker != NIFTY_TICKER:
+        return np.nan
+    today = now_ist().date()
+    start = datetime(today.year, today.month, today.day, 9, 0, tzinfo=IST)
+    end = datetime(today.year, today.month, today.day, 9, 20, tzinfo=IST)
+    rows = _nd_query_rows(source="kotak_live", interval=None, symbols=["NIFTY_SPOT"], since=start, until=end, limit=5000)
+    vals=[]
+    for row in rows:
+        raw=_nd_raw(row); ts=_nd_ts(row)
+        op=_nd_num(raw,"open","Open","o","openPrice")
+        pc=_nd_num(raw,"close","Close","c","previousClose","pdc")
+        if ts is not None and np.isfinite(op) and np.isfinite(pc) and pc>0:
+            vals.append((ts,(op/pc-1.0)*100.0))
+    return float(sorted(vals,key=lambda z:z[0])[0][1]) if vals else np.nan
+
+
+def _nd_previous_close(symbol: str) -> float:
+    d = _nd_history(symbol, 10, "1d")
+    return safe_float(d["Close"].iloc[-1]) if not d.empty else np.nan
+
+
+def _nd_opening_slice(bars: pd.DataFrame) -> pd.DataFrame:
+    if bars is None or bars.empty:
+        return pd.DataFrame()
+    today=now_ist().date()
+    start=datetime(today.year,today.month,today.day,9,15,tzinfo=IST)
+    end=start+timedelta(minutes=5)
+    return bars[(bars["DateTime"]>=start)&(bars["DateTime"]<end)].copy()
+
+# Rebind the previously broken pipeline's dependencies.
+
+def _nd_mtf_fetch(symbol: str) -> Dict[str, Any]:
+    daily=_nd_history(symbol,420,"1d"); hourly=_nd_history(symbol,180,"1h"); mins15=_nd_history(symbol,55,"15m")
+    frames={"W":_resample_ohlc(daily,"W-FRI"),"D":daily,"4H":_resample_ohlc(hourly,"4h"),"1H":hourly,"15M":mins15}
+    levels={}; parts=[]
+    for tf,frame in frames.items():
+        lv=_local_levels(frame) if frame is not None and not frame.empty else {"support":np.nan,"resistance":np.nan,"atr":np.nan}
+        pat,ps=_mw_pattern(frame) if frame is not None and not frame.empty else ("NONE",0.0)
+        lv.update({"pattern":pat,"pattern_score":ps}); levels[tf]=lv
+        parts.append(25.0 if pat=="M_TOP" else 75.0 if pat=="W_BOTTOM" else 50.0)
+    return {"symbol":symbol,"mtf":levels,"mtf_score":float(np.mean(parts)) if parts else 50.0}
+
+
+def _nd_select_top15(enriched: pd.DataFrame) -> pd.DataFrame:
+    if enriched.empty:
+        return enriched
+    x=enriched[enriched["Direction"].isin(["LONG","SHORT"])].copy()
+    x=x[x["DayAheadScore"]>=DAY_AHEAD_MIN_SCORE]
+    if "hard_rr_pass" in x.columns:
+        x=x[x["hard_rr_pass"]==True]
+    if x.empty:
+        return x
+    selected=[]; counts={}
+    for _,r in x.sort_values(["V7Score","DayAheadScore","Symbol"],ascending=[False,False,True]).iterrows():
+        sec=_sector_bucket(r.get("Industry"))
+        if counts.get(sec,0)>=2:
+            continue
+        z=r.copy(); z["SelectionScore"]=safe_float(r.get("V7Score"),0)-(SECTOR_REPEAT_PENALTY if counts.get(sec,0)>=1 else 0)
+        selected.append(z); counts[sec]=counts.get(sec,0)+1
+        if len(selected)>=DAY_AHEAD_TOP_N: break
+    return pd.DataFrame(selected).sort_values(["SelectionScore","V7Score"],ascending=False).head(DAY_AHEAD_TOP_N).reset_index(drop=True) if selected else pd.DataFrame()
+
+
+def _nd_vix() -> Dict[str, Any]:
+    v=_nd_history("INDIAVIX",320,"1d")
+    if v.empty:
+        return {"status":"UNAVAILABLE","directional_predictor":False}
+    c=pd.to_numeric(v["Close"],errors="coerce").dropna()
+    if c.empty:
+        return {"status":"UNAVAILABLE","directional_predictor":False}
+    level=safe_float(c.iloc[-1]); prev=safe_float(c.iloc[-6]) if len(c)>=6 else np.nan
+    change=(level/prev-1.0)*100.0 if np.isfinite(prev) and prev else np.nan
+    regime="HIGH_VOLATILITY" if level>=VIX_HIGH or (np.isfinite(change) and change>=VIX_SPIKE_PCT) else "CAUTION" if level>=VIX_CAUTION else "NORMAL"
+    return {"status":"OK","level":round(level,3),"change_5d_pct":round(change,3) if np.isfinite(change) else None,"percentile":round(float((c<=level).mean()*100),2),"regime":regime,"confirmation_bonus":V7_VIX_HIGH_CONFIRM_BONUS if regime=="HIGH_VOLATILITY" else V7_VIX_CAUTION_CONFIRM_BONUS if regime=="CAUTION" else 0.0,"risk_multiplier":.65 if regime=="HIGH_VOLATILITY" else .80 if regime=="CAUTION" else 1.0,"directional_predictor":False}
+
+
+def raw_bus_contract_diagnostics() -> Dict[str, Any]:
+    """Return read-only diagnostics for the producer/consumer RAW-BUS contract.
+
+    This never manufactures market data and never changes engine calculations.
+    It exists so deployment failures identify dataset/symbol mismatches instead
+    of collapsing into the generic `insufficient NIFTY spot history` message.
+    """
+    result: Dict[str, Any] = {
+        "status": "OK",
+        "table": SUPABASE_RAW_TABLE,
+        "source": "yfinance_history",
+        "datasets": {},
+    }
+    checks = [
+        ("nifty_benchmark", SUPABASE_DATASETS["nifty_daily"], ["NIFTY_SPOT", "^NSEI", "NIFTY 50", "NIFTY50"]),
+        ("india_vix", SUPABASE_DATASETS["vix_daily"], ["INDIAVIX", "^INDIAVIX"]),
+    ]
+    for name, dataset, symbols in checks:
+        rows = _nd_query_rows(source="yfinance_history", interval="1d", symbols=symbols, since=None, until=None, limit=2000)
+        matching = [r for r in rows if str(_nd_raw(r).get("dataset", "")) == dataset]
+        result["datasets"][name] = {
+            "dataset": dataset,
+            "rows": len(matching),
+            "symbols": sorted({_nd_symbol(r) for r in matching}),
+        }
+    return result
+
+
+def build_day_ahead_watchlist() -> Dict[str, Any]:
+    """Authoritative day-ahead pipeline: RAW BUS -> independent calculations."""
+    validate_config()
+    timestamp=now_ist()
+    universe=_clean_universe(load_nifty500_universe())
+    symbols=universe["Symbol"].tolist()
+    benchmark=_nd_history("NIFTY_SPOT",320,"1d")
+    if benchmark.empty or len(benchmark)<70:
+        diag = raw_bus_contract_diagnostics()
+        raise RuntimeError(
+            "RAW BUS: insufficient NIFTY spot history; "
+            f"expected source=yfinance_history, dataset={SUPABASE_DATASETS['nifty_daily']}, producer symbol ^NSEI; "
+            f"diagnostic={json.dumps(diag, ensure_ascii=True, default=str)}"
+        )
+
+    short=_nd_fetch_daily_window(symbols,14,VOLUME_SHOCKER_LOOKBACK_DAYS)
+    shock=[]; shock_profiles={}
+    for s,df in short.items():
+        prof=_volume_shocker_profile(df)
+        if prof:
+            shock.append((s,prof["volume_shock_score"])); shock_profiles[s]=prof
+    shock.sort(key=lambda z:(-z[1],z[0])); shock_symbols=[s for s,_ in shock]
+    if not shock_symbols:
+        raise RuntimeError("RAW BUS: no equities have the required 5-session volume history / shock pattern")
+
+    major_hist=_nd_fetch_daily_window(shock_symbols,60,5)
+    major=[]; major_profiles={}
+    for s,df in major_hist.items():
+        close=safe_float(df["Close"].iloc[-1]); av=safe_float(df["Volume"].tail(20).mean()); turn=safe_float((df["Close"].tail(20)*df["Volume"].tail(20)).mean()/1e7)
+        if np.isfinite(close) and close>=MIN_PRICE and np.isfinite(av) and av>=MIN_AVG_VOLUME and np.isfinite(turn) and turn>=MIN_AVG_TURNOVER_CR:
+            major.append((s,shock_profiles.get(s,{}).get("volume_shock_score",0.0)))
+            major_profiles[s]={**shock_profiles.get(s,{}),"avg_volume_20":av,"avg_turnover_20_cr":turn,"last_close":close}
+    major.sort(key=lambda z:(-z[1],z[0])); major_symbols=[s for s,_ in major[:MAJOR_FILTER_MAX_CANDIDATES]]
+    if not major_symbols:
+        raise RuntimeError("RAW BUS: liquidity/turnover filter removed all volume-shocker equities")
+
+    histories=_nd_fetch_daily_window(major_symbols,420,MIN_HISTORY_DAYS)
+    lookup=universe.set_index("Symbol")
+    rows=[]
+    for s,df in histories.items():
+        industry=str(lookup.loc[s,"Industry"]) if s in lookup.index else "UNKNOWN"
+        f=build_features(s,df,benchmark,industry)
+        if f:
+            f.update({**shock_profiles.get(s,{}),**major_profiles.get(s,{})}); rows.append(f)
+    if not rows:
+        raise RuntimeError("RAW BUS: no stock survived full indicator evaluation")
+    frame=add_sector_features(pd.DataFrame(rows)); scored=_nd_score_candidates(frame)
+    if scored.empty:
+        raise RuntimeError("No directional candidate survived independent scoring")
+    enriched=_nd_enrich(scored.head(MAJOR_FILTER_MAX_CANDIDATES)); vix=_nd_vix(); top=_nd_select_top15(enriched)
+
+    candidates=[]
+    for rank,(_,r) in enumerate(top.iterrows(),1):
+        if not _nd_is_equity(r["Symbol"]): continue
+        candidates.append({
+            "rank":rank,"symbol":str(r["Symbol"]),"industry":str(r.get("Industry","UNKNOWN")),"sector_bucket":_sector_bucket(r.get("Industry")),"direction":str(r["Direction"]),
+            "day_ahead_score":round(safe_float(r.get("DayAheadScore")),2),"v7_score":round(safe_float(r.get("V7Score")),2),"selection_score":round(safe_float(r.get("SelectionScore",r.get("V7Score"))),2),"setup_type":str(r.get("SetupType","UNKNOWN")),
+            "trend_score":round(safe_float(r.get("TrendScore"),50),2),"momentum_score":round(safe_float(r.get("MomentumScore"),50),2),"relative_strength_score":round(safe_float(r.get("RelativeStrengthScore"),50),2),"sector_score":round(safe_float(r.get("SectorScore"),50),2),"volume_score":round(safe_float(r.get("VolumeScore"),50),2),"volatility_score":round(safe_float(r.get("VolatilityScore"),50),2),"catalyst_score":round(safe_float(r.get("CatalystScoreFinal"),50),2),"anti_false_positive_score":round(safe_float(r.get("AntiFalsePositiveScore"),50),2),
+            "ltp":round(safe_float(r.get("LTP")),2),"atr14":round(safe_float(r.get("ATR14")),4),"atr_pct":round(safe_float(r.get("ATRpct")),3),"ret_1d":round(safe_float(r.get("Ret1D")),3),"ret_5d":round(safe_float(r.get("Ret5D")),3),"ret_20d":round(safe_float(r.get("Ret20D")),3),"rs_5d":round(safe_float(r.get("RS5D")),3),"rs_20d":round(safe_float(r.get("RS20D")),3),
+            "volume_shock_score":round(safe_float(r.get("volume_shock_score")),2),"volume_shock_consecutive_days":int(safe_float(r.get("volume_shock_consecutive_days"),0)),"mtf_score":round(safe_float(r.get("mtf_score"),50),2),"support":safe_float(r.get("support")),"resistance":safe_float(r.get("resistance")),"invalidation":safe_float(r.get("invalidation")),"target":safe_float(r.get("target")),"rr":round(safe_float(r.get("rr")),3),"invalidation_atr":round(safe_float(r.get("invalidation_atr")),3),"hard_rr_pass":bool(r.get("hard_rr_pass",False)),
+            "catalyst_direction":str(r.get("CatalystDirection","UNKNOWN")),"catalyst_count":int(safe_float(r.get("CatalystCount"),0)),"catalyst_text":str(r.get("CatalystText","")),"macro_vix_regime":vix.get("regime","UNAVAILABLE"),
+            "thesis":f"{r['Direction']} thesis from independent quantitative stock-selection calculations; morning confirmation remains mandatory.","invalidation_rule":"Structural S/R or ATR floor; hard R:R gate applies.",
+        })
+
+    result={"engine":"NEXT_DAY_ALPHA_ENGINE","version":VERSION,"generated_at":timestamp.isoformat(),"data_as_of":timestamp.strftime("%Y-%m-%d"),
+      "architecture":{"raw_bus":"SUPABASE","raw_table":SUPABASE_RAW_TABLE,"historical":"yfinance_history_via_supabase_raw_bus","live":"kotak_live_via_supabase_raw_bus","nifty_3min_engine_modified":False,"shared_raw_data_only":True,"shared_calculated_features":False,"shared_scores":False,"shared_regime_decisions":False,"shared_labels":False,"shared_predictions":False,"shared_decisions":False,"option_selection":False,"direct_kotak_login":False,"direct_yfinance_http":False},
+      "pipeline":{"universe":len(symbols),"volume_shocker_survivors":len(shock_symbols),"major_filter_survivors":len(major_symbols),"full_history_survivors":len(histories),"indicator_scored":len(scored),"mtf_enriched":len(enriched),"hard_rr_survivors":int(enriched["hard_rr_pass"].sum()) if "hard_rr_pass" in enriched else 0},
+      "macro_regime":vix,
+      "day_ahead":{"universe_size":len(symbols),"top15_count":len(candidates),"top15":candidates,"top5_count":len(candidates),"top5":candidates},
+      "morning_confirmation":{"status":"PENDING","final":[],"confirmations":[]},
+      "probability_note":"Quality/ranking score only; not a calibrated win probability."}
+    _atomic_write_text(CACHE_JSON,json.dumps(result,ensure_ascii=False,indent=2,default=str)); _freeze_day_ahead_snapshot(result); _atomic_write_text(AUDIT_FILE,json.dumps(result["pipeline"],indent=2))
+    _write_day_ahead_status("SUCCESS", result=result)
+    return result
+
+
+def confirm_candidate(candidate: Dict[str,Any], nifty_open_gap: float, opening: pd.DataFrame, previous_close: float, sector_gap: float=np.nan, vix: Optional[Dict[str,Any]]=None) -> Confirmation:
+    symbol=_nd_canonical(candidate.get("symbol")); direction=str(candidate.get("direction","NEUTRAL")); prevscore=safe_float(candidate.get("day_ahead_score"),0)
+    if not _nd_is_equity(symbol) or opening is None or opening.empty or not np.isfinite(previous_close) or previous_close<=0:
+        return Confirmation(symbol,direction,prevscore,0.0,"DATA_NOT_READY","Opening RAW BUS data unavailable",previous_close,np.nan,np.nan,nifty_open_gap,sector_gap,np.nan,np.nan,np.nan,np.nan,np.nan,np.nan,np.nan,np.nan,False,False,False,False)
+    x=opening.copy()
+    for c in ("Open","High","Low","Close","Volume"): x[c]=pd.to_numeric(x[c],errors="coerce")
+    x=x.dropna(subset=["Open","High","Low","Close"])
+    if x.empty:
+        return Confirmation(symbol,direction,prevscore,0.0,"DATA_NOT_READY","Opening RAW BUS data unavailable",previous_close,np.nan,np.nan,nifty_open_gap,sector_gap,np.nan,np.nan,np.nan,np.nan,np.nan,np.nan,np.nan,np.nan,False,False,False,False)
+    op=safe_float(x["Open"].iloc[0]); hi=safe_float(x["High"].max()); lo=safe_float(x["Low"].min()); last=safe_float(x["Close"].iloc[-1])
+    gap=(op/previous_close-1)*100 if np.isfinite(op) and op>0 else np.nan; rng=(hi-lo)/op*100 if np.isfinite(op) and op>0 else np.nan
+    typical=(x["High"]+x["Low"]+x["Close"])/3; vol=pd.to_numeric(x["Volume"],errors="coerce").fillna(0); denom=vol.sum(); vw=safe_float((typical*vol).sum()/denom) if denom>0 else last; cvw=(last/vw-1)*100 if np.isfinite(vw) and vw>0 else np.nan
+    daily=_nd_history(symbol,10,"1d"); avgvol=safe_float(daily["Volume"].tail(5).mean()) if not daily.empty else np.nan; expected=avgvol/75 if np.isfinite(avgvol) and avgvol>0 else np.nan; ov=safe_float(vol.sum(),0); vr=ov/expected if np.isfinite(expected) and expected>0 else np.nan
+    rsn=gap-nifty_open_gap if np.isfinite(nifty_open_gap) else np.nan; rss=gap-sector_gap if np.isfinite(sector_gap) else np.nan; po=(last/op-1)*100 if np.isfinite(op) and op>0 else np.nan; sign=1 if direction=="LONG" else -1
+    gapq=clip(50+safe_float(rsn,0)*14*sign); secq=clip(50+safe_float(rss,0)*12*sign); vq=92 if np.isfinite(cvw) and cvw*sign>.10 else 30; mq=clip(50+po*18*sign); volq=clip(45+math.log(max(vr,.05))*28) if np.isfinite(vr) else 50; rangeq=82 if np.isfinite(rng) and .15<=rng<=MAX_OPENING_RANGE_PCT else 40
+    acceptance=bool(np.isfinite(vw) and last*sign>vw*sign and po*sign>0); rejection=bool(np.isfinite(vw) and last*sign<vw*sign and po*sign<-.20)
+    breakout=bool((last>=hi*.999) if direction=="LONG" else (last<=lo*1.001)); breakdown=bool((last<=lo*1.001) if direction=="LONG" else (last>=hi*.999))
+    score=gapq*.12+secq*.10+vq*.20+mq*.18+volq*.10+rangeq*.05+(100 if acceptance else 35)*.15+(100 if breakout else 40)*.10
+    if rejection: score-=25
+    if direction=="LONG" and gap>MAX_GAP_PCT and po<0: score-=15
+    if direction=="SHORT" and gap<-MAX_GAP_PCT and po>0: score-=15
+    if np.isfinite(rng) and rng>MAX_OPENING_RANGE_PCT: score-=10
+    vrg=(vix or {}).get("regime"); score-=5 if vrg=="HIGH_VOLATILITY" else 2 if vrg=="CAUTION" else 0; score=clip(score)
+    if rejection: status,reason="REJECTED","Opening behaviour contradicted the overnight thesis"
+    elif score>=MORNING_FINAL_MIN_SCORE and acceptance and (breakout or np.isfinite(cvw)): status,reason="CONFIRMED","Price acceptance + VWAP + directional momentum aligned"
+    elif score>=MORNING_WATCH_SCORE: status,reason="WATCH","Partial confirmation; below final threshold"
+    else: status,reason="REJECTED","Insufficient morning confirmation"
+    return Confirmation(symbol,direction,prevscore,round(score,2),status,reason,round(previous_close,2),round(op,2),round(gap,3),round(safe_float(nifty_open_gap),3),round(safe_float(sector_gap),3),round(hi,2),round(lo,2),round(rng,3),round(vw,2),round(cvw,3),round(vr,3),round(rsn,3),round(rss,3),acceptance,rejection,breakout,breakdown)
+
+
+def run_morning_confirmation() -> Dict[str,Any]:
+    today=now_ist(); frozen=_load_frozen_day_ahead_snapshot(today.strftime("%Y-%m-%d")); latest=frozen or load_latest(); candidates=[c for c in latest.get("day_ahead",{}).get("top15",[]) if _nd_is_equity(c.get("symbol"))]
+    if not candidates:
+        return {"status":"NO_CANDIDATES","generated_at":today.isoformat(),"final":[],"confirmations":[]}
+    nifty=market_gap(NIFTY_TICKER); vix=latest.get("macro_regime",{}); opening={}; prev={}
+    start=datetime(today.year,today.month,today.day,9,15,tzinfo=IST); end=start+timedelta(minutes=5)
+    with ThreadPoolExecutor(max_workers=min(8,len(candidates))) as pool:
+        jobs={pool.submit(_nd_live_bars,c["symbol"],start,end):c["symbol"] for c in candidates}
+        for f in as_completed(jobs):
+            try: opening[jobs[f]]=_nd_opening_slice(f.result())
+            except Exception: opening[jobs[f]]=pd.DataFrame()
+    with ThreadPoolExecutor(max_workers=min(8,len(candidates))) as pool:
+        jobs={pool.submit(_nd_previous_close,c["symbol"]):c["symbol"] for c in candidates}
+        for f in as_completed(jobs):
+            try: prev[jobs[f]]=f.result()
+            except Exception: prev[jobs[f]]=np.nan
+    confirmations=[]
+    for c in candidates:
+        sector=str(c.get("sector_bucket","UNKNOWN")); peer_gaps=[]
+        for p in candidates:
+            if p is c or p.get("sector_bucket")!=sector: continue
+            b=opening.get(p["symbol"]); pc=prev.get(p["symbol"])
+            if b is not None and not b.empty and np.isfinite(pc) and pc>0:
+                oo=safe_float(b["Open"].iloc[0]);
+                if np.isfinite(oo): peer_gaps.append((oo/pc-1)*100)
+        sg=float(np.median(peer_gaps)) if peer_gaps else np.nan
+        item=asdict(confirm_candidate(c,nifty,opening.get(c["symbol"],pd.DataFrame()),prev.get(c["symbol"],np.nan),sg,vix)); item["sector_bucket"]=sector; confirmations.append(item)
+    confirmed=[x for x in confirmations if x["status"]=="CONFIRMED" and safe_float(x["confirmation_score"])>=MORNING_FINAL_MIN_SCORE and (x["acceptance"] or x["breakout"])]
+    confirmed.sort(key=lambda x:(safe_float(x["confirmation_score"]),safe_float(x["previous_day_score"])),reverse=True)
+    final=[]; used=set()
+    for x in confirmed:
+        sec=x.get("sector_bucket")
+        if sec in used: continue
+        final.append(x); used.add(sec)
+        if len(final)>=2: break
+    if len(final)<2:
+        for x in confirmed:
+            if x not in final: final.append(x)
+            if len(final)>=2: break
+    status="FINAL_2" if len(final)>=2 else "FINAL_1" if len(final)==1 else "NO_TRADE"
+    result={"status":status,"generated_at":now_ist().isoformat(),"nifty_gap_pct":nifty,"vix_regime":vix,"final":final,"confirmations":confirmations}
+    latest["morning_confirmation"]=result
+    _atomic_write_text(CACHE_JSON,json.dumps(latest,ensure_ascii=False,indent=2,default=str))
+    return result
+
+# Authoritative public API. Do not use earlier monkey-patched versions.
+def _nd_today_snapshot(self):
+    return _load_frozen_day_ahead_snapshot(now_ist().strftime("%Y-%m-%d"))
+
+def _nd_latest(self):
+    return load_latest()
+
+def _nd_run_day_ahead(self):
+    return build_day_ahead_watchlist()
+
+def _nd_run_morning(self):
+    return run_morning_confirmation()
+
+def _nd_live_top15_public(self):
+    snap=_load_frozen_day_ahead_snapshot(now_ist().strftime("%Y-%m-%d"))
+    return [x for x in snap.get("day_ahead",{}).get("top15",[]) if _nd_is_equity(x.get("symbol"))]
+
+def _nd_live_top5_public(self):
+    return self.live_top15()
+
+def _nd_run_if_due_public(self):
+    now=now_ist()
+    if now.hour>DAY_AHEAD_RUN_HOUR or (now.hour==DAY_AHEAD_RUN_HOUR and now.minute>=DAY_AHEAD_RUN_MINUTE):
+        snap=_load_frozen_day_ahead_snapshot(now.strftime("%Y-%m-%d"))
+        return snap if snap else build_day_ahead_watchlist()
+    return None
+
+NextDayAlphaEngine.latest=_nd_latest
+NextDayAlphaEngine.today_snapshot=_nd_today_snapshot
+NextDayAlphaEngine.run_day_ahead=_nd_run_day_ahead
+NextDayAlphaEngine.run_morning=_nd_run_morning
+NextDayAlphaEngine.live_top15=_nd_live_top15_public
+NextDayAlphaEngine.live_top5=_nd_live_top5_public
+NextDayAlphaEngine.run_if_due=_nd_run_if_due_public
+
+# No direct Kotak/yFinance authentication from this engine.
+def get_kotak_adapter() -> Optional[Any]:
+    return None
+
+def capture_kotak_day_ahead_snapshot(symbols: List[str]) -> Dict[str, Dict[str, Any]]:
+    out={}
+    for s in symbols:
+        clean=_nd_canonical(s)
+        if not _nd_is_equity(clean): continue
+        rows=_nd_query_rows(source="kotak_live",interval=None,symbols=[clean],since=now_ist()-timedelta(minutes=10),until=now_ist(),limit=500)
+        if rows:
+            raw=_nd_raw(rows[-1]); ts=_nd_ts(rows[-1]); ltp=_nd_num(raw,"ltp","lp","last_price","lastPrice","c")
+            if np.isfinite(ltp): out[clean]={"symbol":clean,"ltp":ltp,"timestamp":ts.isoformat() if ts is not None else None,"raw_source":"KOTAK_NEO_VIA_SUPABASE_RAW_BUS"}
+    return out
+
+def capture_kotak_opening_window(symbols: List[str]) -> None:
+    return None
+
+
+def supabase_raw_contract_status() -> Dict[str, Any]:
+    return {"enabled":bool(SUPABASE_URL and SUPABASE_KEY),"table":SUPABASE_RAW_TABLE,"historical_source":"yfinance_history","live_source":"kotak_live","historical_contract":"raw.interval + raw.event_timestamp/raw.timestamp","architecture":"Kotak Producer + yFinance Producer -> Supabase RAW BUS -> Next-Day Alpha","direct_kotak_login":False,"direct_yfinance_http":False,"option_selection":False}
+
+
+def raw_data_health() -> Dict[str, Any]:
+    """Transport-only health check for the shared RAW BUS.
+
+    It deliberately reports availability and sample timestamps, never a signal.
+    """
+    if not SUPABASE_URL or not SUPABASE_KEY:
+        return {"status":"NOT_CONFIGURED","historical_rows":0,"live_equity_rows":0,"derivatives_ignored":0}
+    historical = _nd_query_rows(source="yfinance_history", interval="1d", symbols=None, since=now_ist()-timedelta(days=8), until=now_ist(), limit=2000)
+    live = _nd_query_rows(source="kotak_live", interval=None, symbols=None, since=now_ist()-timedelta(minutes=10), until=now_ist(), limit=5000)
+    equity_live = [r for r in live if _nd_is_equity(_nd_symbol(r))]
+    ignored = max(0, len(live)-len(equity_live))
+    return {"status":"CONNECTED" if historical or equity_live else "NO_RECENT_DATA","historical_rows":len(historical),"live_equity_rows":len(equity_live),"derivatives_ignored":ignored}
+
+
+def validate_config() -> Dict[str,Any]:
+    errors=[]
+    if not SUPABASE_URL: errors.append("SUPABASE_URL is missing")
+    if not SUPABASE_KEY: errors.append("SUPABASE_KEY/SUPABASE_ANON_KEY is missing")
+    if errors: raise RuntimeError("Configuration validation failed: "+" | ".join(errors))
+    return {"ok":True,"errors":[]}
