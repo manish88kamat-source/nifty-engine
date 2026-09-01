@@ -20,9 +20,9 @@ IST_OFFSET = timedelta(hours=5, minutes=30)
 ROOT = Path(__file__).resolve().parent
 RAW_TABLE = os.getenv("SUPABASE_RAW_TABLE", "raw_observations")
 
-st.set_page_config(page_title="Next-Day Alpha", page_icon="ðŸ“ˆ", layout="wide")
+st.set_page_config(page_title="Next-Day Alpha", page_icon="", layout="wide")
 st.title("NEXT-DAY INTRADAY STOCK ALPHA")
-st.caption("Standalone â€¢ Supabase RAW BUS consumer â€¢ No direct Kotak login â€¢ No TOTP")
+st.caption("Standalone - Supabase RAW BUS consumer - No direct Kotak login - No TOTP")
 
 
 def secret(name: str, default: str = "") -> str:
@@ -67,7 +67,28 @@ def supabase_health() -> Dict[str, Any]:
         return {"configured": True, "reachable": False, "error": str(exc)}
 
 
-def raw_rows(symbol: Optional[str] = None, since_minutes: int = 15, limit: int = 1000) -> List[Dict[str, Any]]:
+def _canonical_equity_symbol(value: Any) -> str:
+    s = str(value or "").upper().strip()
+    for suffix in (".NS", "-EQ", "_EQ"):
+        if s.endswith(suffix):
+            s = s[:-len(suffix)]
+    return s
+
+
+def _is_equity_symbol(value: Any) -> bool:
+    s = _canonical_equity_symbol(value)
+    if not s or s in {"NIFTY_SPOT", "NIFTY 50", "NIFTY50", "^NSEI", "INDIAVIX", "^INDIAVIX"}:
+        return False
+    if s.endswith(("CE", "PE", "FUT")) or "FUT" in s:
+        return False
+    if any(x in s for x in ("BANKNIFTY", "FINNIFTY", "MIDCPNIFTY")):
+        return False
+    if __import__("re").search(r"\d{2}[A-Z]{3}\d+", s) or __import__("re").search(r"\d{4,}", s):
+        return False
+    return bool(__import__("re").fullmatch(r"[A-Z][A-Z0-9&._-]*", s))
+
+
+def raw_rows(symbol: Optional[str] = None, since_minutes: int = 15, limit: int = 1000, source: Optional[str] = None) -> List[Dict[str, Any]]:
     if not SUPABASE_URL or not SUPABASE_KEY:
         return []
     params: Dict[str, str] = {
@@ -75,10 +96,16 @@ def raw_rows(symbol: Optional[str] = None, since_minutes: int = 15, limit: int =
         "order": "observation_timestamp.desc",
         "limit": str(limit),
     }
+    if source:
+        params["source"] = f"eq.{source}"
     if symbol:
-        params["symbol"] = f"eq.{symbol.replace('.NS', '').upper()}"
-    start = datetime.utcnow() - timedelta(minutes=since_minutes)
-    params["observation_timestamp"] = f"gte.{start.isoformat()}Z"
+        clean = _canonical_equity_symbol(symbol)
+        if not _is_equity_symbol(clean):
+            return []
+        params["symbol"] = f"eq.{clean}"
+    from datetime import timezone
+    start = datetime.now(timezone.utc) - timedelta(minutes=since_minutes)
+    params["observation_timestamp"] = f"gte.{start.isoformat()}"
     try:
         r = requests.get(
             f"{SUPABASE_URL}/rest/v1/{RAW_TABLE}",
@@ -119,39 +146,36 @@ def canonical_display_symbol(row: Dict[str, Any]) -> str:
         or raw.get("tradingSymbol")
         or raw.get("symbol")
     )
-    return str(value).strip() if value not in (None, "") else "â€”"
+    return str(value).strip() if value not in (None, "") else "-"
 
 
 def live_bus_health() -> Dict[str, Any]:
-    """RAW BUS health only; latest instrument is never a stock candidate."""
-    rows = raw_rows(since_minutes=10, limit=200)
-    kotak = []
+    """Show only the latest Kotak LIVE equity quote; derivatives are ignored."""
+    rows = raw_rows(since_minutes=10, limit=500, source="kotak_live")
+    equity_rows = []
     for row in rows:
-        source = str(row.get("source", "")).lower()
-        if "kotak" in source or "neo" in source:
-            kotak.append(row)
+        raw = payload_of(row)
+        symbol = row.get("symbol") or raw.get("display_symbol") or raw.get("pTrdSymbol") or raw.get("tradingSymbol")
+        if not _is_equity_symbol(symbol):
+            continue
+        equity_rows.append(row)
 
-    if not kotak:
+    if not equity_rows:
         return {
-            "connected": False,
-            "quote_received": False,
-            "last_quote_at": None,
-            "latest_raw_instrument": None,
-            "latest_raw_ltp": None,
-            "latest_raw_source": None,
-            "rows": 0,
+            "connected": False, "quote_received": False, "last_quote_at": None,
+            "latest_raw_instrument": None, "latest_raw_ltp": None,
+            "latest_raw_source": None, "rows": 0, "derivatives_ignored": len(rows),
         }
 
-    latest = kotak[0]
+    latest = equity_rows[0]
     raw = payload_of(latest)
     return {
-        "connected": True,
-        "quote_received": True,
+        "connected": True, "quote_received": True,
         "last_quote_at": latest.get("observation_timestamp") or raw.get("timestamp") or raw.get("received_at"),
-        "latest_raw_instrument": canonical_display_symbol(latest),
+        "latest_raw_instrument": _canonical_equity_symbol(latest.get("symbol") or raw.get("display_symbol") or raw.get("pTrdSymbol") or raw.get("tradingSymbol")),
         "latest_raw_ltp": raw_value(raw, "ltp", "lp", "last_price", "lastPrice", "c", "close"),
         "latest_raw_source": latest.get("source") or raw.get("raw_source"),
-        "rows": len(kotak),
+        "rows": len(equity_rows), "derivatives_ignored": len(rows) - len(equity_rows),
     }
 
 
@@ -162,7 +186,7 @@ def get_engine() -> NextDayAlphaEngine:
 
 engine = get_engine()
 
-if st.button("ðŸ”„ Refresh Dashboard", use_container_width=True):
+if st.button("Refresh Dashboard", use_container_width=True):
     st.rerun()
 
 # UI checks the common RAW BUS only.
@@ -172,9 +196,9 @@ live = live_bus_health()
 h1, h2, h3, h4 = st.columns(4)
 h1.metric("RAW BUS", "READY" if sb.get("reachable") else "OFFLINE")
 h2.metric("LIVE RAW", "RECEIVED" if live.get("quote_received") else "NOT RECEIVED")
-h3.metric("LATEST RAW INSTRUMENT", live.get("latest_raw_instrument") or "â€”")
+h3.metric("LATEST RAW INSTRUMENT", live.get("latest_raw_instrument") or "-")
 ltp = live.get("latest_raw_ltp")
-h4.metric("RAW LTP", f"{ltp:.2f}" if isinstance(ltp, (int, float)) else "â€”")
+h4.metric("RAW LTP", f"{ltp:.2f}" if isinstance(ltp, (int, float)) else "-")
 
 st.subheader("DATA SOURCE HEALTH")
 c1, c2 = st.columns(2)
@@ -190,25 +214,46 @@ with c1:
         st.caption("Add SUPABASE_URL and SUPABASE_KEY to Streamlit Secrets.")
 with c2:
     if live.get("quote_received"):
-        st.success("KOTAK LIVE â†’ RAW BUS: RECEIVED")
+        st.success("KOTAK LIVE -> RAW BUS: RECEIVED")
         st.caption(f"Last raw quote: {live.get('last_quote_at')}")
-        st.caption(f"Latest RAW instrument: {live.get('latest_raw_instrument') or 'â€”'}")
+        st.caption(f"Latest RAW instrument: {live.get('latest_raw_instrument') or '-'}")
     else:
-        st.warning("KOTAK LIVE â†’ RAW BUS: NO RECENT QUOTE")
+        st.warning("KOTAK LIVE -> RAW BUS: NO RECENT QUOTE")
         st.caption("The separate Kotak Raw Producer must be running/connected.")
 
 with st.expander("RAW BUS LIVE HEALTH", expanded=False):
     st.write(live)
 
 try:
-    result = engine.latest()
+    result = engine.today_snapshot()
 except Exception as exc:
     result = {}
     st.error(f"Engine result read failed: {exc}")
 
 if not result:
-    st.info("No saved day-ahead snapshot yet. The scheduled engine is armed for the next run.")
-    st.caption("Historical source: Supabase RAW BUS â€¢ Live/opening source: Supabase RAW BUS fed by Kotak Producer")
+    status = {}
+    try:
+        from next_day_alpha_engine import day_ahead_status
+        status = day_ahead_status()
+    except Exception:
+        pass
+    if status.get("status") == "FAILED":
+        st.error("DAY-AHEAD SNAPSHOT FAILED FOR TODAY")
+        if status.get("error"):
+            st.code(str(status["error"]))
+        st.caption("The scan must complete successfully before a frozen TOP 15 is published.")
+    else:
+        st.warning("NO FROZEN DAY-AHEAD SNAPSHOT FOR TODAY")
+        st.caption("The scheduled day-ahead scan has not completed successfully yet.")
+    st.caption("Historical source: Supabase RAW BUS | Live/opening source: Supabase RAW BUS fed by Kotak Producer")
+    if st.button("Run Day-Ahead Scan Now", type="primary", use_container_width=True):
+        try:
+            with st.spinner("Running day-ahead scan from Supabase RAW BUS..."):
+                engine.run_day_ahead()
+            st.success("Day-ahead scan completed and snapshot frozen.")
+            st.rerun()
+        except Exception as exc:
+            st.error(f"Day-ahead scan failed: {exc}")
     st.stop()
 
 day = result.get("day_ahead", {})
@@ -229,7 +274,7 @@ c3.metric("Final", len(final))
 c4.metric("Engine", result.get("version", "UNKNOWN"))
 
 st.subheader("FROZEN TOP 15 OVERNIGHT SHORTLIST")
-st.caption("Saved engine snapshot only. Refreshing this dashboard does not regenerate or replace the shortlist.")
+st.caption("Today's saved engine snapshot only. Refreshing this dashboard does not regenerate or replace the shortlist.")
 
 if top15:
     rows = []
@@ -256,7 +301,7 @@ if top15:
 else:
     st.info("NO QUALIFIED CANDIDATE")
 
-st.subheader("THESIS â†’ RISK / SETUP")
+st.subheader("THESIS -> RISK / SETUP")
 if top15:
     detail = []
     for x in top15:
@@ -275,7 +320,7 @@ if top15:
         })
     st.dataframe(pd.DataFrame(detail), use_container_width=True, hide_index=True)
 
-st.subheader("09:15â€“09:20 MORNING CONFIRMATION")
+st.subheader("09:15-09:20 MORNING CONFIRMATION")
 if confirmations:
     st.dataframe(pd.DataFrame(confirmations), use_container_width=True, hide_index=True)
 else:
@@ -285,7 +330,7 @@ if final:
     st.success("FINAL TRADE CANDIDATES")
     st.dataframe(pd.DataFrame(final), use_container_width=True, hide_index=True)
 else:
-    st.info("NO TRADE â€” engine never forces two trades.")
+    st.info("NO TRADE - engine never forces two trades.")
 
 with st.expander("ENGINE / DATA CONTRACT", expanded=False):
     st.write({
